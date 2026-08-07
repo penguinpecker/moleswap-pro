@@ -1,0 +1,17 @@
+{
+  "name": "@moleswap/router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Off-chain routing engine for the MoleSwap aggregator on Robinhood Chain",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.4"
+  }
+}

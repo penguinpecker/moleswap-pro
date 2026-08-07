@@ -54,3 +54,6 @@ frontend/.next/
 frontend/.env
 frontend/.env.local
 frontend/tsconfig.tsbuildinfo
+
+# router: deps only; the fixture JSON IS committed on purpose — it is ground truth from the live chain
+router/node_modules/
