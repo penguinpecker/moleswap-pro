@@ -33,6 +33,20 @@ export interface TickData {
   readonly liquidityNet: bigint;
 }
 
+/** How a pool is called on-chain. The swap MATH is identical for both — concentrated liquidity with a
+ *  fixed fee — so quoting does not branch on this; only execution (the calldata builder) does. */
+export type Venue = "PancakeV3" | "UniswapV4";
+
+/** The v4 pool key. A v4 pool is identified by this tuple, not by an address, so a route through a v4
+ *  pool must carry it for execution. Ignored for PancakeV3 pools. */
+export interface PoolKeyState {
+  readonly currency0: string;
+  readonly currency1: string;
+  readonly fee: number;
+  readonly tickSpacing: number;
+  readonly hooks: string;
+}
+
 export interface PoolState {
   readonly address: string;
   readonly token0: string;
@@ -45,6 +59,10 @@ export interface PoolState {
   readonly liquidity: bigint;
   /** Initialised ticks, ASCENDING by index. May be a window around the current tick. */
   readonly ticks: readonly TickData[];
+  /** Defaults to PancakeV3 when omitted, so existing v3 callers and fixtures are unaffected. */
+  readonly venue?: Venue;
+  /** Required for a UniswapV4 pool; the execution layer needs it to build the hop. */
+  readonly poolKey?: PoolKeyState;
 }
 
 export interface QuoteResult {
