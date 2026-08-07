@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# LOCAL-ONLY. Never push.
+# ---------------------------------------------------------------------------
+# learnings.txt is the internal design + security dossier. It contains the
+# unpublished architecture, the open security questions, and the list of things
+# that are currently wrong or undecided. It must stay on this machine.
+learnings.txt
+HANDOFF.md
+records.txt
+notes/
+.research/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+keystore/
+
+# deps + build
+node_modules/
+.next/
+out/
+dist/
+build/
+artifacts/
+cache/
+cache_forge/
+coverage/
+typechain-types/
+broadcast/*/31337/
+broadcast/**/dry-run/
+
+# backtester: the CODE is worth keeping, the environment and the cached market data are not.
+# .venv is ~47MB of wheels; data/ is a regenerable Binance OHLCV cache (`python fetch_data.py`);
+# results/ is regenerable from it (`python summary.py`).
+backtest/.venv/
+backtest/data/
+backtest/results/
+backtest/__pycache__/
+
+# misc
+.DS_Store
+*.log
+.vercel
+.turbo
+tsconfig.tsbuildinfo
+
+# Frontend cloned from github.com/penguinpecker/moleswap on 2026-08-05 and DETACHED
+# (.git removed) so nothing here can ever push back to the original repo.
+frontend/node_modules/
+frontend/.next/
+frontend/.env
+frontend/.env.local
+frontend/tsconfig.tsbuildinfo

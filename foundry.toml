@@ -1,0 +1,48 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.26"
+evm_version = "cancun"        # v4 requires EIP-1153 TSTORE/TLOAD. Verified live on RH 4663 and 46630.
+via_ir = true
+optimizer = true
+# Matches v4-core upstream. NOT a tuning knob: at 800 (and 1000), solc 0.8.26 + via_ir cannot compile
+# v4-core's PoolManager at all — "Yul exception: Variable memPtr_1 is 1 too deep in the stack" in
+# Pool.swap. Every test importing Deployers silently failed to compile, so the custody core had zero
+# integration coverage against real Uniswap v4 until this was found. Changing this changes deployed
+# bytecode and gas; re-measure after touching it.
+optimizer_runs = 44444444
+ffi = false
+
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "@uniswap/v4-core/=lib/v4-core/",
+    "v4-core/=lib/v4-core/src/",
+    "v4-periphery/=lib/v4-periphery/src/",
+    "@openzeppelin/=lib/v4-core/lib/openzeppelin-contracts/",
+    "solmate/=lib/v4-core/lib/solmate/",
+    "permit2/=lib/v4-periphery/lib/permit2/",
+]
+
+[profile.default.fuzz]
+runs = 1024
+
+[profile.deep.fuzz]
+runs = 50000
+
+[profile.default.invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+shrink_run_limit = 5000
+
+[profile.deep.invariant]
+runs = 5000
+depth = 256
+
+[rpc_endpoints]
+rh_mainnet = "https://rpc.mainnet.chain.robinhood.com"
+rh_testnet = "https://rpc.testnet.chain.robinhood.com"
+
+[etherscan]
+rh_mainnet = { key = "any", url = "https://robinhoodchain.blockscout.com/api", chain = 4663 }

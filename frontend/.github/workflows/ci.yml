@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm run test
+        env:
+          # Dummy values for build - not used at runtime
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+
+      # Lint temporarily disabled due to Next.js 15 + ESLint 9 compatibility issues
+      # TODO: Fix when next lint is updated or migrate to eslint CLI
+      # - name: Run linter
+      #   run: npm run lint
+
+      - name: Build
+        run: npm run build
+        env:
+          # Dummy values for build - not used at runtime
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+
+  # Block merge if tests or build fail
+  required-checks:
+    name: All CI Checks
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "❌ CI failed! Blocking merge."
+            exit 1
+          fi
+          echo "✅ Tests and build passed!"
