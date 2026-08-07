@@ -1,0 +1,58 @@
+MIT License
+
+Copyright (c) 2026 penguinpecker
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+SCOPE — WHAT THIS LICENSE DOES AND DOES NOT COVER
+-------------------------------------------------------------------------------
+
+The MIT grant above applies to the code authored in this repository, which
+declares `SPDX-License-Identifier: MIT` in every file:
+
+    src/            the contracts (MoleHook, MolePositions, MoleQueue,
+                    MoleFeeCollector, ZapLogic, config)
+    test/           the test and invariant suites
+    script/         the deployment and operations scripts
+    frontend/lib/mole/  and its tests
+    backtest/       the strategy backtester
+
+It does NOT cover the third-party dependencies vendored under `lib/`, which
+are redistributed under their own licenses and remain subject to them:
+
+    lib/v4-core/         Uniswap V4 Core — BUSL-1.1, (c) 2023 Universal
+                         Navigation Inc. License text is retained at
+                         lib/v4-core/licenses/BUSL_LICENSE, as that license
+                         requires. Change Date: the earlier of 2027-06-15 or a
+                         date published at v4-core-license-date.uniswap.eth,
+                         after which the Change License (MIT) applies.
+    lib/v4-periphery/    Uniswap V4 Periphery — see its own LICENSE.
+    lib/forge-std/       MIT / Apache-2.0.
+
+BUSL-1.1 expressly grants the right to copy, modify, create derivative works
+and redistribute the licensed work; what it restricts is PRODUCTION USE, which
+is governed by the Additional Use Grant published at
+v4-core-license-grants.uniswap.eth. Anyone deploying or operating this software
+is responsible for confirming their own use complies with those terms. Nothing
+in this file grants rights to the vendored work beyond what its own license
+gives, and the MIT grant above must not be read as doing so.
+
+Parts of `frontend/` outside `frontend/lib/mole/` originate from
+github.com/penguinpecker/moleswap and carry that project's history.
