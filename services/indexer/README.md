@@ -15,6 +15,7 @@ only safety guarantee, so a stale registry can at worst miss a route, never mis-
 |---|---|
 | `RH_RPC_URL` | Robinhood Chain RPC (default: the public endpoint) |
 | `SUPABASE_URL` | `https://pgraqmnsabnatyzmlycx.supabase.co` |
-| `SUPABASE_SERVICE_ROLE_KEY` | **secret** — write access to `mp_pools`; never commit it |
+| `SUPABASE_ANON_KEY` | the publishable/anon key (public) |
+| `INDEXER_SECRET` | **secret** — gates `mp_upsert_pools`; set in Railway env only |
 | `REFRESH_MINUTES` | refresh cadence (default 10) |
 | `PORT` | health-check port (Railway injects this) |

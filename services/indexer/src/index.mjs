@@ -13,7 +13,12 @@ import { createClient } from "@supabase/supabase-js";
 
 const RPC = process.env.RH_RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+// The indexer writes through a secret-gated SECURITY DEFINER function with the ANON key, so a full
+// service-role key never lives in this service. The secret only gates pool-REGISTRY writes; the
+// executor's on-chain minAmountOut remains the sole fund-safety guarantee, so even a leaked secret can
+// at worst churn the registry, never mis-settle a swap.
+const ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const WRITE_SECRET = process.env.INDEXER_SECRET;
 const REFRESH_MS = (Number(process.env.REFRESH_MINUTES) || 10) * 60_000;
 const PORT = Number(process.env.PORT) || 8080;
 
@@ -21,11 +26,11 @@ const PANCAKE_FACTORY = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865";
 // keccak256("PoolCreated(address,address,uint24,int24,address)")
 const POOL_CREATED_TOPIC = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118";
 
-if (!SUPABASE_URL || !SERVICE_KEY) {
-  console.error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required");
+if (!SUPABASE_URL || !ANON_KEY || !WRITE_SECRET) {
+  console.error("SUPABASE_URL, SUPABASE_ANON_KEY and INDEXER_SECRET are required");
   process.exit(1);
 }
-const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
+const supabase = createClient(SUPABASE_URL, ANON_KEY, { auth: { persistSession: false } });
 
 let lastRun = null;
 let lastCounts = { discovered: 0, active: 0 };
@@ -99,10 +104,10 @@ async function refresh() {
     active: p.liquidity > 0n,
   }));
 
-  // Upsert in batches; on conflict update active/fee/tick_spacing.
+  // Upsert in batches through the secret-gated RPC (bypasses RLS for this one controlled write only).
   for (let i = 0; i < rows.length; i += 200) {
     const batch = rows.slice(i, i + 200);
-    const { error } = await supabase.from("mp_pools").upsert(batch, { onConflict: "id" });
+    const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: batch });
     if (error) throw new Error(`upsert: ${error.message}`);
   }
 
