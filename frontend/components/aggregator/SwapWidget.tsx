@@ -175,26 +175,10 @@ export default function SwapWidget() {
         value: out.value,
         chainId: RH_CHAIN_ID,
       });
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-      // Log the swap for analytics (RLS allows anon insert; never read back).
-      try {
-        await createClient()
-          .from("mp_swaps")
-          .insert({
-            tx_hash: hash,
-            wallet: address,
-            token_in: tokenIn,
-            token_out: tokenOut,
-            amount_in: amountIn.toString(),
-            amount_out: out.amountOut.toString(),
-            min_out: out.minOut.toString(),
-            route: out.via,
-            block_number: Number(receipt.blockNumber),
-          });
-      } catch {
-        /* analytics is best-effort */
-      }
+      await publicClient.waitForTransactionReceipt({ hash });
+      // Swap analytics are sourced from MoleRouter's on-chain `Swapped` event by the indexer, not from a
+      // client insert — a client-written analytics row is both unverifiable and (correctly) blocked by RLS,
+      // so the UI does not attempt one.
       setStatus(`Swapped — ${hash.slice(0, 10)}…`);
     } catch (e) {
       setStatus(e instanceof Error ? e.message.split("\n")[0] : "Swap failed");
