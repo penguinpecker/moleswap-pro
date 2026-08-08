@@ -34,12 +34,24 @@ export class FetchTransport implements RpcTransport {
       params: [{ to: c.to, data: c.data }, "latest"],
     }));
 
-    const res = await fetch(this.url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
+    // Retry a rate-limited or transient response a couple of times with backoff. The public RPC will 429
+    // under a burst; a small retry keeps a quote from failing on a momentary limit rather than a real
+    // error. The caller (fetchRelevantPoolStates) also bounds concurrency so this rarely triggers.
+    let res: Response | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      res = await fetch(this.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) break;
+      if (res.status === 429 || res.status >= 500) {
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+        continue;
+      }
+      break;
+    }
+    if (!res || !res.ok) throw new Error(`RPC HTTP ${res?.status ?? "no-response"}`);
 
     const json = (await res.json()) as JsonRpcResponse | JsonRpcResponse[];
     // A batch of one may come back as a bare object on some nodes; normalise.
