@@ -3,10 +3,9 @@
 /**
  * wagmi.ts — the wallet + chain config for MoleSwap Pro. Robinhood Chain only.
  *
- * This is a clean single-chain wallet config — no cross-chain universal-wallet SDK, no
- * Solana-origin handling, no cross-chain Relay. The aggregator lives on one chain, so the config is one
- * chain and the standard EVM connectors — injected (MetaMask/Rabby/etc.) and, when a project id is set,
- * WalletConnect.
+ * A clean single-chain wallet config: one chain and the standard EVM connectors — injected
+ * (MetaMask/Rabby/etc.) and, when a project id is set, WalletConnect. Nothing cross-chain, no bespoke
+ * universal-wallet layer.
  */
 
 import { createConfig, http } from "wagmi";

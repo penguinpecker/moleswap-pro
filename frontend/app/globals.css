@@ -27,9 +27,6 @@
   --peach-400: #feca61;
   --peach-500: #feae34;
 
-  --leaderboard: #1b1018;
-  --leaderboard-text: #d08d67;
-  --leaderboard-rank: #f69d25;
   --wallet-address-profile-bg: #ba6d4f;
 
   --hover-text: #281a1286;
@@ -127,10 +124,6 @@
   --color-peach-300: var(--peach-300);
   --color-peach-400: var(--peach-400);
   --color-peach-500: var(--peach-500);
-  /* ------------LEADERBOARD----------- */
-  --color-leaderboard: var(--leaderboard);
-  --color-leaderboard-text: var(--leaderboard-text);
-  --color-leaderboard-rank: var(--leaderboard-rank);
   --color-wallet-address-profile-bg: var(--wallet-address-profile-bg);
   --color-hover-text: var(--hover-text);
   --color-selected-text: var(--selected-text);
