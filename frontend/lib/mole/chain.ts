@@ -60,6 +60,18 @@ export const MOLE_ADDRESSES = {
   moleQueue: "0x3dCb2494cBC9604f270177E38160ae4CA76CDEbd" as Address,
   /** MoleFeeCollector — redeems the protocol's ERC-6909 fee claims into real tokens. */
   moleFeeCollector: "0x4771865614D194Aa8b7aAB9d91e857686c37E584" as Address,
+  /**
+   * MoleRouter — the aggregator's on-chain executor (immutable, no admin). Deployed 2026-08-08.
+   * Users grant it a standing ERC-20 approval; it speaks only two verbs (v3 pool swap, v4 PoolManager
+   * swap) and holds nothing between transactions, so the approval cannot be escalated.
+   */
+  moleRouter: "0xaB6997d13F72823964B7Ab7CbB2ae5e8224a82c5" as Address,
+} as const;
+
+/** The PancakeSwap V3 factory + TickLens on Robinhood Chain — the aggregator's primary liquidity venue. */
+export const PANCAKE_V3 = {
+  factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865" as Address,
+  tickLens: "0x9a489505a00cE272eAa5e07Dba6491314CaE3796" as Address,
 } as const;
 
 /**

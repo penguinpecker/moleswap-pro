@@ -32,9 +32,21 @@ export const pushWalletDonut = defineChain({
 // announce themselves. The @pushchain/ui-kit's internal MetaMaskSDK listens
 // for that announcement and then reports MetaMask as installed in its modal.
 // `ssr: true` is required for Next.js App Router.
+// Robinhood Chain mainnet — the chain the MoleSwap Pro aggregator runs on. Added alongside Push so the
+// existing game screens keep working while /swap targets RH. viem's chain object doubles as the wagmi
+// chain, so no separate definition is needed.
+export const robinhoodChain = defineChain({
+  id: 4663,
+  name: "Robinhood Chain",
+  nativeCurrency: { decimals: 18, name: "Ether", symbol: "ETH" },
+  rpcUrls: { default: { http: ["https://rpc.mainnet.chain.robinhood.com"] } },
+  blockExplorers: { default: { name: "Blockscout", url: "https://robinhoodchain.blockscout.com" } },
+});
+
 export const wagmiConfig = createConfig({
-  chains: [pushWalletDonut],
+  chains: [robinhoodChain, pushWalletDonut],
   transports: {
+    [robinhoodChain.id]: http(),
     [pushWalletDonut.id]: http(),
   },
   ssr: true,
