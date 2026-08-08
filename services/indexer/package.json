@@ -3,12 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Persistent pool indexer for the MoleSwap aggregator — discovers PancakeSwap V3 pools on Robinhood Chain and keeps the Supabase registry fresh.",
+  "description": "Persistent pool indexer for the MoleSwap aggregator \u2014 discovers PancakeSwap V3 pools on Robinhood Chain and keeps the Supabase registry fresh.",
   "scripts": {
     "start": "node src/index.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=22"
+  }
 }
