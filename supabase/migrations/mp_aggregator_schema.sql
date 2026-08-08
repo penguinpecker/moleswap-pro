@@ -50,3 +50,7 @@ begin
 end; $$;
 revoke all on function public.mp_upsert_pools(text,jsonb) from public;
 grant execute on function public.mp_upsert_pools(text,jsonb) to anon;
+
+-- 2026-08-08 security-audit fix: mp_swaps must not be anon-writable (was `with check (true)` = spammable).
+-- Analytics should come from the on-chain Swapped event, not client claims.
+drop policy if exists mp_swaps_insert on public.mp_swaps;
