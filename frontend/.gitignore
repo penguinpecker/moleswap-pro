@@ -37,3 +37,5 @@ bun.lock
 cache/
 artifacts/
 out/
+.vercel
+.env*

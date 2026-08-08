@@ -1,18 +1,15 @@
 import type React from "react";
 import type { Metadata } from "next";
-import Script from "next/script";
 import "./globals.css";
-import { ConditionalFooter } from "@/components/ConditionalFooter";
-import { PushChainWalletProvider } from "@/lib/pushchain/provider";
+import { Providers } from "@/components/Providers";
 
-const GA_ID = "G-8968G1S4SC";
-
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://www.moleswap.com";
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://moleswap-pro.vercel.app";
 
 export const metadata: Metadata = {
-  title: "MoleSwap - Dex Aggregator & AMM Protocol",
+  metadataBase: new URL(siteUrl),
+  title: "MoleSwap Pro — DEX Aggregator on Robinhood Chain",
   description:
-    "Dex Aggregator & AMM Protocol on PushChain. Swap tokens, earn XP, climb the leaderboard.",
+    "Swap any token at the best price on Robinhood Chain. MoleSwap Pro routes across every venue and settles through an immutable executor that guarantees your minimum output on-chain.",
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },
@@ -22,56 +19,25 @@ export const metadata: Metadata = {
     apple: "/apple-touch-icon.png",
   },
   openGraph: {
-    title: "MoleSwap - Dex Aggregator & AMM Protocol",
-    description: "Dex Aggregator & AMM Protocol on PushChain. Swap tokens, earn XP, climb the leaderboard.",
-    images: [
-      {
-        url: `${siteUrl}/mole-card.webp`,
-        width: 1200,
-        height: 630,
-        alt: "MoleSwap - Dex Aggregator & AMM Protocol",
-      },
-    ],
+    title: "MoleSwap Pro — DEX Aggregator on Robinhood Chain",
+    description: "Swap any token at the best price on Robinhood Chain, with your minimum output guaranteed on-chain.",
+    images: [{ url: "/android-chrome-512x512.png", width: 1200, height: 630, alt: "MoleSwap Pro" }],
     type: "website",
     url: siteUrl,
   },
   twitter: {
     card: "summary_large_image",
-    title: "MoleSwap - Dex Aggregator & AMM Protocol",
-    description: "Dex Aggregator & AMM Protocol on PushChain. Swap tokens, earn XP, climb the leaderboard.",
-    images: [`${siteUrl}/mole-card.webp`],
-    creator: "@moleswapcom",
+    title: "MoleSwap Pro — DEX Aggregator on Robinhood Chain",
+    description: "Swap any token at the best price on Robinhood Chain, with your minimum output guaranteed on-chain.",
+    images: ["/android-chrome-512x512.png"],
   },
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <head>
-        <Script
-          src={`https://www.googletagmanager.com/gtag/js?id=${GA_ID}`}
-          strategy="afterInteractive"
-        />
-        <Script id="gtag-init" strategy="afterInteractive">
-          {`
-            window.dataLayer = window.dataLayer || [];
-            function gtag(){dataLayer.push(arguments);}
-            gtag('js', new Date());
-            gtag('config', '${GA_ID}');
-          `}
-        </Script>
-      </head>
-      <body className="custom-scrollbar">
-        <PushChainWalletProvider network="testnet">
-          <div className="flex min-h-screen flex-col">
-            <main className="flex-1">{children}</main>
-            <ConditionalFooter />
-          </div>
-        </PushChainWalletProvider>
+      <body>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
