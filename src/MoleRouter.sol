@@ -54,6 +54,17 @@ contract MoleRouter is IUnlockCallback {
     ///      it, so a route may freely mix v4 and v3 hops in a single atomic transaction.
     IPoolManager public immutable poolManager;
 
+    /// @dev The wrapped-native token (WETH on Robinhood Chain). Native ETH is a wrapper at the EDGES only:
+    ///      the router wraps incoming ETH to WETH before the first hop and unwraps the final WETH to ETH
+    ///      after the last, so every pool ever sees an ERC-20 and the routing math never special-cases it.
+    address public immutable weth;
+
+    /// @dev The sentinel a plan uses to mean "native ETH" for `tokenIn`/`tokenOut`. The de-facto standard
+    ///      0xEeee… address, distinct from address(0) so a native leg can never be confused with an unset
+    ///      field. The hops themselves always name the real WETH address — the sentinel lives only on the
+    ///      plan's outer tokenIn/tokenOut.
+    address internal constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
     /// @dev A single hop: swap `tokenIn` for `tokenOut` on one pool. `venue` selects the calling
     ///      convention; the route is built off-chain and every field is untrusted.
     struct Hop {
@@ -119,6 +130,11 @@ contract MoleRouter is IUnlockCallback {
     error SameToken();
     error TransferFailed();
     error PayerReentrancy();
+    /// @dev msg.value must equal amountIn for a native-in swap, and be zero otherwise — no stray ETH.
+    error BadValue();
+    /// @dev Only WETH may send the router native ETH (during an unwrap). Everything else is refused.
+    error UnexpectedEther();
+    error NativeTransferFailed();
 
     event Swapped(
         address indexed payer,
@@ -129,16 +145,32 @@ contract MoleRouter is IUnlockCallback {
         uint256 amountOut
     );
 
-    constructor(IPoolManager _poolManager) {
+    constructor(IPoolManager _poolManager, address _weth) {
         poolManager = _poolManager;
+        weth = _weth;
+    }
+
+    /// @notice Accept native ETH ONLY while a swap is in flight — which is exactly when WETH sends it back
+    ///         during an unwrap. The reentrancy lock is set for the whole swap, so this both permits the
+    ///         unwrap and refuses stray sends outside one, meaning native ETH can never accumulate here
+    ///         between swaps. The msg.value that funds a native-in swap arrives ATTACHED to the payable
+    ///         `swap` call, not through this function, so this staying strict does not block the happy path.
+    ///
+    ///         (Gated on the transient lock rather than `msg.sender == weth`: reading the `weth` immutable
+    ///         inside `receive()` tripped an internal via_ir codegen error at this project's optimizer
+    ///         settings. The lock is a strictly-narrower window — mid-swap only — so nothing is lost.)
+    receive() external payable {
+        if (_lockValue() == 0) revert UnexpectedEther();
     }
 
     /* ------------------------------------------------------------------------------- external entrypoint */
 
     /// @notice Execute `plan`, pulling the input from the caller via a prior ERC-20 approval to this
-    ///         router. Reverts unless the recipient nets at least `plan.minAmountOut`.
-    /// @return amountOut the output token amount delivered to `plan.recipient`.
-    function swap(SwapPlan calldata plan) external returns (uint256 amountOut) {
+    ///         router — or, for a native-ETH input (`plan.tokenIn == NATIVE`), from the attached msg.value.
+    ///         Reverts unless the recipient nets at least `plan.minAmountOut`.
+    /// @return amountOut the output token amount delivered to `plan.recipient` (native ETH if
+    ///         `plan.tokenOut == NATIVE`).
+    function swap(SwapPlan calldata plan) external payable returns (uint256 amountOut) {
         return _swap(plan, msg.sender);
     }
 
@@ -155,7 +187,23 @@ contract MoleRouter is IUnlockCallback {
         // self-transfer and the whole output is stranded here — a direct violation of the zero-residual
         // invariant that an adversarial route could trigger simply by naming us as the recipient.
         if (plan.recipient == address(this)) revert ZeroRecipient();
-        if (plan.tokenIn == plan.tokenOut) revert SameToken();
+
+        // Native ETH is compared on the EFFECTIVE tokens: NATIVE resolves to WETH, so a WETH->native swap
+        // (or the reverse) is a real swap, while native<->WETH or token<->itself is refused.
+        bool nativeIn = plan.tokenIn == NATIVE;
+        bool nativeOut = plan.tokenOut == NATIVE;
+        address effIn = nativeIn ? weth : plan.tokenIn;
+        address effOut = nativeOut ? weth : plan.tokenOut;
+        if (effIn == effOut) revert SameToken();
+
+        // Exactly amountIn of native ETH for a native-in swap; strictly zero otherwise. Accepting stray
+        // ETH on an ERC-20 swap would let it sit here — the router must never hold value it was not asked
+        // to route.
+        if (nativeIn) {
+            if (msg.value != plan.amountIn) revert BadValue();
+        } else if (msg.value != 0) {
+            revert BadValue();
+        }
 
         // The paths' slices must account for exactly the declared input. A mismatch is a malformed route,
         // not something to paper over by swapping less or pulling more — either would surprise the payer.
@@ -193,61 +241,100 @@ contract MoleRouter is IUnlockCallback {
         if (_lockValue() == 0) revert UnexpectedCallback();
 
         (SwapPlan memory plan, address payer) = abi.decode(data, (SwapPlan, address));
+        return abi.encode(_execute(plan, payer));
+    }
 
-        // ZERO RESIDUAL, MADE PROVABLE FOR ANY ROUTE — this is the heart of the contract's safety claim,
-        // and the naive version (refund only plan.tokenIn) did not hold it. An audit found three ways a
-        // successful swap could leave value stuck: an intermediate token short-filled by a middle hop, a
-        // recipient set to the router, and a token airdropped to the router being harvested by the next
-        // caller. The fix is to reason about NET CHANGE rather than final balance.
-        //
-        // Enumerate every token the route names and snapshot the router's balance of each BEFORE pulling
-        // or swapping. After execution, restore each to its snapshot: deliver `totalOut` of the output to
-        // the recipient, and sweep every token's remaining increase back to the payer. The router's
-        // balance of every touched token is then exactly what it was before the swap — so a pre-existing
-        // airdrop is preserved (not harvested), and no short fill, dust, or self-transfer can strand value.
-        address[] memory tokens = _touchedTokens(plan);
+    /// @dev The whole swap, run inside the unlock. Split into `_acquireInput` / `_deliverOutput` / `_sweep`
+    ///      deliberately, and NOT only for readability: the combined function held enough locals that the
+    ///      via_ir codegen at this project's optimizer_runs sat one variable from a Yul stack-too-deep — so
+    ///      any later edit would tip it over. Keeping each frame small keeps the contract compilable as it
+    ///      grows. `effIn`/`effOut` (the real ERC-20 behind a possible NATIVE sentinel) are the only
+    ///      cross-cutting locals kept here; native-ness is re-derived cheaply inside the sub-calls.
+    function _execute(SwapPlan memory plan, address payer) internal returns (uint256 totalOut) {
+        address effIn = plan.tokenIn == NATIVE ? weth : plan.tokenIn;
+        address effOut = plan.tokenOut == NATIVE ? weth : plan.tokenOut;
+
+        // ZERO RESIDUAL, MADE PROVABLE FOR ANY ROUTE — the heart of the contract's safety claim, and the
+        // naive version (refund only plan.tokenIn) did not hold it. An audit found three ways a successful
+        // swap could leave value stuck: an intermediate token short-filled by a middle hop, a recipient set
+        // to the router, and an airdropped token harvested by the next caller. The fix reasons about NET
+        // CHANGE, not final balance: snapshot every touched token BEFORE acquiring input, then after
+        // execution deliver the tracked output and sweep every token's increase-beyond-snapshot to the
+        // payer — so a pre-existing airdrop is preserved, and no short fill, dust, or self-transfer strands.
+        address[] memory tokens = _touchedTokens(plan, effIn, effOut);
         uint256[] memory startBal = new uint256[](tokens.length);
         for (uint256 i = 0; i < tokens.length; ++i) startBal[i] = _balance(tokens[i]);
 
-        // Pull the input now, inside the lock, AFTER the snapshot so the pulled amount is treated as this
-        // swap's own contribution rather than a pre-existing balance.
-        _pull(plan.tokenIn, payer, plan.amountIn);
+        _acquireInput(plan, payer, effIn);
 
-        uint256 totalOut;
-        uint256 pn = plan.paths.length;
-        for (uint256 i = 0; i < pn; ++i) {
-            totalOut += _runPath(plan.paths[i], plan.tokenOut);
+        for (uint256 i = 0; i < plan.paths.length; ++i) {
+            totalOut += _runPath(plan.paths[i], effIn, effOut);
         }
 
-        // Deliver the tracked output — the accumulated per-hop total, NOT balanceOf, so an airdropped
-        // output token cannot inflate what we claim to have produced (that airdrop is swept below instead).
-        if (totalOut > 0) _push(plan.tokenOut, plan.recipient, totalOut);
+        _deliverOutput(plan, effOut, totalOut);
 
-        // Sweep: for each touched token, return whatever this swap added beyond its snapshot to the payer.
-        // The baseline is simply the pre-swap balance — the output already delivered was pushed OUT above,
-        // so it is no longer in `nowBal` and must NOT be subtracted again. (An earlier version subtracted
-        // the delivered amount as well; mutation testing showed that double-counting would strand an
-        // over-received output token — a pool or airdrop delivering more tokenOut than the tracked total —
-        // in the range (startBal, startBal + totalOut]. Net change to every touched balance is now zero.)
-        for (uint256 i = 0; i < tokens.length; ++i) {
-            uint256 nowBal = _balance(tokens[i]);
-            if (nowBal > startBal[i]) _push(tokens[i], payer, nowBal - startBal[i]);
-        }
-
-        return abi.encode(totalOut);
+        _sweep(tokens, startBal, payer, plan.tokenIn == NATIVE || plan.tokenOut == NATIVE);
     }
 
-    /// @dev Every distinct token the route names — plan.tokenIn/tokenOut and every hop's in/out. The set
-    ///      is small (a route is a handful of hops), so a linear-dedup memory array is the right shape.
-    function _touchedTokens(SwapPlan memory plan) internal pure returns (address[] memory) {
-        // Upper bound: 2 (plan in/out) + 2 per hop. Trim to the real count at the end.
+    /// @dev Acquire the input AFTER the balance snapshot so it counts as this swap's own contribution.
+    ///      Native: wrap the ETH that came attached to the call. ERC-20: pull from the payer.
+    function _acquireInput(SwapPlan memory plan, address payer, address effIn) internal {
+        if (plan.tokenIn == NATIVE) IWETH(weth).deposit{value: plan.amountIn}();
+        else _pull(effIn, payer, plan.amountIn);
+    }
+
+    /// @dev Deliver the tracked output — the per-hop total, NOT balanceOf, so an airdropped output token
+    ///      cannot inflate what we claim to have produced (it is swept instead). Native out: unwrap and
+    ///      forward the ETH; ERC-20 out: transfer directly.
+    function _deliverOutput(SwapPlan memory plan, address effOut, uint256 totalOut) internal {
+        if (totalOut == 0) return;
+        if (plan.tokenOut == NATIVE) {
+            IWETH(weth).withdraw(totalOut);
+            _sendNative(plan.recipient, totalOut);
+        } else {
+            _push(effOut, plan.recipient, totalOut);
+        }
+    }
+
+    /// @dev Restore every touched token to its pre-swap balance by returning the increase to the payer.
+    ///      The baseline is simply the snapshot — the delivered output was already pushed OUT, so it is no
+    ///      longer in `nowBal` and must NOT be subtracted again. (An earlier version subtracted it too;
+    ///      mutation testing showed that double-count would strand an over-received output token in
+    ///      (startBal, startBal + totalOut].) WETH residual on a native swap is unwrapped so the payer gets
+    ///      ETH back rather than a wrapped dust.
+    function _sweep(address[] memory tokens, uint256[] memory startBal, address payer, bool nativeInvolved)
+        internal
+    {
+        for (uint256 i = 0; i < tokens.length; ++i) {
+            uint256 nowBal = _balance(tokens[i]);
+            if (nowBal > startBal[i]) {
+                uint256 residual = nowBal - startBal[i];
+                if (tokens[i] == weth && nativeInvolved) {
+                    IWETH(weth).withdraw(residual);
+                    _sendNative(payer, residual);
+                } else {
+                    _push(tokens[i], payer, residual);
+                }
+            }
+        }
+    }
+
+    /// @dev Every distinct token the route names — the EFFECTIVE in/out (WETH, never the NATIVE sentinel,
+    ///      because the sentinel is not a real token to sweep) plus every hop's in/out. The set is small
+    ///      (a route is a handful of hops), so a linear-dedup memory array is the right shape.
+    function _touchedTokens(SwapPlan memory plan, address effIn, address effOut)
+        internal
+        pure
+        returns (address[] memory)
+    {
+        // Upper bound: 2 (effective in/out) + 2 per hop. Trim to the real count at the end.
         uint256 cap = 2;
         for (uint256 p = 0; p < plan.paths.length; ++p) cap += plan.paths[p].hops.length * 2;
         address[] memory buf = new address[](cap);
         uint256 count;
 
-        count = _addUnique(buf, count, plan.tokenIn);
-        count = _addUnique(buf, count, plan.tokenOut);
+        count = _addUnique(buf, count, effIn);
+        count = _addUnique(buf, count, effOut);
         for (uint256 p = 0; p < plan.paths.length; ++p) {
             Hop[] memory hops = plan.paths[p].hops;
             for (uint256 h = 0; h < hops.length; ++h) {
@@ -274,14 +361,16 @@ contract MoleRouter is IUnlockCallback {
     /// @dev Run one path end to end. Each hop is fed the EXACT output of the previous one, tracked as a
     ///      return value rather than read from balanceOf, so two paths that share an intermediate token
     ///      (e.g. both routing through WETH) cannot spend each other's balance.
-    function _runPath(Path memory path, address finalToken) internal returns (uint256 out) {
+    function _runPath(Path memory path, address startToken, address finalToken) internal returns (uint256 out) {
         uint256 amount = path.amountIn;
         uint256 hn = path.hops.length;
+        // The route's own hop chain is verified here rather than trusted: the first hop must consume the
+        // (effective) input token, hop i's output must be hop i+1's input, and the last hop must produce
+        // the (effective) output token. A broken chain reverts before any value moves further — and the
+        // first-hop check is what stops a plan claiming a native/tokenIn it then routes away from.
+        if (path.hops[0].tokenIn != startToken) revert HopChainBroken();
         for (uint256 i = 0; i < hn; ++i) {
             Hop memory hop = path.hops[i];
-            // The route's own hop chain is verified here rather than trusted: hop i's output token must be
-            // hop i+1's input token, and the last hop must produce the plan's output token. A broken chain
-            // is a malformed route and reverts before any value moves further.
             if (i > 0 && hop.tokenIn != path.hops[i - 1].tokenOut) revert HopChainBroken();
             amount = hop.venue == Venue.PancakeV3 ? _swapV3(hop, amount) : _swapV4(hop, amount);
         }
@@ -403,6 +492,14 @@ contract MoleRouter is IUnlockCallback {
         return abi.decode(ret, (uint256));
     }
 
+    /// @dev Forward native ETH, reverting on failure rather than swallowing it. Used only to deliver an
+    ///      unwrapped output and to refund unspent native input, both to caller-supplied addresses inside
+    ///      the reentrancy lock, so a recipient with a reverting fallback fails the whole swap cleanly.
+    function _sendNative(address to, uint256 amount) internal {
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert NativeTransferFailed();
+    }
+
     /* -------------------------------------------------------------------------------- transient helpers */
 
     function _lock() internal {
@@ -458,6 +555,12 @@ contract MoleRouter is IUnlockCallback {
             tokenIn := tload(slot)
         }
     }
+}
+
+/// @dev Wrapped-native (WETH9) surface: deposit wraps the attached ETH, withdraw unwraps to the caller.
+interface IWETH {
+    function deposit() external payable;
+    function withdraw(uint256 amount) external;
 }
 
 /// @dev Minimal PancakeSwap-V3 / Uniswap-V3 pool surface. Only `swap` is used.

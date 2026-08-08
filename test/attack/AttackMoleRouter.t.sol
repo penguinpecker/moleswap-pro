@@ -26,6 +26,7 @@ contract AttackMoleRouter is Test, Deployers {
     using PoolIdLibrary for PoolKey;
 
     MoleRouter internal router;
+    MockWETH internal weth;
     MockERC20 internal tokenA;
     MockERC20 internal tokenB;
 
@@ -35,7 +36,8 @@ contract AttackMoleRouter is Test, Deployers {
 
     function setUp() public {
         deployFreshManagerAndRouters();
-        router = new MoleRouter(manager);
+        weth = new MockWETH();
+        router = new MoleRouter(manager, address(weth));
         tokenA = new MockERC20("A", "A", 18);
         tokenB = new MockERC20("B", "B", 18);
     }
@@ -451,6 +453,142 @@ contract AttackMoleRouter is Test, Deployers {
         }
     }
 
+    /// @notice The first hop must consume the plan's (effective) input token. A plan whose first hop
+    ///         starts from some OTHER token is a broken chain and is refused before any swap runs — this
+    ///         also stops a native-in plan from routing away from WETH.
+    function test_firstHopMustConsumeTheInputToken() public {
+        MockV3Pool honest = _fundHonestPool(2, 1); // A -> B
+        // Claim tokenIn = A, but the first (only) hop starts from tokenB.
+        MoleRouter.Hop[] memory hops = new MoleRouter.Hop[](1);
+        hops[0] = MoleRouter.Hop(MoleRouter.Venue.PancakeV3, address(honest), false, address(tokenB), address(tokenA), _emptyKey());
+        MoleRouter.Path[] memory paths = new MoleRouter.Path[](1);
+        paths[0] = MoleRouter.Path(100e18, hops);
+        MoleRouter.SwapPlan memory plan =
+            MoleRouter.SwapPlan(address(tokenA), address(tokenA), 100e18, 1, user, block.timestamp + 1, paths);
+        // tokenIn(A) != tokenOut(A) would trip SameToken first; make output distinct.
+        plan.tokenOut = address(tokenA);
+        // Use a distinct output token so we reach the first-hop check, not SameToken.
+        MockERC20 tokenE = new MockERC20("E", "E", 18);
+        plan.tokenOut = address(tokenE);
+
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(router), 100e18);
+        vm.prank(user);
+        vm.expectRevert(MoleRouter.HopChainBroken.selector);
+        router.swap(plan);
+    }
+
+    /* ================================================================ 5b. native ETH (wrap/unwrap) */
+
+    address internal constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
+    /// @dev A pool that swaps WETH<->other. Funds the OUTPUT side so it can pay.
+    function _fundWethPool(MockERC20 other, uint256 num, uint256 den, bool wethIsToken0)
+        internal
+        returns (MockV3Pool pool)
+    {
+        pool = wethIsToken0
+            ? new MockV3Pool(address(weth), address(other), num, den)
+            : new MockV3Pool(address(other), address(weth), num, den);
+        other.mint(address(pool), 1_000_000e18);
+        // Give the pool WETH to pay out when it is the output side, backed by real ETH so withdraw works.
+        vm.deal(address(this), 1_000e18);
+        weth.deposit{value: 1_000e18}();
+        weth.transfer(address(pool), 1_000e18);
+    }
+
+    function _nativePlan(address pool, address tokenIn, address tokenOut, address hopIn, address hopOut, bool z, uint256 amt, address recipient)
+        internal
+        view
+        returns (MoleRouter.SwapPlan memory plan)
+    {
+        MoleRouter.Hop[] memory hops = new MoleRouter.Hop[](1);
+        hops[0] = MoleRouter.Hop(MoleRouter.Venue.PancakeV3, pool, z, hopIn, hopOut, _emptyKey());
+        MoleRouter.Path[] memory paths = new MoleRouter.Path[](1);
+        paths[0] = MoleRouter.Path(amt, hops);
+        plan = MoleRouter.SwapPlan(tokenIn, tokenOut, amt, 1, recipient, block.timestamp + 1, paths);
+    }
+
+    /// @notice Native ETH IN: the router wraps the attached msg.value to WETH, swaps it, and holds nothing.
+    function test_nativeIn_wrapsAndSwapsAndHoldsNothing() public {
+        MockV3Pool pool = _fundWethPool(tokenB, 2, 1, true); // WETH -> B at 2:1
+        address recipient = makeAddr("nrecipient");
+        MoleRouter.SwapPlan memory plan =
+            _nativePlan(address(pool), NATIVE, address(tokenB), address(weth), address(tokenB), true, 10e18, recipient);
+
+        vm.deal(user, 10e18);
+        vm.prank(user);
+        uint256 got = router.swap{value: 10e18}(plan);
+
+        assertEq(got, 20e18, "native-in output wrong");
+        assertEq(tokenB.balanceOf(recipient), 20e18, "recipient did not get the output");
+        assertEq(user.balance, 0, "user ETH not consumed");
+        assertEq(address(router).balance, 0, "router retained native ETH");
+        assertEq(weth.balanceOf(address(router)), 0, "router retained WETH");
+        assertEq(tokenB.balanceOf(address(router)), 0, "router retained output");
+    }
+
+    /// @notice Native ETH OUT: the router swaps to WETH, unwraps it, and delivers ETH to the recipient.
+    function test_nativeOut_swapsAndUnwrapsToRecipient() public {
+        MockV3Pool pool = _fundWethPool(tokenA, 1, 2, false); // A -> WETH at 1:2 (A=token0)
+        address recipient = makeAddr("nrecipient2");
+        MoleRouter.SwapPlan memory plan =
+            _nativePlan(address(pool), address(tokenA), NATIVE, address(tokenA), address(weth), true, 10e18, recipient);
+
+        tokenA.mint(user, 10e18);
+        vm.prank(user);
+        tokenA.approve(address(router), 10e18);
+        uint256 recipBefore = recipient.balance;
+        vm.prank(user);
+        uint256 got = router.swap(plan);
+
+        assertEq(got, 5e18, "native-out output wrong");
+        assertEq(recipient.balance - recipBefore, 5e18, "recipient did not receive native ETH");
+        assertEq(address(router).balance, 0, "router retained native ETH");
+        assertEq(weth.balanceOf(address(router)), 0, "router retained WETH");
+        assertEq(tokenA.balanceOf(address(router)), 0, "router retained input");
+    }
+
+    /// @notice A native-in swap must be funded by EXACTLY amountIn of ETH — no more, no less.
+    function test_nativeIn_valueMustEqualAmountIn() public {
+        MockV3Pool pool = _fundWethPool(tokenB, 2, 1, true);
+        address recipient = makeAddr("nr3");
+        MoleRouter.SwapPlan memory plan =
+            _nativePlan(address(pool), NATIVE, address(tokenB), address(weth), address(tokenB), true, 10e18, recipient);
+
+        vm.deal(user, 20e18);
+        vm.prank(user);
+        vm.expectRevert(MoleRouter.BadValue.selector);
+        router.swap{value: 9e18}(plan); // too little
+
+        vm.prank(user);
+        vm.expectRevert(MoleRouter.BadValue.selector);
+        router.swap{value: 11e18}(plan); // too much
+    }
+
+    /// @notice An ERC-20 swap must not carry attached ETH — it would sit in the router.
+    function test_erc20Swap_rejectsAttachedEther() public {
+        MockV3Pool honest = _fundHonestPool(2, 1);
+        MoleRouter.SwapPlan memory plan = _v3Plan(address(honest), address(tokenA), address(tokenB), true, 100e18, 1);
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(router), 100e18);
+        vm.deal(user, 1e18);
+        vm.prank(user);
+        vm.expectRevert(MoleRouter.BadValue.selector);
+        router.swap{value: 1e18}(plan);
+    }
+
+    /// @notice Native ETH sent to the router OUTSIDE a swap is refused, so it can never accumulate.
+    function test_strayEtherIsRefused() public {
+        vm.deal(user, 1e18);
+        vm.prank(user);
+        (bool ok,) = address(router).call{value: 1e18}("");
+        assertFalse(ok, "router accepted stray ETH outside a swap");
+        assertEq(address(router).balance, 0, "stray ETH accumulated in the router");
+    }
+
     /* ================================================================ 6. v4 hop, locally */
 
     function test_v4Hop_swapsThroughThePoolManager_andHoldsNothing() public {
@@ -719,6 +857,37 @@ contract OverPayPool {
         amount1 = -int256(amountIn); // REPORTS 1:1
         IMoleCallback(msg.sender).pancakeV3SwapCallback(amount0, amount1, data);
         IERC20M(token1).transfer(recipient, (amountIn * 3) / 2); // but DELIVERS 1.5x
+    }
+}
+
+/// @dev A minimal WETH9 for the native-ETH tests: deposit wraps, withdraw unwraps and returns ETH.
+contract MockWETH {
+    string public name = "Wrapped Ether";
+    mapping(address => uint256) public balanceOf;
+
+    function deposit() external payable {
+        balanceOf[msg.sender] += msg.value;
+    }
+
+    function withdraw(uint256 amount) external {
+        require(balanceOf[msg.sender] >= amount, "MockWETH: insufficient");
+        balanceOf[msg.sender] -= amount;
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok, "MockWETH: send failed");
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "MockWETH: balance");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(balanceOf[from] >= amount, "MockWETH: balance");
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
     }
 }
 

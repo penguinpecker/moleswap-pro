@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { getQuote, NoRouteError } from "../src/quote.js";
+import { getQuote, NoRouteError, NATIVE } from "../src/quote.js";
 import { minOutFor, planFromRoute, PlanVenue } from "../src/plan.js";
 import { bestSingleRoute, PoolGraph } from "../src/route.js";
 import { v4PoolState, hookAltersSwapAmounts, assertQuotableHook } from "../src/venues/v4Pool.js";
@@ -226,5 +226,39 @@ describe("v4 pool adapter — same math, different plumbing", () => {
         ticks,
       }),
     ).toThrow(/dynamic-fee/);
+  });
+});
+
+describe("native ETH quoting", () => {
+  it("routes a native-in quote over WETH but keeps NATIVE on the plan", () => {
+    const q = getQuote([livePool], { ...REQ, tokenIn: NATIVE, weth: WETH });
+    // Plan's outer tokenIn is the sentinel; the hop still swaps the real WETH.
+    expect(q.plan.tokenIn).toBe(NATIVE);
+    expect(q.plan.paths[0]!.hops[0]!.tokenIn).toBe(WETH.toLowerCase());
+    // The quote is identical to the plain WETH-in quote — native is only a wrapper at the edge.
+    const plain = getQuote([livePool], REQ);
+    expect(q.amountOut).toBe(plain.amountOut);
+  });
+
+  it("routes a native-OUT quote over WETH but keeps NATIVE on the plan", () => {
+    const q = getQuote([livePool], {
+      ...REQ,
+      tokenIn: USDG,
+      tokenOut: NATIVE,
+      amountIn: 1000n * 10n ** 6n,
+      weth: WETH,
+    });
+    expect(q.plan.tokenOut).toBe(NATIVE);
+    expect(q.plan.paths[0]!.hops.at(-1)!.tokenOut).toBe(WETH.toLowerCase());
+  });
+
+  it("requires the weth address for a native quote", () => {
+    expect(() => getQuote([livePool], { ...REQ, tokenIn: NATIVE })).toThrow(/weth/);
+  });
+
+  it("rejects native<->WETH as a no-op (effective tokens equal)", () => {
+    expect(() => getQuote([livePool], { ...REQ, tokenIn: NATIVE, tokenOut: WETH, weth: WETH })).toThrow(
+      /equals/,
+    );
   });
 });

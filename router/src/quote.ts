@@ -13,6 +13,10 @@ import { PoolGraph, bestSplitRoute, describeRoute, type SplitRoute } from "./rou
 import type { PoolState } from "./venues/v3Pool.js";
 import { planFromSplit, type SwapPlan } from "./plan.js";
 
+/** The sentinel a plan uses for native ETH, matching MoleRouter's NATIVE constant exactly. A request may
+ *  set tokenIn or tokenOut to this; routing then happens over WETH and the executor wraps/unwraps. */
+export const NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+
 export interface QuoteRequest {
   readonly tokenIn: string;
   readonly tokenOut: string;
@@ -28,6 +32,9 @@ export interface QuoteRequest {
   readonly maxHops?: number;
   readonly maxPaths?: number;
   readonly splitParts?: number;
+  /** The WETH address, REQUIRED when tokenIn or tokenOut is NATIVE: routing happens over WETH, and the
+   *  resulting plan carries the NATIVE sentinel so the executor wraps/unwraps at the edges. */
+  readonly weth?: string;
 }
 
 export interface Quote {
@@ -59,10 +66,20 @@ export class NoRouteError extends Error {
  */
 export function getQuote(pools: readonly PoolState[], req: QuoteRequest): Quote {
   if (req.amountIn <= 0n) throw new Error("amountIn must be positive");
-  if (req.tokenIn.toLowerCase() === req.tokenOut.toLowerCase()) throw new Error("tokenIn equals tokenOut");
+
+  // Native ETH is a WETH wrapper at the edges: route over WETH, but keep NATIVE on the plan's outer
+  // tokenIn/tokenOut so the executor knows to wrap the input and unwrap the output.
+  const nativeIn = req.tokenIn.toLowerCase() === NATIVE.toLowerCase();
+  const nativeOut = req.tokenOut.toLowerCase() === NATIVE.toLowerCase();
+  if ((nativeIn || nativeOut) && !req.weth) {
+    throw new Error("a native-ETH quote requires the weth address in the request");
+  }
+  const routeIn = nativeIn ? req.weth! : req.tokenIn;
+  const routeOut = nativeOut ? req.weth! : req.tokenOut;
+  if (routeIn.toLowerCase() === routeOut.toLowerCase()) throw new Error("effective tokenIn equals tokenOut");
 
   const graph = new PoolGraph(pools);
-  const split = bestSplitRoute(graph, req.tokenIn, req.tokenOut, req.amountIn, {
+  const split = bestSplitRoute(graph, routeIn, routeOut, req.amountIn, {
     parts: req.splitParts ?? 10,
     maxHops: req.maxHops ?? 3,
     maxPaths: req.maxPaths ?? 8,
@@ -70,6 +87,8 @@ export function getQuote(pools: readonly PoolState[], req: QuoteRequest): Quote 
 
   if (!split || split.amountOut <= 0n) throw new NoRouteError(req.tokenIn, req.tokenOut);
 
+  // Build the plan with the ORIGINAL (possibly NATIVE) tokenIn/tokenOut on the outer fields; the hops
+  // already reference WETH because the route was computed over it.
   const plan = planFromSplit(split, req.tokenIn, req.tokenOut, {
     recipient: req.recipient,
     deadline: req.nowSeconds + req.ttlSeconds,

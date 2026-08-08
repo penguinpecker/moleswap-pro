@@ -34,7 +34,7 @@ contract MoleRouterFork is Test {
 
     function setUp() public {
         if (block.chainid != 4663) vm.skip(true);
-        router = new MoleRouter(POOL_MANAGER);
+        router = new MoleRouter(POOL_MANAGER, WETH);
     }
 
     /* ------------------------------------------------------------------------------------------ helpers */
@@ -188,6 +188,62 @@ contract MoleRouterFork is Test {
 
         assertEq(IERC20L(WETH).balanceOf(user), amountIn, "input was taken by a reverted swap");
         assertEq(IERC20L(USDG).balanceOf(address(router)), 0, "router held output after a revert");
+    }
+
+    /* -------------------------------------------------------------------------- native ETH, on mainnet */
+
+    address internal constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
+    /// @notice Native ETH IN on the live chain: the router wraps the attached ETH to the REAL WETH and
+    ///         swaps it through the deep Pancake pool, delivering USDG and holding nothing.
+    function test_nativeIn_wrapsRealWethAndSwaps() public {
+        uint256 amountIn = 5e17; // 0.5 ETH
+        uint256 expected = _rawSwapOut(POOL_500, WETH, amountIn);
+
+        MoleRouter.Hop[] memory hops = new MoleRouter.Hop[](1);
+        hops[0] = MoleRouter.Hop(MoleRouter.Venue.PancakeV3, POOL_500, true, WETH, USDG, _emptyKey());
+        MoleRouter.Path[] memory paths = new MoleRouter.Path[](1);
+        paths[0] = MoleRouter.Path(amountIn, hops);
+        MoleRouter.SwapPlan memory plan =
+            MoleRouter.SwapPlan(NATIVE, USDG, amountIn, expected, user, block.timestamp + 1, paths);
+
+        vm.deal(user, amountIn);
+        uint256 usdgBefore = IERC20L(USDG).balanceOf(user);
+        vm.prank(user);
+        uint256 got = router.swap{value: amountIn}(plan);
+
+        assertEq(got, expected, "native-in delivered a different amount than the raw swap");
+        assertEq(IERC20L(USDG).balanceOf(user) - usdgBefore, expected, "recipient did not net the output");
+        assertEq(user.balance, 0, "native input not consumed");
+        assertEq(address(router).balance, 0, "router retained native ETH");
+        assertEq(IERC20L(WETH).balanceOf(address(router)), 0, "router retained WETH");
+    }
+
+    /// @notice Native ETH OUT on the live chain: swap USDG through the pool to WETH, unwrap the real WETH,
+    ///         and deliver ETH to the recipient.
+    function test_nativeOut_swapsAndUnwrapsRealWeth() public {
+        uint256 amountIn = 1000e6; // 1000 USDG
+        uint256 expected = _rawSwapOut(POOL_500, USDG, amountIn); // USDG -> WETH out
+
+        MoleRouter.Hop[] memory hops = new MoleRouter.Hop[](1);
+        hops[0] = MoleRouter.Hop(MoleRouter.Venue.PancakeV3, POOL_500, false, USDG, WETH, _emptyKey());
+        MoleRouter.Path[] memory paths = new MoleRouter.Path[](1);
+        paths[0] = MoleRouter.Path(amountIn, hops);
+        MoleRouter.SwapPlan memory plan =
+            MoleRouter.SwapPlan(USDG, NATIVE, amountIn, expected, user, block.timestamp + 1, paths);
+
+        deal(USDG, user, amountIn);
+        vm.prank(user);
+        IERC20L(USDG).approve(address(router), amountIn);
+        uint256 ethBefore = user.balance;
+        vm.prank(user);
+        uint256 got = router.swap(plan);
+
+        assertEq(got, expected, "native-out delivered a different amount than the raw swap");
+        assertEq(user.balance - ethBefore, expected, "recipient did not receive native ETH");
+        assertEq(address(router).balance, 0, "router retained native ETH");
+        assertEq(IERC20L(WETH).balanceOf(address(router)), 0, "router retained WETH");
+        assertEq(IERC20L(USDG).balanceOf(address(router)), 0, "router retained input");
     }
 }
 
