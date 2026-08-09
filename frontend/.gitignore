@@ -37,5 +37,7 @@ bun.lock
 cache/
 artifacts/
 out/
-.vercel
-.env*
+
+# Local ops scratch — swap.mjs and _scan.mjs embed an RPC API key; never commit.
+/_*.mjs
+/swap.mjs

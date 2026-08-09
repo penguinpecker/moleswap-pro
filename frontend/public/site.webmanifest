@@ -1,6 +1,6 @@
 {
-  "name": "MoleSwap Pro",
-  "short_name": "MoleSwap Pro",
+  "name": "MoleSwap",
+  "short_name": "MoleSwap",
   "icons": [
     {
       "src": "/android-chrome-192x192.png",
@@ -15,6 +15,5 @@
   ],
   "theme_color": "#8B5E3C",
   "background_color": "#8B5E3C",
-  "display": "standalone",
-  "description": "DEX aggregator on Robinhood Chain"
+  "display": "standalone"
 }

@@ -12,8 +12,12 @@ import { fetchV3Pool } from "./indexer";
 import { v4PoolState } from "./venues/v4Pool";
 import type { PoolState } from "./venues/v3Pool";
 import { FetchTransport } from "./transport";
+import { fetchV4MolePool } from "./venues/v4Reader";
+import { discoverForPair } from "./discover";
 import { encodePlan, type EncodedPlan } from "./router";
 import { PANCAKE_V3 } from "../mole/chain";
+
+const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
 /** A pool row as stored in Supabase `mp_pools`. */
 export interface PoolRow {
@@ -80,21 +84,38 @@ export async function fetchRelevantPoolStates(
         (inT !== w && outT !== w && (isPair(p, inT, w) || isPair(p, outT, w)))), // 2-hop via the WETH hub
   );
 
-  // Safety cap: a pair has at most a handful of fee tiers plus two hub legs; a huge number here means the
-  // filter is wrong, and fetching hundreds would rate-limit the RPC (the exact bug this replaced).
-  const capped = relevant.slice(0, 24);
+  // On-demand, on-chain discovery: find EVERY live pool for this pair (direct + WETH/USDG hub legs) across
+  // all executable factories, so the router quotes/splits across venues the indexer hasn't cached yet.
+  // This is what lets any token with liquidity be traded immediately, Jupiter-style.
+  let discovered: PoolRow[] = [];
+  try {
+    discovered = await discoverForPair(tokenIn, tokenOut, weth);
+  } catch {
+    /* discovery best-effort — fall back to the indexed set */
+  }
+
+  // Merge indexed + discovered, deduped by pool address.
+  const byAddr = new Map<string, PoolRow>();
+  for (const p of [...relevant, ...discovered]) {
+    if (p.address) byAddr.set(p.address.toLowerCase(), p);
+  }
+  // Cap generously — Multicall discovery is bounded and the Alchemy RPC handles the fan-out — but keep a
+  // ceiling so a pathological pair can't fetch hundreds of pool states.
+  const capped = [...byAddr.values()].slice(0, 48);
 
   const states: (PoolState | null)[] = [];
-  const CONCURRENCY = 4;
+  const CONCURRENCY = 8;
   for (let i = 0; i < capped.length; i += CONCURRENCY) {
     const chunk = capped.slice(i, i + CONCURRENCY);
     const batch = await Promise.all(
       chunk.map(async (p) => {
         try {
-          if (p.venue === "pancake_v3" && p.address) {
+          // Any Uniswap-V3-style pool (Pancake or Uniswap V3 forks) is read the same way and executed
+          // by MoleRouter's shared V3 callback — the TickLens reads any V3 pool's ticks by address.
+          if ((p.venue === "pancake_v3" || p.venue === "uniswap_v3") && p.address) {
             return await fetchV3Pool(transport, p.address, PANCAKE_V3.tickLens);
           }
-          // v4 pools are read differently and are inactive today; skip until the indexer handles them.
+          // v4 pools are read via StateView (handled separately); skip here.
           return null;
         } catch {
           // Drop a pool that fails to read rather than failing the whole quote.
@@ -104,7 +125,24 @@ export async function fetchRelevantPoolStates(
     );
     states.push(...batch);
   }
-  return states.filter((s): s is PoolState => s !== null && (s.liquidity > 0n || s.ticks.length > 0));
+
+  const v3States = states.filter(
+    (s): s is PoolState => s !== null && (s.liquidity > 0n || s.ticks.length > 0),
+  );
+
+  // Add the MoleSwap v4 (MoleHook) pool as a venue whenever WETH or USDG is on the path — it is the
+  // WETH/USDG pool, so it competes on the direct pair and serves as a hub leg to USDG. Read via StateView.
+  const touchesV4 = inT === w || outT === w || inT === USDG_LC || outT === USDG_LC;
+  if (touchesV4) {
+    try {
+      const v4 = await fetchV4MolePool();
+      if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) v3States.push(v4);
+    } catch {
+      /* v4 read failed — quote on the V3 venues alone */
+    }
+  }
+
+  return v3States;
 }
 
 export interface SwapQuoteRequest {

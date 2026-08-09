@@ -22,7 +22,12 @@ const nextConfig = {
   },
   images: {
     unoptimized: true,
+    // Token logos are self-hosted SVGs under /public/tokens — allow SVG rendering.
+    dangerouslyAllowSVG: true,
+    contentDispositionType: "attachment",
+    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
     remotePatterns: [
+      { protocol: "https", hostname: "assets.relay.link" },
       { protocol: "https", hostname: "raw.githubusercontent.com" },
       { protocol: "https", hostname: "ethereum-optimism.github.io" },
     ],
