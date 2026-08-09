@@ -11,6 +11,17 @@
 import type { RpcTransport } from "./indexer";
 import { ROBINHOOD_RPC_URL } from "../mole/chain";
 
+/**
+ * The RPC every aggregator read goes through. Defaults to the configured endpoint
+ * (NEXT_PUBLIC_RH_RPC_URL, i.e. Alchemy) and only falls back to the public RPC when
+ * unset. This MUST match the endpoint the live-quote session uses, or the route the
+ * card displays (built on the configured RPC's full pool set) would differ from the
+ * route that executes (executeSwap re-quotes through this transport) — the public RPC
+ * rate-limits a many-pool fetch and silently drops venues, yielding a worse route.
+ */
+const DEFAULT_RPC_URL =
+  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) || ROBINHOOD_RPC_URL;
+
 interface JsonRpcResponse {
   id: number;
   result?: string;
@@ -18,7 +29,7 @@ interface JsonRpcResponse {
 }
 
 export class FetchTransport implements RpcTransport {
-  constructor(private readonly url: string = ROBINHOOD_RPC_URL) {}
+  constructor(private readonly url: string = DEFAULT_RPC_URL) {}
 
   async call(to: string, data: string): Promise<string> {
     const [out] = await this.batchCall([{ to, data }]);

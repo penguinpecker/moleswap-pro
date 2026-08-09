@@ -510,23 +510,28 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   // Per-part route rows: "47% · ETH → WETH → USDG · PancakeSwap V3 (0.05%)"
   const routeRows = useMemo(() => {
     if (!quote) return [];
-    const symbolFor = (addr: string) => {
+    const tokenInfoFor = (addr: string): { symbol: string; logo: string } => {
       const a = addr.toLowerCase();
-      if (a === NATIVE_MARKER.toLowerCase()) return "ETH";
+      if (a === NATIVE_MARKER.toLowerCase())
+        return { symbol: "ETH", logo: "/tokens/eth.svg" };
       const t = allTokens.find((x) => x.address?.toLowerCase() === a);
-      if (t) return displaySymbolOf(t);
-      if (a === CONTRACTS.WETH.toLowerCase()) return "WETH";
-      return `${addr.slice(0, 6)}…`;
+      if (t) return { symbol: displaySymbolOf(t), logo: t.logoURI || tokenFallbackIcon(a, displaySymbolOf(t)) };
+      if (a === CONTRACTS.WETH.toLowerCase())
+        return { symbol: "WETH", logo: "/tokens/weth.svg" };
+      const short = `${addr.slice(0, 6)}…`;
+      return { symbol: short, logo: tokenFallbackIcon(a, short) };
     };
     return quote.routes.map((r) => {
-      const path = [
-        symbolFor(r.hops[0]?.tokenIn ?? ""),
-        ...r.hops.map((h) => symbolFor(h.tokenOut)),
-      ].join(" → ");
+      // The token path with a logo for every node: tokenIn → …hops→ tokenOut.
+      const pathTokens = [
+        tokenInfoFor(r.hops[0]?.tokenIn ?? ""),
+        ...r.hops.map((h) => tokenInfoFor(h.tokenOut)),
+      ];
       const venues = [...new Set(r.hops.map((h) => `${h.venue} (${h.feePct})`))].join(" · ");
       return {
         pct: r.splitPct.toFixed(r.splitPct % 1 === 0 ? 0 : 1),
-        path,
+        pathTokens,
+        path: pathTokens.map((t) => t.symbol).join(" → "),
         venues,
         out: formatTokenAmount(r.amountOut, toTokenMeta?.decimals),
       };
@@ -1787,10 +1792,25 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                                 Route · {quote.poolsQuoted} pools scanned
                               </div>
                               {routeRows.map((r, i) => (
-                                <div key={i} className="flex items-baseline justify-between gap-2 text-xs">
-                                  <span className="text-yellow-100 whitespace-nowrap">{r.pct}%</span>
-                                  <span className="min-w-0 flex-1 truncate text-[#BCBCBC]">{r.path}</span>
-                                  <span className="text-[#9a9a9a] whitespace-nowrap">{r.venues}</span>
+                                <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                                  <span className="w-9 shrink-0 text-yellow-100">{r.pct}%</span>
+                                  {/* Token path with a logo for every hop node */}
+                                  <span className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                                    {r.pathTokens.map((t, j) => (
+                                      <span key={j} className="flex items-center gap-0.5">
+                                        {j > 0 && <span className="text-[#7a7a7a]">›</span>}
+                                        <Image
+                                          src={t.logo}
+                                          alt={t.symbol}
+                                          width={16}
+                                          height={16}
+                                          className="h-4 w-4 shrink-0 rounded-full"
+                                        />
+                                        <span className="text-[#BCBCBC]">{t.symbol}</span>
+                                      </span>
+                                    ))}
+                                  </span>
+                                  <span className="shrink-0 text-right text-[#9a9a9a]">{r.venues}</span>
                                 </div>
                               ))}
                             </div>
