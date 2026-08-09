@@ -15,7 +15,8 @@
 import { createPublicClient, http, type Address } from "viem";
 import { v4PoolState } from "./v4Pool";
 import type { PoolState, TickData } from "./v3Pool";
-import { robinhoodChain, LIVE_POOL_ID, LIVE_POOL_KEY, MOLE_ADDRESSES, DYNAMIC_FEE_FLAG, ROBINHOOD_RPC_URL } from "@/lib/mole/chain";
+import { robinhoodChain, LIVE_POOL_KEY, MOLE_ADDRESSES, DYNAMIC_FEE_FLAG, ROBINHOOD_RPC_URL } from "@/lib/mole/chain";
+import { poolIdOf, type V4PoolKey } from "@/lib/mole/poolId";
 
 const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b" as Address;
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;
@@ -38,10 +39,27 @@ function client() {
 
 /** Read the live MoleHook WETH/USDG pool and return it as a routable PoolState, or null if unquotable. */
 export async function fetchV4MolePool(): Promise<PoolState | null> {
+  return fetchV4Pool({
+    currency0: LIVE_POOL_KEY.currency0 as Address,
+    currency1: LIVE_POOL_KEY.currency1 as Address,
+    fee: DYNAMIC_FEE_FLAG,
+    tickSpacing: LIVE_POOL_KEY.tickSpacing,
+    hooks: LIVE_POOL_KEY.hooks as Address,
+  });
+}
+
+/**
+ * Read ANY MoleHook v4 pool (the live one or one created later via the operator flow) and return it as a
+ * routable PoolState, or null if unquotable. The pool id is derived from the key, so a newly-created +
+ * whitelisted pool routes the moment it is registered — no code change per pool.
+ */
+export async function fetchV4Pool(poolKey: V4PoolKey): Promise<PoolState | null> {
   try {
     const c = client();
-    const poolId = LIVE_POOL_ID as `0x${string}`;
-    const tickSpacing = LIVE_POOL_KEY.tickSpacing;
+    // fee on the KEY is always the dynamic-fee sentinel — that is what hashes to the pool id.
+    const key: V4PoolKey = { ...poolKey, fee: DYNAMIC_FEE_FLAG };
+    const poolId = poolIdOf(key) as `0x${string}`;
+    const tickSpacing = key.tickSpacing;
 
     const [slot0, liquidity, hookFee] = await Promise.all([
       c.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getSlot0", args: [poolId] }) as Promise<readonly [bigint, number, number, number]>,
@@ -90,11 +108,11 @@ export async function fetchV4MolePool(): Promise<PoolState | null> {
     // sentinel so the plan targets the real pool id.
     const state = v4PoolState({
       poolKey: {
-        currency0: LIVE_POOL_KEY.currency0,
-        currency1: LIVE_POOL_KEY.currency1,
+        currency0: key.currency0,
+        currency1: key.currency1,
         fee: lpFee,
         tickSpacing,
-        hooks: LIVE_POOL_KEY.hooks,
+        hooks: key.hooks,
       },
       sqrtPriceX96,
       tick,

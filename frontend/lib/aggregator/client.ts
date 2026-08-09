@@ -12,10 +12,10 @@ import { fetchV3Pool } from "./indexer";
 import { v4PoolState } from "./venues/v4Pool";
 import type { PoolState } from "./venues/v3Pool";
 import { FetchTransport } from "./transport";
-import { fetchV4MolePool } from "./venues/v4Reader";
+import { fetchV4MolePool, fetchV4Pool } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
 import { encodePlan, type EncodedPlan } from "./router";
-import { PANCAKE_V3 } from "../mole/chain";
+import { PANCAKE_V3, LIVE_POOL_ID, MOLE_ADDRESSES } from "../mole/chain";
 
 const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
@@ -130,8 +130,8 @@ export async function fetchRelevantPoolStates(
     (s): s is PoolState => s !== null && (s.liquidity > 0n || s.ticks.length > 0),
   );
 
-  // Add the MoleSwap v4 (MoleHook) pool as a venue whenever WETH or USDG is on the path — it is the
-  // WETH/USDG pool, so it competes on the direct pair and serves as a hub leg to USDG. Read via StateView.
+  // Add the live MoleSwap v4 (MoleHook) WETH/USDG pool as a venue whenever WETH or USDG is on the path —
+  // it competes on the direct pair and serves as a hub leg to USDG. Read via StateView.
   const touchesV4 = inT === w || outT === w || inT === USDG_LC || outT === USDG_LC;
   if (touchesV4) {
     try {
@@ -139,6 +139,32 @@ export async function fetchRelevantPoolStates(
       if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) v3States.push(v4);
     } catch {
       /* v4 read failed — quote on the V3 venues alone */
+    }
+  }
+
+  // Any OTHER whitelisted MoleHook pool created via the operator flow and registered in mp_pools routes
+  // automatically: its id is derived from the key, so no per-pool code. Fetch the ones on this path.
+  const extraV4 = pools.filter(
+    (p) =>
+      p.venue === "mole_v4" &&
+      p.active &&
+      p.id?.toLowerCase() !== LIVE_POOL_ID.toLowerCase() && // live pool already handled above
+      (isPair(p, inT, outT) ||
+        isPair(p, inT, w) || isPair(p, outT, w) ||
+        isPair(p, inT, USDG_LC) || isPair(p, outT, USDG_LC)),
+  );
+  for (const p of extraV4.slice(0, 8)) {
+    try {
+      const v4 = await fetchV4Pool({
+        currency0: p.token0 as `0x${string}`,
+        currency1: p.token1 as `0x${string}`,
+        fee: p.fee,
+        tickSpacing: p.tick_spacing,
+        hooks: (p.hooks || MOLE_ADDRESSES.moleHook) as `0x${string}`,
+      });
+      if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) v3States.push(v4);
+    } catch {
+      /* skip an unreadable v4 pool */
     }
   }
 
