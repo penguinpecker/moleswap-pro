@@ -91,19 +91,35 @@ export const TransactionInfoPage = ({
                 </div>
               </div>
             </div>
-            {/* Swap via */}
+            {/* Route — one clean row per split, with the token path and its venue */}
             <div className="px-4">
-              <div className="flex items-center">
-                <div className="border-ground-button-border bg-ground-button mr-3 flex h-10 w-10 items-center justify-center rounded-lg border-2 p-4">
-                  <span className="font-bold text-white">🔄</span>
+              <div className="mb-1 flex items-center gap-2">
+                <div className="border-ground-button-border bg-ground-button flex h-8 w-8 items-center justify-center rounded-lg border-2">
+                  <span className="text-sm">🔄</span>
                 </div>
-                <div><div className="font-family-ThaleahFat text-2xl text-zinc-100">{swapData.routeLabel || "AUTO ROUTE"}</div></div>
-                <div className="ml-auto">
-                  <button className="border-ground-button-border bg-ground-button cursor-pointer justify-center rounded border-2 p-1 text-yellow-100 hover:scale-105">
-                    <ArrowDown className="z-10 h-4 w-4" />
-                  </button>
-                </div>
+                <span className="font-family-ThaleahFat text-lg tracking-wider text-zinc-100 uppercase">Route</span>
               </div>
+              {Array.isArray(swapData.routes) && swapData.routes.length > 0 ? (
+                <div className="space-y-1 pl-1">
+                  {swapData.routes.map((r: any, i: number) => (
+                    <div key={i} className="flex items-center gap-2 text-xs sm:text-sm">
+                      <span className="w-9 shrink-0 font-bold text-yellow-100">{r.pct}%</span>
+                      <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+                        {(r.pathTokens || []).map((t: any, j: number) => (
+                          <span key={j} className="flex items-center gap-1">
+                            {j > 0 && <span className="text-[#7a7a7a]">›</span>}
+                            <img src={t.logo} alt={t.symbol} width={16} height={16} className="h-4 w-4 rounded-full" />
+                            <span className="text-stone-200">{t.symbol}</span>
+                          </span>
+                        ))}
+                      </span>
+                      <span className="shrink-0 text-right text-[#9a9a9a]">{r.venues}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="font-family-ThaleahFat pl-1 text-lg text-zinc-100">{swapData.routeLabel || "AUTO ROUTE"}</div>
+              )}
             </div>
             {/* Status */}
             <div className="flex justify-between gap-4 px-4">

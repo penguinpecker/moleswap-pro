@@ -17,6 +17,7 @@ import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { createClient as createSupabaseBrowser } from "@/lib/supabase/client";
 import { tokenHasPool } from "@/lib/aggregator/discover";
 import { searchIndex, heldTokens, popularTokens, type IndexedToken, type HeldToken } from "@/lib/chain/tokenSearch";
+import { fetchTokenInfo, fmtUsd, shortAddr, type TokenMarketInfo } from "@/lib/chain/tokenInfo";
 import Settings from "../settings";
 import { diagnostics } from "@/lib/diagnostics";
 
@@ -107,6 +108,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   const [loadingHeld, setLoadingHeld] = useState(false);
   // The default "verified" list: most-liquid vetted tokens on the chain.
   const [popularList, setPopularList] = useState<IndexedToken[]>([]);
+  // Live market data (logo, mcap, liquidity, dexscreener link) for the visible picker rows.
+  const [marketInfo, setMarketInfo] = useState<Map<string, TokenMarketInfo>>(new Map());
 
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -771,6 +774,14 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setAmountFromRaw(raw, decimals);
   };
 
+  // Honest ETA on Robinhood Chain: ~1s blocks, so a swap confirms in inclusion (~2s) plus roughly one
+  // block per hop of the deepest route.
+  const etaSeconds = useMemo(() => {
+    if (!quote) return undefined;
+    const maxHops = quote.routes.reduce((m, r) => Math.max(m, r.hops.length), 1);
+    return 2 + maxHops;
+  }, [quote]);
+
   const handleReviewSwap = () => {
     if (!quote) {
       // eslint-disable-next-line no-console
@@ -788,6 +799,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       toTokenMeta,
       fromChain,
       toChain,
+      // Structured route rows (with per-hop token logos) for a clean depiction downstream.
+      routes: routeRows,
       routeLabel:
         routeRows.length > 0
           ? routeRows.map((r) => `${r.pct}% ${r.path}`).join("  |  ")
@@ -795,6 +808,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       feesLabel: networkFeeLabel || "-",
       priceImpact: priceImpactLabel?.text,
       rateLabel: rateLabel || "-",
+      etaSeconds,
       walletAddress,
       recipientAddress: recipientAddress || walletAddress,
     });
@@ -944,6 +958,29 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     for (const t of searchResults) add(t); // whole-chain index matches
     return out;
   }, [modalTokens, searchQuery, searchResults]);
+
+  // Enrich the visible picker rows with live market data (logo, mcap, liquidity, dexscreener link).
+  useEffect(() => {
+    if (selectionMode === "none") return;
+    const addrs = filteredModalTokens
+      .map((t) => t.address)
+      .filter((a) => a && a.toLowerCase() !== "0x0000000000000000000000000000000000000000")
+      .slice(0, 40);
+    if (addrs.length === 0) return;
+    let cancelled = false;
+    fetchTokenInfo(addrs).then((m) => {
+      if (cancelled || m.size === 0) return;
+      setMarketInfo((prev) => {
+        const next = new Map(prev);
+        for (const [k, v] of m) next.set(k, v);
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectionMode, filteredModalTokens]);
 
   // Fetch balances for all tokens in the selected network
   // Optimized to batch fetch and cache results (similar to relay-kit demo pattern)
@@ -1220,52 +1257,68 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                         onClick={() => handleSelectToken(token)}
                         className={`relative cursor-pointer px-6 py-4 text-left`}
                       >
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="flex items-center justify-start gap-4">
-                            <div className="border-ground-button-border h-14 w-14 overflow-hidden">
-                              <Image
-                                src={token.logoURI || "/placeholder-logo.png"}
-                                alt={token.symbol || "token"}
-                                width={56}
-                                height={56}
-                                className="h-full w-full object-cover"
-                              />
+                        {(() => {
+                          const mi = marketInfo.get(token.address?.toLowerCase() || "");
+                          const rowLogo = mi?.logo || token.logoURI || tokenFallbackIcon(token.address, symbolLabel);
+                          const heldBal = (token as any).balance as string | undefined;
+                          const fetched = tokenBalances[`${selectedNetwork}-${token.address}`];
+                          const shownBal = heldBal ?? (fetched != null ? String(fetched) : undefined);
+                          const isNative = token.address?.toLowerCase() === "0x0000000000000000000000000000000000000000";
+                          return (
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex min-w-0 items-center justify-start gap-3">
+                            <div className="border-ground-button-border h-12 w-12 shrink-0 overflow-hidden rounded-lg sm:h-14 sm:w-14">
+                              {/* market logo can be any external CDN — plain img avoids next/image domain config */}
+                              <img src={rowLogo} alt={token.symbol || "token"} width={56} height={56} className="h-full w-full object-cover" />
                             </div>
-                            <div className="text-left">
-                              <h2 className="font-family-ThaleahFat flex items-center gap-1.5 text-xl tracking-wider text-white uppercase sm:text-3xl sm:tracking-widest">
+                            <div className="min-w-0 text-left">
+                              <h2 className="font-family-ThaleahFat flex items-center gap-1.5 text-lg tracking-wider text-white uppercase sm:text-2xl sm:tracking-widest">
                                 {symbolLabel}
                                 {(token as any).verified && (
-                                  <span title="Verified — has real liquidity" className="text-sm text-[#4ADE80] sm:text-base">✓</span>
+                                  <span title="Verified — has real liquidity" className="text-xs text-[#4ADE80] sm:text-sm">✓</span>
                                 )}
                               </h2>
-                              <p className="font-family-ThaleahFat -mt-1 text-sm tracking-wider text-[#B0B0B0] uppercase sm:-mt-2 sm:text-lg sm:tracking-widest">
+                              <p className="font-family-ThaleahFat -mt-0.5 truncate text-xs tracking-wider text-[#B0B0B0] uppercase sm:text-base sm:tracking-widest">
                                 {subtitleLabel}
                                 {searchQuery.trim() && (token as any).verified === false && (
                                   <span className="ml-2 text-xs text-yellow-500/80 normal-case">· unverified</span>
                                 )}
                               </p>
+                              {/* live market stats + address */}
+                              {!isNative && (
+                                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] normal-case sm:text-xs">
+                                  {mi?.marketCap != null && <span className="text-[#9a9a9a]">MC {fmtUsd(mi.marketCap)}</span>}
+                                  {mi?.liquidityUsd != null && <span className="text-[#9a9a9a]">Liq {fmtUsd(mi.liquidityUsd)}</span>}
+                                  {mi?.priceChange24 != null && (
+                                    <span className={mi.priceChange24 >= 0 ? "text-green-400" : "text-red-400"}>
+                                      {mi.priceChange24 >= 0 ? "+" : ""}{mi.priceChange24.toFixed(1)}%
+                                    </span>
+                                  )}
+                                  <span className="font-mono text-[#6f6f6f]">{shortAddr(token.address)}</span>
+                                </div>
+                              )}
                             </div>
                           </div>
-                          {walletAddress && (() => {
-                            // Held tokens carry their own balance; otherwise use the per-token fetch.
-                            const heldBal = (token as any).balance as string | undefined;
-                            const fetched = tokenBalances[`${selectedNetwork}-${token.address}`];
-                            const shown = heldBal ?? (fetched != null ? String(fetched) : undefined);
-                            const isLoading = heldBal == null && loadingBalances[`${selectedNetwork}-${token.address}`];
-                            if (!shown && !isLoading) return null;
-                            return (
-                              <div className="text-right">
-                                {isLoading ? (
-                                  <span className="font-family-ThaleahFat text-base text-gray-400">…</span>
-                                ) : (
-                                  <span className="font-family-ThaleahFat text-lg text-yellow-100">
-                                    {Number(shown || 0).toLocaleString(undefined, { maximumFractionDigits: 6, minimumFractionDigits: 0 })}
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          })()}
+                          <div className="flex shrink-0 flex-col items-end gap-1">
+                            {mi?.dexUrl && (
+                              <span
+                                role="link"
+                                title="View on DexScreener"
+                                onClick={(e) => { e.stopPropagation(); window.open(mi.dexUrl!, "_blank", "noopener,noreferrer"); }}
+                                className="cursor-pointer text-xs font-bold tracking-wider text-[#7DD3FC] hover:underline"
+                              >
+                                DEX ↗
+                              </span>
+                            )}
+                            {walletAddress && shownBal && (
+                              <span className="font-family-ThaleahFat text-base text-yellow-100 sm:text-lg">
+                                {Number(shownBal || 0).toLocaleString(undefined, { maximumFractionDigits: 6, minimumFractionDigits: 0 })}
+                              </span>
+                            )}
+                          </div>
                         </div>
+                          );
+                        })()}
 
                         <Image
                           src={`${
@@ -1950,6 +2003,12 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                             <span className="text-[#9a9a9a]">Aggregator fee</span>
                             <span className="text-green-300">0%</span>
                           </div>
+                          {etaSeconds != null && (
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[#9a9a9a]">Est. time</span>
+                              <span className="text-yellow-100">~{etaSeconds}s</span>
+                            </div>
+                          )}
                         </div>
 
                         {/* Route breakdown — every split, its path and venue */}

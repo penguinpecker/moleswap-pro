@@ -302,7 +302,8 @@ export async function approveToken(
       account,
       chain: robinhoodChain,
     });
-    await publicClient().waitForTransactionReceipt({ hash });
+    const rcpt = await publicClient().waitForTransactionReceipt({ hash });
+    if (rcpt.status !== "success") return { success: false, txHash: hash, error: "Approval reverted on-chain" };
     return { success: true, txHash: hash };
   } catch (err) {
     return { success: false, error: getContractErrorMessage(err) };
@@ -382,7 +383,23 @@ export async function executeSwap(params: {
       }
     }
 
+    // Simulate against live state first — catches an obvious revert (e.g. price already moved past
+    // minOut) BEFORE the user signs and pays gas, and surfaces the exact reason.
     onStep(0, "Swap", "signing");
+    try {
+      await pub.simulateContract({
+        address: CONTRACTS.MOLE_ROUTER as `0x${string}`,
+        abi: moleRouterAbi as any,
+        functionName: "swap",
+        args: [q.encoded as any],
+        value: q.value,
+        account,
+      });
+    } catch (simErr) {
+      onStep(0, "Swap", "error");
+      return { success: false, error: getContractErrorMessage(simErr) };
+    }
+
     const hash = await wallet.writeContract({
       address: CONTRACTS.MOLE_ROUTER as `0x${string}`,
       abi: moleRouterAbi as any,
@@ -392,7 +409,13 @@ export async function executeSwap(params: {
       account,
       chain: robinhoodChain,
     });
-    await pub.waitForTransactionReceipt({ hash });
+    // CRITICAL: waitForTransactionReceipt does NOT throw on a reverted tx — it returns status
+    // "reverted". Without this check the UI reported "SWAP COMPLETED" for a failed swap.
+    const receipt = await pub.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") {
+      onStep(0, "Swap", "error");
+      return { success: false, txHash: hash, error: "Swap reverted on-chain — the price moved past your minimum. Try again or raise slippage." };
+    }
     onStep(0, "Swap", "confirmed");
 
     return { success: true, txHash: hash, amountOut: q.quote.amountOut.toString() };
