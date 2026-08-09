@@ -1,14 +1,23 @@
 import { NextRequest } from "next/server";
 import { ethers } from "ethers";
+import { encodeFunctionData } from "viem";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import {
-  CONTRACTS, RH_RPC_URL, RH_CHAIN_ID,
-  SWAP_ROUTER_ABI, ERC20_ABI, FEE_ROUTER_ABI,
-  getTokenByAddress, findPool,
-} from "@/lib/chain/contracts";
+import { CONTRACTS, RH_CHAIN_ID, RH_RPC_URL, getTokenByAddress } from "@/lib/chain/contracts";
+import { quoteSwap } from "@/lib/aggregator/client";
+import { moleRouterAbi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
+import { loadPoolRowsServer } from "@/lib/aggregator/serverPools";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// Builds the exact MoleRouter.swap(plan) calldata the app itself sends (lib/chain/amm.ts executeSwap).
+// The router wraps/unwraps native at the route edges, so there is no manual wrap step for an aggregator
+// swap — native input rides along as msg.value. The prior version encoded a `swapExactInputSingle` that
+// does not exist in the router ABI, so every real swap 500'd.
+
+const ZERO = ethers.ZeroAddress.toLowerCase();
+const toAgg = (a: string) => (a.toLowerCase() === ZERO || a.toLowerCase() === "native" ? NATIVE_SENTINEL : a);
+const MAX_UINT = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 
 export async function OPTIONS() {
   return corsPreflightResponse();
@@ -20,138 +29,94 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const {
-      tokenIn,
-      tokenOut,
-      amountIn,
-      amountOutMin,
-      recipient,
-      fee,
-      slippageBps = 50,
-      deadline,
-    } = body;
+    const { tokenIn, tokenOut, amountIn, recipient, slippageBps = 50 } = body;
 
     if (!tokenIn || !tokenOut || !amountIn || !recipient) {
-      return apiError(
-        "Missing required fields: tokenIn, tokenOut, amountIn (wei), recipient",
-        400
-      );
+      return apiError("Missing required fields: tokenIn, tokenOut, amountIn (wei), recipient", 400);
     }
+    if (!ethers.isAddress(recipient)) return apiError("Invalid recipient address", 400);
+    if (!ethers.isAddress(tokenIn) && tokenIn.toLowerCase() !== ZERO) return apiError("Invalid tokenIn address", 400);
+    if (!ethers.isAddress(tokenOut) && tokenOut.toLowerCase() !== ZERO) return apiError("Invalid tokenOut address", 400);
 
-    if (!ethers.isAddress(recipient)) {
-      return apiError("Invalid recipient address", 400);
+    let amountInBig: bigint;
+    try {
+      amountInBig = BigInt(amountIn);
+    } catch {
+      return apiError("amountIn must be an integer string in wei", 400);
     }
+    if (amountInBig <= 0n) return apiError("amountIn must be > 0", 400);
 
-    const isNativeIn = tokenIn === ethers.ZeroAddress;
-    const isNativeOut = tokenOut === ethers.ZeroAddress;
+    const bps = Math.max(0, Math.min(5000, Number(slippageBps) || 0));
+    const isNativeIn = tokenIn.toLowerCase() === ZERO;
+    const isNativeOut = tokenOut.toLowerCase() === ZERO;
     const actualIn = isNativeIn ? CONTRACTS.WETH : tokenIn;
     const actualOut = isNativeOut ? CONTRACTS.WETH : tokenOut;
-    const amountInBig = BigInt(amountIn);
-    const txDeadline = deadline || Math.floor(Date.now() / 1000) + 1800;
 
-    const isWrap =
-      isNativeIn &&
-      actualOut.toLowerCase() === CONTRACTS.WETH.toLowerCase();
-    const isUnwrap =
-      actualIn.toLowerCase() === CONTRACTS.WETH.toLowerCase() &&
-      isNativeOut;
-
-    if (isWrap) {
+    // native <-> WETH is a pure 1:1 wrap/unwrap — no router, no route.
+    if (isNativeIn && actualOut.toLowerCase() === CONTRACTS.WETH.toLowerCase()) {
       const wethIface = new ethers.Interface(["function deposit() payable"]);
       return apiResponse({
         type: "wrap",
         description: "Wrap native ETH → WETH (1:1)",
-        transactions: [
-          {
-            to: CONTRACTS.WETH,
-            value: amountIn,
-            data: wethIface.encodeFunctionData("deposit"),
-            description: "deposit() — wrap PC to WETH",
-          },
-        ],
+        transactions: [{ to: CONTRACTS.WETH, value: amountIn, data: wethIface.encodeFunctionData("deposit"), description: "deposit()" }],
         chainId: RH_CHAIN_ID,
       });
     }
-
-    if (isUnwrap) {
+    if (actualIn.toLowerCase() === CONTRACTS.WETH.toLowerCase() && isNativeOut) {
       const wethIface = new ethers.Interface(["function withdraw(uint256 wad)"]);
       return apiResponse({
         type: "unwrap",
         description: "Unwrap WETH → native ETH (1:1)",
-        transactions: [
-          {
-            to: CONTRACTS.WETH,
-            value: "0",
-            data: wethIface.encodeFunctionData("withdraw", [amountInBig]),
-            description: "withdraw() — unwrap WETH to PC",
-          },
-        ],
+        transactions: [{ to: CONTRACTS.WETH, value: "0", data: wethIface.encodeFunctionData("withdraw", [amountInBig]), description: "withdraw()" }],
         chainId: RH_CHAIN_ID,
       });
     }
 
-    const pool = findPool(actualIn, actualOut);
-    const poolFee = fee || pool?.fee || 500;
+    const rows = await loadPoolRowsServer(Date.now());
+    if (rows.length === 0) return apiError("Pool registry unavailable — try again shortly", 503);
 
-    const computedMinOut = amountOutMin
-      ? BigInt(amountOutMin)
-      : (amountInBig * BigInt(10000 - slippageBps)) / 10000n;
+    const q = await quoteSwap(rows, {
+      tokenIn: toAgg(tokenIn),
+      tokenOut: toAgg(tokenOut),
+      amountIn: amountInBig,
+      recipient,
+      slippageBps: bps,
+      weth: CONTRACTS.WETH,
+    });
+    if (!q) return apiError("No liquidity route found for this pair", 404);
 
     const transactions: any[] = [];
 
-    if (isNativeIn) {
-      const wethIface = new ethers.Interface(["function deposit() payable"]);
+    // ERC-20 input needs a standing allowance to MoleRouter; native input rides as msg.value.
+    if (!isNativeIn) {
+      const approveIface = new ethers.Interface(["function approve(address spender, uint256 amount) returns (bool)"]);
       transactions.push({
-        to: CONTRACTS.WETH,
-        value: amountIn,
-        data: wethIface.encodeFunctionData("deposit"),
-        description: "Step 1: Wrap PC → WETH",
+        to: actualIn,
+        value: "0",
+        data: approveIface.encodeFunctionData("approve", [CONTRACTS.MOLE_ROUTER, MAX_UINT]),
+        description: "Approve MoleRouter (skip if allowance already covers amountIn)",
       });
     }
 
-    const approveIface = new ethers.Interface([
-      "function approve(address spender, uint256 amount) returns (bool)",
-    ]);
-    const MAX_UINT =
-      "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    const swapData = encodeFunctionData({ abi: moleRouterAbi as any, functionName: "swap", args: [q.encoded as any] });
     transactions.push({
-      to: isNativeIn ? CONTRACTS.WETH : tokenIn,
-      value: "0",
-      data: approveIface.encodeFunctionData("approve", [
-        CONTRACTS.MOLESWAP_FEE_ROUTER,
-        MAX_UINT,
-      ]),
-      description: `Step ${isNativeIn ? 2 : 1}: Approve MoleSwap FeeRouter`,
-      note: "Can skip if allowance is already sufficient",
-    });
-
-    const routerIface = new ethers.Interface(FEE_ROUTER_ABI);
-    const swapCalldata = routerIface.encodeFunctionData("swapExactInputSingle", [
-      actualIn,
-      actualOut,
-      poolFee,
-      amountInBig,
-      computedMinOut,
-      txDeadline,
-      0,
-    ]);
-
-    transactions.push({
-      to: CONTRACTS.MOLESWAP_FEE_ROUTER,
-      value: "0",
-      data: swapCalldata,
-      description: `Step ${isNativeIn ? 3 : 2}: swapExactInputSingle via MoleSwap FeeRouter`,
+      to: CONTRACTS.MOLE_ROUTER,
+      value: q.value.toString(),
+      data: swapData,
+      description: "MoleRouter.swap — executes the routed plan",
     });
 
     return apiResponse({
       type: "swap",
-      description: `Swap ${getTokenByAddress(tokenIn)?.symbol || "?"} → ${getTokenByAddress(tokenOut)?.symbol || "?"}`,
-      pool: pool?.address || null,
-      fee: poolFee,
+      description: `Swap ${getTokenByAddress(tokenIn)?.symbol || tokenIn.slice(0, 8)} → ${getTokenByAddress(tokenOut)?.symbol || tokenOut.slice(0, 8)}`,
+      amountOut: q.quote.amountOut.toString(),
+      minReceived: q.quote.minAmountOut.toString(),
+      route: q.quote.routeDescriptions.join(" + "),
+      slippageBps: bps,
       transactions,
       chainId: RH_CHAIN_ID,
       rpc: RH_RPC_URL,
-      note: "Sign and send transactions sequentially. Wait for each to confirm before sending the next.",
+      note: "Send the approval (if present) first and wait for it to confirm, then send the swap.",
     });
   } catch (err: any) {
     return apiError(err.message || "Failed to build swap transaction", 500);

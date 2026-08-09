@@ -138,95 +138,22 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (amount0Desired && amount1Desired) {
-      const isNativeA = tokenA === ethers.ZeroAddress;
-      const isNativeB = tokenB === ethers.ZeroAddress;
-      const needsWrap = isNativeA || isNativeB;
-      const wrapAmount = isNativeA ? amount0Desired : isNativeB ? amount1Desired : "0";
-
-      if (needsWrap && BigInt(wrapAmount) > 0n) {
-        const wpcIface = new ethers.Interface(["function deposit() payable"]);
-        transactions.push({
-          to: CONTRACTS.WETH,
-          value: wrapAmount,
-          data: wpcIface.encodeFunctionData("deposit"),
-          description: "Wrap native PC → WETH",
-        });
-      }
-
-      const approveIface = new ethers.Interface([
-        "function approve(address, uint256) returns (bool)",
-      ]);
-      const MAX_UINT =
-        "115792089237316195423570985008687907853269984665640564039457584007913129639935";
-
-      transactions.push({
-        to: token0,
-        value: "0",
-        data: approveIface.encodeFunctionData("approve", [
-          CONTRACTS.MOLESWAP_LIQUIDITY_PROXY,
-          MAX_UINT,
-        ]),
-        description: `Approve ${token0Info?.symbol || "token0"} for MoleSwap LiquidityProxy`,
-      });
-
-      transactions.push({
-        to: token1,
-        value: "0",
-        data: approveIface.encodeFunctionData("approve", [
-          CONTRACTS.MOLESWAP_LIQUIDITY_PROXY,
-          MAX_UINT,
-        ]),
-        description: `Approve ${token1Info?.symbol || "token1"} for MoleSwap LiquidityProxy`,
-      });
-
-      const spacing = TICK_SPACINGS[fee] || 10;
-      const tLower =
-        tickLower != null
-          ? tickLower
-          : nearestUsableTick(MIN_TICK, spacing);
-      const tUpper =
-        tickUpper != null
-          ? tickUpper
-          : nearestUsableTick(MAX_TICK, spacing);
-
-      const amt0 = BigInt(amount0Desired);
-      const amt1 = BigInt(amount1Desired);
-      // See amm.ts:1742 — `amountXMin` is min amount actually consumed by the
-      // pool, not "slippage on the desired upper bound". Applying % slippage
-      // to desired makes mint revert with "Price slippage check" because the
-      // pool consumes less of one side than the user typed. Default to 0;
-      // tickLower/tickUpper already define the acceptable price range.
-      const amt0Min = 0n;
-      const amt1Min = 0n;
-
-      const proxyIface = new ethers.Interface(LIQUIDITY_PROXY_ABI);
-      transactions.push({
-        to: CONTRACTS.MOLESWAP_LIQUIDITY_PROXY,
-        value: "0",
-        data: proxyIface.encodeFunctionData("mint", [
-          {
-            token0,
-            token1,
-            fee,
-            tickLower: tLower,
-            tickUpper: tUpper,
-            amount0Desired: amt0,
-            amount1Desired: amt1,
-            amount0Min: amt0Min,
-            amount1Min: amt1Min,
-            deadline: txDeadline,
-          },
-        ]),
-        description: "Mint liquidity position via MoleSwap LiquidityProxy",
-      });
-    }
+    // Seeding a freshly-created pool needs a NonfungiblePositionManager, which is NOT deployed on
+    // Robinhood Chain (the old code encoded `mint` against an empty ABI and 500'd). We therefore return
+    // only the real, executable steps: createPool [+ initialize]. For the canonical WETH/USDG pool,
+    // liquidity is added single-sided through the ALM vault (MolePositions.zapOpen) — see /vault.
+    const seedNote =
+      amount0Desired && amount1Desired
+        ? "Seeding liquidity into a new pool is not supported on this chain (no position manager). " +
+          `Provide liquidity to the canonical WETH/USDG pool via the ALM vault (MolePositions ${CONTRACTS.MOLE_POSITIONS}, zapOpen) at /vault.`
+        : undefined;
 
     return apiResponse({
-      type: poolExists ? "add_liquidity_existing" : "create_pool",
+      type: poolExists ? "pool_exists" : "create_pool",
       description: poolExists
-        ? `Pool already exists at ${existingPool}. Adding liquidity.`
-        : `Create new pool and seed liquidity`,
+        ? `Pool already exists at ${existingPool}.`
+        : `Create new pool${initialPrice ? " and initialize its price" : ""}`,
+      seedNote,
       pool: poolExists ? existingPool : null,
       token0: {
         address: token0,
