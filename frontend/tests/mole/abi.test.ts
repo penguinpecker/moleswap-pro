@@ -96,7 +96,10 @@ describe("MolePositions write surface", () => {
     expect(open.stateMutability).toBe("nonpayable");
   });
 
-  it("zapOpen tuple: (key, tickLower int24, tickUpper int24, zeroForOne bool, amountIn uint256, swapAmount uint256, minLiquidity uint128) + deadline", () => {
+  it("zapOpen tuple: (key, tickLower int24, tickUpper int24, zeroForOne bool, amountIn uint256, swapAmount uint256, minLiquidity uint128, amountOutMin uint256) + deadline", () => {
+    // amountOutMin is the REAL slippage bound (ZapLogic.ZapParams field 8) — minLiquidity alone is not
+    // protection on a one-sided zap. The ABI MUST carry it or the encoded calldata is short a field and
+    // the zap reverts. See src/libraries/ZapLogic.sol.
     const zap = fn(molePositionsAbi as readonly AbiFn[], "zapOpen");
     const z = zap.inputs?.[0];
     expect(shape(z?.components).slice(1)).toEqual([
@@ -106,6 +109,7 @@ describe("MolePositions write surface", () => {
       ["amountIn", "uint256"],
       ["swapAmount", "uint256"],
       ["minLiquidity", "uint128"],
+      ["amountOutMin", "uint256"],
     ]);
     expect(shape(zap.inputs).slice(1)).toEqual([["deadline", "uint256"]]);
     expect(shape(zap.outputs)).toEqual([["id", "uint256"]]);

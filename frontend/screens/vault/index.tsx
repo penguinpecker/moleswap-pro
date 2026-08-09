@@ -1,36 +1,59 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { parseUnits, formatUnits } from "viem";
 import { BackgroundImage, NavBar } from "../shared";
 import { ConnectWalletButton } from "@/components/ConnectWalletButton";
 import { useWallet } from "@/lib/chain/provider";
 import { WETH, USDG } from "@/lib/mole/chain";
-import { getAlmPositions, almDeposit, almWithdraw, type AlmPosition } from "@/lib/mole/vault";
+import {
+  getAlmPositions,
+  getVaultBalances,
+  almDeposit,
+  almWithdraw,
+  type AlmPosition,
+  type VaultBalances,
+} from "@/lib/mole/vault";
 
 const TOKENS = [WETH, USDG];
+const ZERO_BAL: VaultBalances = { weth: 0n, usdg: 0n, native: 0n };
+
+/** Trim a formatted amount to a readable number of places without rounding the value up. */
+function trimAmount(raw: string, maxFrac: number): string {
+  if (!raw.includes(".")) return raw;
+  const [whole, frac] = raw.split(".");
+  const cut = frac.slice(0, maxFrac).replace(/0+$/, "");
+  return cut ? `${whole}.${cut}` : whole;
+}
 
 export default function VaultPage() {
   const { address, isConnected, onRH } = useWallet();
   const [tokenIdx, setTokenIdx] = useState(0); // 0 = WETH, 1 = USDG
   const [amount, setAmount] = useState("");
   const [positions, setPositions] = useState<AlmPosition[]>([]);
+  const [balances, setBalances] = useState<VaultBalances>(ZERO_BAL);
   const [loadingPos, setLoadingPos] = useState(false);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
 
   const token = TOKENS[tokenIdx];
+  const tokenBalance = tokenIdx === 0 ? balances.weth : balances.usdg;
 
   const refresh = useCallback(async () => {
     if (!address) {
       setPositions([]);
+      setBalances(ZERO_BAL);
       return;
     }
     setLoadingPos(true);
     try {
-      setPositions(await getAlmPositions(address));
+      const [pos, bal] = await Promise.all([getAlmPositions(address), getVaultBalances(address)]);
+      setPositions(pos);
+      setBalances(bal);
     } catch {
       setPositions([]);
+      setBalances(ZERO_BAL);
     } finally {
       setLoadingPos(false);
     }
@@ -48,8 +71,17 @@ export default function VaultPage() {
     }
   }, [amount, token.decimals]);
 
+  const setFraction = (num: bigint, den: bigint) => {
+    // Floor to the token's decimals so a "MAX" can never exceed the on-chain balance.
+    const wei = (tokenBalance * num) / den;
+    setAmount(trimAmount(formatUnits(wei, token.decimals), token.decimals === 6 ? 6 : 8));
+  };
+
+  const insufficient = amountWei > tokenBalance;
+  const zeroBalance = tokenBalance === 0n;
+
   const onDeposit = async () => {
-    if (!isConnected || !onRH || amountWei <= 0n) return;
+    if (!isConnected || !onRH || amountWei <= 0n || insufficient) return;
     setBusy(true);
     setStatus(`Depositing ${amount} ${token.symbol}…`);
     const r = await almDeposit(token.address as `0x${string}`, amountWei);
@@ -78,9 +110,11 @@ export default function VaultPage() {
       ? "SWITCH TO ROBINHOOD"
       : busy
         ? "WORKING…"
-        : amountWei > 0n
-          ? `DEPOSIT ${token.symbol}`
-          : "ENTER AN AMOUNT";
+        : amountWei <= 0n
+          ? "ENTER AN AMOUNT"
+          : insufficient
+            ? `NOT ENOUGH ${token.symbol}`
+            : `DEPOSIT ${token.symbol}`;
 
   return (
     <div className="relative flex min-h-screen w-full flex-col items-center gap-2 sm:gap-4">
@@ -105,8 +139,19 @@ export default function VaultPage() {
 
         {/* Deposit card */}
         <div className="bg-ground w-full rounded-2xl border-3 border-[#523525] p-5 shadow-[6px_6px_0_#000]">
-          <div className="font-family-ThaleahFat text-peach-300 mb-3 text-xl tracking-widest">DEPOSIT</div>
-          <div className="flex items-center gap-2 rounded-xl border-2 border-[#523525] bg-[#2a1c12] px-4 py-3">
+          <div className="mb-3 flex items-baseline justify-between">
+            <span className="font-family-ThaleahFat text-peach-300 text-xl tracking-widest">DEPOSIT</span>
+            {isConnected && (
+              <span className="font-family-ThaleahFat text-xs tracking-wider text-gray-300">
+                Balance: {trimAmount(formatUnits(tokenBalance, token.decimals), 6)} {token.symbol}
+              </span>
+            )}
+          </div>
+          <div
+            className={`flex items-center gap-2 rounded-xl border-2 bg-[#2a1c12] px-4 py-3 ${
+              insufficient ? "border-red-600" : "border-[#523525]"
+            }`}
+          >
             <input
               className="font-family-ThaleahFat flex-1 bg-transparent text-2xl text-white outline-none"
               placeholder="0.0"
@@ -118,7 +163,10 @@ export default function VaultPage() {
               {TOKENS.map((t, i) => (
                 <button
                   key={t.symbol}
-                  onClick={() => setTokenIdx(i)}
+                  onClick={() => {
+                    setTokenIdx(i);
+                    setAmount("");
+                  }}
                   className={`font-family-ThaleahFat rounded-lg border-2 px-3 py-1 text-lg tracking-wider transition-all ${
                     tokenIdx === i
                       ? "border-[#C97E00] bg-[#523525] text-yellow-200"
@@ -130,13 +178,52 @@ export default function VaultPage() {
               ))}
             </div>
           </div>
-          <p className="font-family-ThaleahFat mt-2 text-xs tracking-wider text-gray-400">
-            Full-range position · balanced 50/50 by the vault. minLiquidity slippage on the internal zap
-            is not enforced by the contract — start with a small amount.
+
+          {/* Quick-fill from balance */}
+          {isConnected && tokenBalance > 0n && (
+            <div className="mt-2 flex gap-2">
+              {[
+                { label: "25%", num: 1n, den: 4n },
+                { label: "50%", num: 1n, den: 2n },
+                { label: "75%", num: 3n, den: 4n },
+                { label: "MAX", num: 1n, den: 1n },
+              ].map((f) => (
+                <button
+                  key={f.label}
+                  onClick={() => setFraction(f.num, f.den)}
+                  className="font-family-ThaleahFat flex-1 cursor-pointer rounded-lg border-2 border-[#523525] py-1 text-xs tracking-wider text-peach-300 transition-all hover:border-[#C97E00] hover:text-yellow-200"
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <p className="font-family-ThaleahFat mt-3 text-xs tracking-wider text-gray-400">
+            Single-sided zap: deposit {token.symbol} and the vault swaps half and mints a bounded ±15k-tick
+            range around spot. The swap leg is slippage-bounded (amountOutMin, 1%) and every deposit is
+            simulated against the vault before it is sent.
           </p>
+
+          {/* Zero-balance guidance — the vault can only pull WETH/USDG; native ETH just pays gas here. */}
+          {isConnected && onRH && zeroBalance && (
+            <div className="mt-3 rounded-xl border-2 border-[#5a4a2a] bg-[#2a2213] px-4 py-3">
+              <p className="font-family-ThaleahFat text-xs tracking-wider text-yellow-200">
+                You have 0 {token.symbol}. The vault holds a WETH/USDG position, so you need WETH or USDG
+                {balances.native > 0n ? " (your ETH here only pays gas)" : ""}.
+              </p>
+              <Link
+                href={`/dapp?to=${token.address}&toChainId=4663`}
+                className="font-family-ThaleahFat mt-2 inline-block cursor-pointer rounded-lg border-2 border-[#3f7d20] bg-[#4e9d2a] px-4 py-2 text-sm tracking-wider text-white transition-all hover:brightness-110"
+              >
+                GET {token.symbol} IN SWAP →
+              </Link>
+            </div>
+          )}
+
           <button
             onClick={onDeposit}
-            disabled={busy || (isConnected && onRH && amountWei <= 0n)}
+            disabled={busy || (isConnected && onRH && (amountWei <= 0n || insufficient))}
             className="font-family-ThaleahFat mt-4 w-full cursor-pointer rounded-xl border-3 border-[#3f7d20] bg-[#4e9d2a] px-4 py-3 text-xl font-bold tracking-wider text-white shadow-[0px_4px_0px_#2f6318] transition-all hover:brightness-110 active:translate-y-0.5 disabled:opacity-60"
           >
             {cta}

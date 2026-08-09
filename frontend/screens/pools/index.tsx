@@ -1246,13 +1246,18 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
           <button onClick={() => setTxError(null)} className="font-family-ThaleahFat text-peach-300 mt-2 cursor-pointer text-base underline">TRY AGAIN</button>
         </div>
       ) : actionTab === null ? (
-        <div className="flex gap-2">
-          <button onClick={() => setActionTab("add")} className="font-family-ThaleahFat flex-1 cursor-pointer rounded-lg bg-[#6DBB3E] px-6 py-3 text-xl tracking-wider text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset] transition-all hover:scale-[1.01]">
-            + ADD LIQUIDITY
-          </button>
-          <button onClick={() => setTxError("To remove liquidity, go to the POSITIONS tab and select a position to withdraw from.")} className="font-family-ThaleahFat bg-peach-500 flex-1 cursor-pointer rounded-lg px-6 py-3 text-xl tracking-wider text-black shadow-[0px_-4px_0px_0px_#C97E00_inset,0px_4px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.01]">
-            − REMOVE LIQUIDITY
-          </button>
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2">
+            <button onClick={() => router.push("/vault")} className="font-family-ThaleahFat flex-1 cursor-pointer rounded-lg bg-[#6DBB3E] px-6 py-3 text-xl tracking-wider text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset] transition-all hover:scale-[1.01]">
+              + ADD LIQUIDITY
+            </button>
+            <button onClick={() => router.push("/vault")} className="font-family-ThaleahFat bg-peach-500 flex-1 cursor-pointer rounded-lg px-6 py-3 text-xl tracking-wider text-black shadow-[0px_-4px_0px_0px_#C97E00_inset,0px_4px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.01]">
+              − REMOVE LIQUIDITY
+            </button>
+          </div>
+          <p className="font-family-ThaleahFat text-center text-xs tracking-wider text-gray-400">
+            WETH/USDG liquidity is auto-managed by the MoleSwap ALM vault — deposit or exit there.
+          </p>
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">

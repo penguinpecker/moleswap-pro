@@ -51,6 +51,29 @@ export function almPublicClient() {
   return createPublicClient({ chain: robinhoodChain, transport: http(ROBINHOOD_RPC_URL) });
 }
 
+export interface VaultBalances {
+  weth: bigint;
+  usdg: bigint;
+  native: bigint;
+}
+
+/**
+ * Read a wallet's WETH, USDG and native-ETH balances in one shot. The deposit card needs all three:
+ * WETH/USDG are the only assets the vault can pull (the pool's two currencies), and native ETH is shown
+ * so a user who has *only* gas understands why a deposit would fail before they try it.
+ */
+export async function getVaultBalances(owner: string): Promise<VaultBalances> {
+  const pub = almPublicClient();
+  const readBal = (t: Address) =>
+    pub.readContract({ address: t, abi: erc20Abi, functionName: "balanceOf", args: [owner as Address] }) as Promise<bigint>;
+  const [weth, usdg, native] = await Promise.all([
+    readBal(WETH.address as Address),
+    readBal(USDG.address as Address),
+    pub.getBalance({ address: owner as Address }),
+  ]);
+  return { weth, usdg, native };
+}
+
 function browserEth(): any {
   if (typeof window === "undefined") return null;
   return (window as any).ethereum ?? null;
