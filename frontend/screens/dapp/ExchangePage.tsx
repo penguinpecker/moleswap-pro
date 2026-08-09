@@ -16,6 +16,7 @@ import { createPublicClient, http, isAddress } from "viem";
 import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { createClient as createSupabaseBrowser } from "@/lib/supabase/client";
 import { tokenHasPool } from "@/lib/aggregator/discover";
+import { searchIndex, heldTokens, type IndexedToken, type HeldToken } from "@/lib/chain/tokenSearch";
 import Settings from "../settings";
 import { diagnostics } from "@/lib/diagnostics";
 
@@ -98,6 +99,12 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   const [importedTokens, setImportedTokens] = useState<any[]>([]);
   const [importing, setImporting] = useState(false);
   const [selectedNetwork, setSelectedNetwork] = useState<string>(""); // temp network while selecting
+  // Whole-chain token search results (name/symbol/address against the mp_tokens index).
+  const [searchResults, setSearchResults] = useState<IndexedToken[]>([]);
+  const [searchingIndex, setSearchingIndex] = useState(false);
+  // Tokens the connected wallet actually holds on Robinhood Chain (balanceOf sweep).
+  const [heldList, setHeldList] = useState<HeldToken[]>([]);
+  const [loadingHeld, setLoadingHeld] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -282,6 +289,55 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       cancelled = true;
     };
   }, [searchQuery, allTokens]);
+
+  // Whole-chain name/symbol search: query the mp_tokens index (debounced). This is what makes the
+  // search bar find ANY token on Robinhood Chain by typing its name/symbol — not just the 3 in the
+  // default list and not just by pasting an address.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2 || isAddress(q)) {
+      setSearchResults([]);
+      setSearchingIndex(false);
+      return;
+    }
+    let cancelled = false;
+    setSearchingIndex(true);
+    const t = setTimeout(async () => {
+      const res = await searchIndex(q, 40);
+      if (!cancelled) {
+        setSearchResults(res);
+        setSearchingIndex(false);
+      }
+    }, 220);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [searchQuery]);
+
+  // When the picker opens with a connected wallet, sweep the wallet's balances across the whole
+  // indexed token universe so we can surface the tokens the user actually holds.
+  useEffect(() => {
+    if (selectionMode === "none" || !walletAddress) {
+      setHeldList([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingHeld(true);
+    (async () => {
+      try {
+        const held = await heldTokens(walletAddress);
+        if (!cancelled) setHeldList(held);
+      } catch {
+        if (!cancelled) setHeldList([]);
+      } finally {
+        if (!cancelled) setLoadingHeld(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectionMode, walletAddress]);
 
   const fromChain = useMemo(
     () => chains.find((c) =>
@@ -797,34 +853,50 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   // Tokens for the currently selected network in the modal.
   const modalChain =
     chains.find((c) => c.name === selectedNetwork) || null;
+  // The default list (no search): the wallet's held tokens first, then the curated registry, then any
+  // the user imported by address.
   const modalTokens = useMemo(() => {
     const seen = new Set<string>();
-    const merged: ReturnType<typeof getTokensForChain> = [];
+    const merged: any[] = [];
     const add = (t: any) => {
       const key = (t.address || "").toLowerCase();
       if (!key || seen.has(key)) return;
       seen.add(key);
       merged.push(t);
     };
+    for (const t of heldList) add(t); // tokens the user actually owns, balance-desc
     if (selectionMode === "to") {
       for (const c of chains) for (const t of getTokensForChain(c)) add(t);
     } else if (modalChain) {
       for (const t of getTokensForChain(modalChain)) add(t);
     }
-    for (const t of importedTokens) add(t); // user-imported tokens are selectable in both modes
+    for (const t of importedTokens) add(t);
     return merged;
-  }, [modalChain, chains, selectionMode, importedTokens]);
+  }, [modalChain, chains, selectionMode, importedTokens, heldList]);
 
+  // With a query: local matches (held + registry + imported) UNION the whole-chain index results.
   const filteredModalTokens = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return modalTokens;
-    return modalTokens.filter(
-      (t) =>
+    const seen = new Set<string>();
+    const out: any[] = [];
+    const add = (t: any) => {
+      const key = (t.address || "").toLowerCase();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      out.push(t);
+    };
+    for (const t of modalTokens) {
+      if (
         (t.symbol || "").toLowerCase().includes(q) ||
         (t.name || "").toLowerCase().includes(q) ||
-        (t.address || "").toLowerCase().includes(q),
-    );
-  }, [modalTokens, searchQuery]);
+        (t.address || "").toLowerCase().includes(q)
+      )
+        add(t);
+    }
+    for (const t of searchResults) add(t); // whole-chain index matches
+    return out;
+  }, [modalTokens, searchQuery, searchResults]);
 
   // Fetch balances for all tokens in the selected network
   // Optimized to batch fetch and cache results (similar to relay-kit demo pattern)
@@ -841,10 +913,14 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       const chainId = modalChain?.id || 4663;
       const vmType = modalChain.vmType;
 
-      // Filter tokens that need balance fetching (not already cached, loading, or previously fetched)
+      // While searching, skip the per-token sweep: held tokens already carry their balance and the
+      // (up to 40) whole-chain search results don't need one — fetching each would storm the RPC.
+      if (searchQuery.trim()) return;
+
+      // Filter tokens that need balance fetching (skip held tokens — they already have .balance).
       const tokensToFetch = filteredModalTokens.filter((token) => {
+        if ((token as any).balance != null) return false;
         const balanceKey = `${selectedNetwork}-${token.address}`;
-        // Skip if already fetched, cached, or currently loading
         return (
           !fetchedBalancesRef.current.has(balanceKey) &&
           tokenBalances[balanceKey] === undefined &&
@@ -949,8 +1025,37 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setSelectedNetwork(chainName);
   };
 
-  const handleSelectToken = (tokenAddress: string) => {
-    if (!selectedNetwork) return;
+  const handleSelectToken = (token: any) => {
+    const tokenAddress = typeof token === "string" ? token : token.address;
+    if (!tokenAddress) return;
+    // A searched / held token isn't in the registry, so persist its metadata into importedTokens —
+    // otherwise fromTokenMeta/toTokenMeta can't resolve its symbol/decimals/logo and the card breaks.
+    if (typeof token === "object") {
+      const lc = tokenAddress.toLowerCase();
+      const known =
+        allTokens.some((t) => t.address?.toLowerCase() === lc) ||
+        importedTokens.some((t) => t.address?.toLowerCase() === lc);
+      if (!known) {
+        setImportedTokens((prev) =>
+          prev.some((t) => t.address?.toLowerCase() === lc)
+            ? prev
+            : [
+                ...prev,
+                {
+                  id: tokenAddress,
+                  address: tokenAddress,
+                  symbol: token.symbol,
+                  name: token.name,
+                  decimals: token.decimals,
+                  logoURI: token.logoURI || tokenFallbackIcon(tokenAddress, token.symbol),
+                  displaySymbol: token.displaySymbol || token.symbol,
+                  displaySubtitle: token.displaySubtitle || "Robinhood Chain",
+                  sourceChain: "Robinhood Chain",
+                },
+              ],
+        );
+      }
+    }
     // Single chain — always set chainId to 4663 (Robinhood Chain)
     if (selectionMode === "from") {
       setFromChainId("4663");
@@ -1028,6 +1133,25 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                 height={200}
                 className="absolute inset-0 left-0 z-[-1] h-full w-full"
               /> */}
+              {/* Context label above the list */}
+              {selectedNetwork && (
+                <div className="mb-2 flex items-center justify-between px-4">
+                  <span className="font-family-ThaleahFat text-sm tracking-widest text-[#9a9a9a] uppercase">
+                    {searchQuery.trim()
+                      ? searchingIndex
+                        ? "Searching all tokens…"
+                        : `${filteredModalTokens.length} result${filteredModalTokens.length === 1 ? "" : "s"}`
+                      : heldList.length > 0
+                        ? "Your tokens"
+                        : "Popular tokens"}
+                  </span>
+                  {!searchQuery.trim() && loadingHeld && (
+                    <span className="font-family-ThaleahFat text-xs tracking-wider text-[#8B8B8B] uppercase">
+                      Loading balances…
+                    </span>
+                  )}
+                </div>
+              )}
               <div className="hide-scrollbar relative flex max-h-[450px] flex-col gap-3 overflow-y-auto">
                 {selectedNetwork ? (
                   filteredModalTokens.length > 0 ? (
@@ -1046,7 +1170,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                       return (
                       <button
                         key={`${token.address}-${idx}`}
-                        onClick={() => handleSelectToken(token.address)}
+                        onClick={() => handleSelectToken(token)}
                         className={`relative cursor-pointer px-6 py-4 text-left`}
                       >
                         <div className="flex items-center justify-between gap-4">
@@ -1069,35 +1193,25 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                               </p>
                             </div>
                           </div>
-                          {walletAddress && selectedNetwork && (
-                            <div className="text-right">
-                              {loadingBalances[
-                                `${selectedNetwork}-${token.address}`
-                              ] ? (
-                                <span className="font-family-ThaleahFat text-base text-gray-400">
-                                  Loading...
-                                </span>
-                              ) : (
-                                <span className="font-family-ThaleahFat text-lg text-yellow-100">
-                                  {tokenBalances[
-                                    `${selectedNetwork}-${token.address}`
-                                  ] !== null &&
-                                  tokenBalances[
-                                    `${selectedNetwork}-${token.address}`
-                                  ] !== undefined
-                                    ? Number(
-                                        tokenBalances[
-                                          `${selectedNetwork}-${token.address}`
-                                        ] || 0,
-                                      ).toLocaleString(undefined, {
-                                        maximumFractionDigits: 6,
-                                        minimumFractionDigits: 0,
-                                      })
-                                    : "-"}
-                                </span>
-                              )}
-                            </div>
-                          )}
+                          {walletAddress && (() => {
+                            // Held tokens carry their own balance; otherwise use the per-token fetch.
+                            const heldBal = (token as any).balance as string | undefined;
+                            const fetched = tokenBalances[`${selectedNetwork}-${token.address}`];
+                            const shown = heldBal ?? (fetched != null ? String(fetched) : undefined);
+                            const isLoading = heldBal == null && loadingBalances[`${selectedNetwork}-${token.address}`];
+                            if (!shown && !isLoading) return null;
+                            return (
+                              <div className="text-right">
+                                {isLoading ? (
+                                  <span className="font-family-ThaleahFat text-base text-gray-400">…</span>
+                                ) : (
+                                  <span className="font-family-ThaleahFat text-lg text-yellow-100">
+                                    {Number(shown || 0).toLocaleString(undefined, { maximumFractionDigits: 6, minimumFractionDigits: 0 })}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
 
                         <Image
@@ -1120,11 +1234,13 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                     })
                   ) : (
                     <p className="font-family-ThaleahFat text-center text-xl text-gray-400">
-                      {importing
-                        ? "Resolving token…"
+                      {importing || searchingIndex
+                        ? "Searching all tokens…"
                         : isAddress(searchQuery.trim())
                           ? "No pool for this token yet"
-                          : "No token found"}
+                          : searchQuery.trim()
+                            ? "No token found — paste a contract address to import it"
+                            : "No token found"}
                     </p>
                   )
                 ) : (
