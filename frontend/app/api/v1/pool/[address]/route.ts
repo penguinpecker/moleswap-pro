@@ -2,10 +2,10 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, POOLS, PUSHCHAIN_RPC,
+  CONTRACTS, POOLS, RH_RPC_URL,
   POOL_ABI, ERC20_ABI,
   getTokenByAddress,
-} from "@/lib/pushchain/contracts";
+} from "@/lib/chain/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +27,7 @@ export async function GET(
       return apiError("Invalid pool address", 400);
     }
 
-    const provider = new ethers.JsonRpcProvider(PUSHCHAIN_RPC);
+    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
     const contract = new ethers.Contract(address, POOL_ABI, provider);
 
     const [slot0, liquidity, token0Addr, token1Addr, fee] = await Promise.all([

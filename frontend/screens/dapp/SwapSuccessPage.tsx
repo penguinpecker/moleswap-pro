@@ -2,7 +2,7 @@
 import { ArrowLeft, TicketX } from "lucide-react";
 import { DappStep } from ".";
 import Image from "next/image";
-import type { RelayCurrency, RelayChain } from "@/lib/relay/api";
+import type { TokenEntry, ChainEntry } from "@/lib/chain/tokenList";
 
 interface SwapSuccessPageProps {
   onNext: (step: DappStep, data?: any) => void;
@@ -22,13 +22,7 @@ export const SwapSuccessPage = ({ onNext, swapData }: SwapSuccessPageProps) => {
   const ticketsReceived = 4;
 
   // Get actual values from swap data.
-  //
-  // toChainName is hard-coded to "Robinhood Chain" — swap proceeds always land as
-  // a PRC-20 on Robinhood Chain regardless of what origin chain the destination
-  // PRC-20 represents. Previously the success page read toChain.displayName
-  // (Ethereum / Solana / etc.) which lied: a pETH swap arrives on Push, not
-  // Ethereum. Flip back to origin-chain labelling once outbound Route 2 is
-  // wired.
+  // Output always lands on Robinhood Chain.
   const expectedOut = swapData.expectedOut || "0";
   const feesLabel = swapData.feesLabel || "";
   const toTokenSymbol = swapData.toTokenMeta?.symbol || swapData.toToken || "";

@@ -2,9 +2,9 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, PUSHCHAIN_RPC, QUOTER_V2_ABI,
+  CONTRACTS, RH_RPC_URL, QUOTER_V2_ABI,
   getTokenByAddress, findPool,
-} from "@/lib/pushchain/contracts";
+} from "@/lib/chain/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,8 +39,8 @@ export async function GET(req: NextRequest) {
       return apiError("amountIn must be > 0", 400);
     }
 
-    const actualIn = tokenIn === ethers.ZeroAddress ? CONTRACTS.WPC : tokenIn;
-    const actualOut = tokenOut === ethers.ZeroAddress ? CONTRACTS.WPC : tokenOut;
+    const actualIn = tokenIn === ethers.ZeroAddress ? CONTRACTS.WETH : tokenIn;
+    const actualOut = tokenOut === ethers.ZeroAddress ? CONTRACTS.WETH : tokenOut;
 
     const tokenInInfo = getTokenByAddress(tokenIn);
     const tokenOutInfo = getTokenByAddress(tokenOut);
@@ -59,7 +59,7 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const provider = new ethers.JsonRpcProvider(PUSHCHAIN_RPC);
+    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
     const quoter = new ethers.Contract(CONTRACTS.QUOTER_V2, QUOTER_V2_ABI, provider);
 
     const pool = findPool(actualIn, actualOut);
@@ -99,14 +99,14 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    if (actualIn !== CONTRACTS.WPC && actualOut !== CONTRACTS.WPC) {
-      const poolA = findPool(actualIn, CONTRACTS.WPC);
-      const poolB = findPool(actualOut, CONTRACTS.WPC);
+    if (actualIn !== CONTRACTS.WETH && actualOut !== CONTRACTS.WETH) {
+      const poolA = findPool(actualIn, CONTRACTS.WETH);
+      const poolB = findPool(actualOut, CONTRACTS.WETH);
 
       if (poolA && poolB) {
         const [midAmount] = await quoter.quoteExactInputSingle.staticCall({
           tokenIn: actualIn,
-          tokenOut: CONTRACTS.WPC,
+          tokenOut: CONTRACTS.WETH,
           amountIn: amountInBig,
           fee: poolA.fee,
           sqrtPriceLimitX96: 0,
@@ -114,7 +114,7 @@ export async function GET(req: NextRequest) {
 
         const [finalAmount, , , gasEstimate] =
           await quoter.quoteExactInputSingle.staticCall({
-            tokenIn: CONTRACTS.WPC,
+            tokenIn: CONTRACTS.WETH,
             tokenOut: actualOut,
             amountIn: midAmount,
             fee: poolB.fee,
@@ -129,7 +129,7 @@ export async function GET(req: NextRequest) {
           fee: poolA.fee,
           type: "multi_hop",
           gasEstimate: gasEstimate.toString(),
-          route: `${tokenInInfo?.symbol || "?"} → WPC → ${tokenOutInfo?.symbol || "?"}`,
+          route: `${tokenInInfo?.symbol || "?"} → WETH → ${tokenOutInfo?.symbol || "?"}`,
           hops: [
             { pool: poolA.address, fee: poolA.fee },
             { pool: poolB.address, fee: poolB.fee },

@@ -2,10 +2,10 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, POOLS, PUSHCHAIN_RPC,
+  CONTRACTS, POOLS, RH_RPC_URL,
   POOL_ABI, ERC20_ABI,
   getTokenByAddress,
-} from "@/lib/pushchain/contracts";
+} from "@/lib/chain/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
   if (blocked) return blocked;
 
   try {
-    const provider = new ethers.JsonRpcProvider(PUSHCHAIN_RPC);
+    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
     const includeEmpty = req.nextUrl.searchParams.get("includeEmpty") === "true";
 
     const poolData = await Promise.allSettled(
@@ -80,7 +80,7 @@ export async function GET(req: NextRequest) {
     return apiResponse({
       count: pools.length,
       chainId: 4663,
-      rpc: PUSHCHAIN_RPC,
+      rpc: RH_RPC_URL,
       pools,
     });
   } catch (err: any) {

@@ -2,11 +2,11 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, PUSHCHAIN_RPC, PUSHCHAIN_CHAIN_ID,
+  CONTRACTS, RH_RPC_URL, RH_CHAIN_ID,
   POSITION_MANAGER_ABI, LIQUIDITY_PROXY_ABI,
   TICK_SPACINGS, MIN_TICK, MAX_TICK,
   getTokenByAddress, findPool,
-} from "@/lib/pushchain/contracts";
+} from "@/lib/chain/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,8 +52,8 @@ export async function POST(req: NextRequest) {
       return apiError("Invalid recipient address", 400);
     }
 
-    const actual0 = token0 === ethers.ZeroAddress ? CONTRACTS.WPC : token0;
-    const actual1 = token1 === ethers.ZeroAddress ? CONTRACTS.WPC : token1;
+    const actual0 = token0 === ethers.ZeroAddress ? CONTRACTS.WETH : token0;
+    const actual1 = token1 === ethers.ZeroAddress ? CONTRACTS.WETH : token1;
 
     const [sorted0, sorted1] =
       actual0.toLowerCase() < actual1.toLowerCase()
@@ -88,10 +88,10 @@ export async function POST(req: NextRequest) {
     if (needsWrap && BigInt(wrapAmount) > 0n) {
       const wpcIface = new ethers.Interface(["function deposit() payable"]);
       transactions.push({
-        to: CONTRACTS.WPC,
+        to: CONTRACTS.WETH,
         value: wrapAmount,
         data: wpcIface.encodeFunctionData("deposit"),
-        description: "Wrap native PC → WPC",
+        description: "Wrap native PC → WETH",
       });
     }
 
@@ -158,8 +158,8 @@ export async function POST(req: NextRequest) {
       feeTier: `${fee / 10000}%`,
       tickRange: { lower: tLower, upper: tUpper },
       transactions,
-      chainId: PUSHCHAIN_CHAIN_ID,
-      rpc: PUSHCHAIN_RPC,
+      chainId: RH_CHAIN_ID,
+      rpc: RH_RPC_URL,
       note: "Sign and send transactions sequentially. Wait for each to confirm before sending the next.",
     });
   } catch (err: any) {

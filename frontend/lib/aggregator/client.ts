@@ -22,7 +22,7 @@ const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 /** A pool row as stored in Supabase `mp_pools`. */
 export interface PoolRow {
   id: string;
-  venue: "pancake_v3" | "mole_v4";
+  venue: "pancake_v3" | "uniswap_v3" | "mole_v4";
   token0: string;
   token1: string;
   fee: number;

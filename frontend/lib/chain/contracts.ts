@@ -22,7 +22,7 @@ export const CONTRACTS = {
   QUOTER_V2: "0x0000000000000000000000000000000000000000", // unused — quoting is off-chain, to the wei
   MULTICALL: "0x0000000000000000000000000000000000000000",
   // Wrapped native (WETH) — currency0 of the live v4 pool.
-  WPC: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+  WETH: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
 
   // ═══ MoleSwap contracts ═══
   // MoleRouter — the aggregator's immutable on-chain executor. Users grant it a standing ERC-20
@@ -90,7 +90,7 @@ export const TOKENS: TokenInfo[] = [
     displaySubtitle: "Robinhood Chain",
   },
   {
-    address: CONTRACTS.WPC,
+    address: CONTRACTS.WETH,
     symbol: "WETH",
     name: "Wrapped Ether",
     decimals: 18,
@@ -127,7 +127,7 @@ export interface PoolInfo {
   hidden?: boolean;
 }
 
-const WETH_ADDR = CONTRACTS.WPC;
+const WETH_ADDR = CONTRACTS.WETH;
 const USDG_ADDR = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 
 export const POOLS: PoolInfo[] = [
@@ -177,7 +177,7 @@ export const FEE_ROUTER_ABI = [
 ] as const;
 
 export const LIQUIDITY_PROXY_ABI = [] as const;
-export const WPC_ABI = [
+export const WETH_ABI = [
   "function deposit() payable",
   "function withdraw(uint256 wad) external",
   "function balanceOf(address) view returns (uint256)",
@@ -198,11 +198,11 @@ export const TICK_SPACINGS: Record<number, number> = {
 };
 
 // ═══ Chain helpers ═══
-export const PUSHCHAIN_RPC =
+export const RH_RPC_URL =
   (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) ||
   "https://rpc.mainnet.chain.robinhood.com";
-export const PUSHCHAIN_CHAIN_ID = 4663;
-export const PUSHCHAIN_EXPLORER = "https://robinhoodchain.blockscout.com";
+export const RH_CHAIN_ID = 4663;
+export const RH_EXPLORER_URL = "https://robinhoodchain.blockscout.com";
 
 export function getTokenByAddress(address: string): TokenInfo | undefined {
   return TOKENS.find((t) => t.address.toLowerCase() === address.toLowerCase());

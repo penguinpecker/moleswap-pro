@@ -13,12 +13,12 @@
  * excluded (v4PoolState throws → we return null) rather than mis-quoted.
  */
 import { createPublicClient, http, type Address } from "viem";
-import { robinhoodChain } from "@/lib/pushchain/wagmi-config";
 import { v4PoolState } from "./v4Pool";
 import type { PoolState, TickData } from "./v3Pool";
-import { LIVE_POOL_ID, LIVE_POOL_KEY, MOLE_ADDRESSES, DYNAMIC_FEE_FLAG, ROBINHOOD_RPC_URL } from "@/lib/mole/chain";
+import { robinhoodChain, LIVE_POOL_ID, LIVE_POOL_KEY, MOLE_ADDRESSES, DYNAMIC_FEE_FLAG, ROBINHOOD_RPC_URL } from "@/lib/mole/chain";
 
 const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b" as Address;
+const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;
 
 const stateViewAbi = [
   { type: "function", name: "getSlot0", stateMutability: "view", inputs: [{ name: "poolId", type: "bytes32" }], outputs: [{ type: "uint160" }, { type: "int24" }, { type: "uint24" }, { type: "uint24" }] },
@@ -59,25 +59,32 @@ export async function fetchV4MolePool(): Promise<PoolState | null> {
     const centerWord = compressed >> 8;
     const words: number[] = [];
     for (let w = centerWord - 3; w <= centerWord + 3; w++) words.push(w);
-    const bitmaps = await Promise.all(
-      words.map((w) => c.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickBitmap", args: [poolId, w] }) as Promise<bigint>),
-    );
+    const bitmapResults = await c.multicall({
+      contracts: words.map((w) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickBitmap" as const, args: [poolId, w] as const })),
+      multicallAddress: MULTICALL3,
+      allowFailure: false,
+    });
+    const bitmaps = bitmapResults as bigint[];
 
     const tickList: number[] = [];
     words.forEach((w, i) => {
-      let bm = bitmaps[i];
+      let bm = bitmaps[i]!;
       if (bm === 0n) return;
       for (let bit = 0; bit < 256; bit++) {
         if ((bm >> BigInt(bit)) & 1n) tickList.push((w * 256 + bit) * tickSpacing);
       }
     });
 
-    const infos = await Promise.all(
-      tickList.map((t) => c.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickInfo", args: [poolId, t] }) as Promise<readonly [bigint, bigint, bigint, bigint]>),
-    );
+    const infos = (await c.multicall({
+      contracts: tickList.map((t) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickInfo" as const, args: [poolId, t] as const })),
+      multicallAddress: MULTICALL3,
+      allowFailure: false,
+    })) as readonly (readonly [bigint, bigint, bigint, bigint])[];
+    // TickData keys the tick by `index` — the simulator binary-searches on it; a wrong key here made
+    // every v4 tick invisible and quoted the pool as constant-liquidity (over-quote → minOut revert).
     const ticks: TickData[] = tickList
-      .map((t, i) => ({ tick: t, liquidityNet: infos[i][1] }))
-      .sort((a, b) => a.tick - b.tick);
+      .map((t, i) => ({ index: t, liquidityNet: infos[i]![1] }))
+      .sort((a, b) => a.index - b.index);
 
     // Build the quotable state (quote fee = live lpFee), then restore the execution key's dynamic-fee
     // sentinel so the plan targets the real pool id.

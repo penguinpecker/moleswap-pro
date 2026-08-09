@@ -7,16 +7,16 @@ import { useRouter } from "next/navigation";
 import { NavBar, BackgroundImage } from "../shared";
 import { MoleEngine } from "./MoleEngine";
 import { RefreshCw, Plus, Minus, ArrowUpRight, ChevronDown, AlertTriangle, Loader2 } from "lucide-react";
-import { usePushWalletContext, usePushChainClient, PushUI } from "@/lib/pushchain/provider";
-import { usePushWallet } from "@/lib/pushchain/provider";
+import { useWalletContext, useChainClient, WalletUI } from "@/lib/chain/provider";
+import { useWallet } from "@/lib/chain/provider";
 import {
   CONTRACTS, TOKENS, POOLS as AMM_POOLS,
   getTokenByAddress, findPool,
   getSwapQuote, getProvider,
   getPoolDisplayInfo,
-  AMM_ROUTER, AMM_FACTORY, PUSHCHAIN_CHAIN_ID,
+  AMM_ROUTER, AMM_FACTORY, RH_CHAIN_ID,
   type TokenInfo, type PoolInfo,
-} from "@/lib/pushchain/amm";
+} from "@/lib/chain/amm";
 import { ethers } from "ethers";
 
 /**
@@ -25,7 +25,7 @@ import { ethers } from "ethers";
  * clicking "GET X" takes them to the swap page with the route already wired.
  */
 function getSwapUrl(fromAddress: string, toAddress: string): string {
-  const cid = String(PUSHCHAIN_CHAIN_ID);
+  const cid = String(RH_CHAIN_ID);
   const params = new URLSearchParams({ from: fromAddress, fromChainId: cid, to: toAddress, toChainId: cid });
   return `/dapp?${params.toString()}`;
 }
@@ -47,11 +47,6 @@ const fmt = (n: number) => {
 };
 
 const chainColors: Record<string, string> = {
-  "Ethereum": "#627EEA",
-  "Solana": "#9945FF",
-  "Base": "#0052FF",
-  "Arbitrum": "#28A0F0",
-  "BNB Chain": "#F0B90B",
   "Robinhood Chain": "#D548EC",
 };
 
@@ -235,14 +230,10 @@ interface LiquidityPosition {
 }
 
 const PoolsContent = () => {
-  const walletCtx = usePushWalletContext();
-  const { pushChainClient } = usePushChainClient();
-  const isConnected = walletCtx?.connectionStatus === PushUI.CONSTANTS.CONNECTION.STATUS.CONNECTED;
-  // Use the `usePushWallet` hook which properly resolves the UEA and filters
-  // out Solana base58 pubkeys that would otherwise leak into eth_getBalance /
-  // balanceOf calls and trigger ENS resolution errors on Robinhood Chain (no ENS
-  // registry -> UNSUPPORTED_OPERATION -> silent UI failure in balance fetch).
-  const { address } = usePushWallet();
+  const walletCtx = useWalletContext();
+  const { chainClient } = useChainClient();
+  const isConnected = walletCtx?.connectionStatus === WalletUI.CONSTANTS.CONNECTION.STATUS.CONNECTED;
+  const { address } = useWallet();
 
   const [tab, setTab] = useState<"markets" | "positions">("markets");
   const [selectedPool, setSelectedPool] = useState<PoolDisplay | null>(null);
@@ -269,7 +260,7 @@ const PoolsContent = () => {
     if (!address) return;
     setPosLoading(true);
     try {
-      const { getUserPositions } = await import("@/lib/pushchain/amm");
+      const { getUserPositions } = await import("@/lib/chain/amm");
       const pos = await getUserPositions(address);
       setPositions(pos);
     } catch (err) {
@@ -344,7 +335,7 @@ const PoolsContent = () => {
 
         <div className="relative z-10 mx-auto mt-4 mb-8 w-[95%] p-2 sm:p-4">
           {selectedPool ? (
-            <PoolDetail pool={selectedPool} onBack={() => setSelectedPool(null)} address={address} isConnected={isConnected} walletCtx={walletCtx} pushChainClient={pushChainClient} />
+            <PoolDetail pool={selectedPool} onBack={() => setSelectedPool(null)} address={address} isConnected={isConnected} walletCtx={walletCtx} chainClient={chainClient} />
           ) : tab === "markets" ? (
             <>
               <div className="mb-4 grid grid-cols-2 gap-1.5 sm:mb-5 sm:grid-cols-4 sm:gap-3">
@@ -480,7 +471,7 @@ const PoolsContent = () => {
               loading={posLoading}
               isConnected={isConnected}
               walletCtx={walletCtx}
-              pushChainClient={pushChainClient}
+              chainClient={chainClient}
               address={address}
               onRefresh={loadPositions}
               onGoToMarkets={() => setTab("markets")}
@@ -729,8 +720,8 @@ const CollectFeesModal = ({ pos, t0, t1, fees0, fees1, onConfirm, onCancel, coll
 };
 
 // ═══ POSITIONS TAB (REDESIGNED) ═══
-const PositionsTab = ({ positions, loading, isConnected, walletCtx, pushChainClient, address, onRefresh, onGoToMarkets }: {
-  positions: LiquidityPosition[]; loading: boolean; isConnected: boolean; walletCtx: any; pushChainClient: any; address: string | null;
+const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient, address, onRefresh, onGoToMarkets }: {
+  positions: LiquidityPosition[]; loading: boolean; isConnected: boolean; walletCtx: any; chainClient: any; address: string | null;
   onRefresh: () => void; onGoToMarkets: () => void;
 }) => {
   const [removing, setRemoving] = useState<number | null>(null);
@@ -781,13 +772,10 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, pushChainCli
     setRemoveModal(null);
     setTxMsg("Removing liquidity...");
     try {
-      const { removeLiquidity } = await import("@/lib/pushchain/amm");
+      const { removeLiquidity } = await import("@/lib/chain/amm");
       const result = await removeLiquidity({
-        pushChainClient, tokenId: pos.tokenId, liquidity: pos.liquidity,
+        chainClient, tokenId: pos.tokenId, liquidity: pos.liquidity,
         recipient: address, burnAfter: true,
-        // Pass origin chain — executeSteps uses this to pick multicall (1 sig
-        // for Phantom/MM-Sepolia) vs sequential (N sigs for Push-native).
-        originChain: walletCtx?.universalAccount?.chain || null,
         onStep: (_s: any, label: string) => setTxMsg(label),
       });
       setTxMsg(result.success ? "Liquidity removed!" : (result.error || "Failed"));
@@ -804,13 +792,12 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, pushChainCli
     setCollectModal(null);
     setTxMsg("Collecting fees...");
     try {
-      const { collectFees } = await import("@/lib/pushchain/amm");
+      const { collectFees } = await import("@/lib/chain/amm");
       const result = await collectFees({
-        pushChainClient,
+        chainClient,
         tokenId: pos.tokenId,
         recipient: address,
         liquidity: pos.liquidity,
-        originChain: walletCtx?.universalAccount?.chain || null,
       });
       setTxMsg(result.success ? "Fees collected!" : (result.error || "Failed"));
       setTimeout(() => { setTxMsg(null); onRefresh(); }, 3000);
@@ -825,7 +812,7 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, pushChainCli
       <div className="flex flex-col items-center gap-4 py-12">
         <Image src="/profile/c2.png" alt="Mole" width={80} height={80} className="object-contain" style={{ imageRendering: "pixelated" }} />
         <p className="font-family-ThaleahFat text-shadow-black text-2xl tracking-wider text-white">CONNECT WALLET TO VIEW POSITIONS</p>
-        <button onClick={() => walletCtx?.handleConnectToPushWallet?.()} className="font-family-ThaleahFat bg-peach-500 border-3 mt-2 cursor-pointer rounded-lg border-[#523525] px-8 py-3 text-xl tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.02]">
+        <button onClick={() => walletCtx?.handleConnectWallet?.()} className="font-family-ThaleahFat bg-peach-500 border-3 mt-2 cursor-pointer rounded-lg border-[#523525] px-8 py-3 text-xl tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.02]">
           CONNECT WALLET
         </button>
       </div>
@@ -1031,8 +1018,8 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, pushChainCli
 };
 
 // ═══ POOL DETAIL (REDESIGNED) ═══
-const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, pushChainClient }: {
-  pool: PoolDisplay; onBack: () => void; address: string | null; isConnected: boolean; walletCtx: any; pushChainClient: any;
+const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient }: {
+  pool: PoolDisplay; onBack: () => void; address: string | null; isConnected: boolean; walletCtx: any; chainClient: any;
 }) => {
   const router = useRouter();
   const [actionTab, setActionTab] = useState<"add" | "remove" | null>(null);
@@ -1133,14 +1120,13 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, pushChainCl
     if (!address || !canSubmit) return;
     setLoading(true); setTxError(null); setTxHash(null); setStepLabel("Preparing...");
     try {
-      const { addLiquidity } = await import("@/lib/pushchain/amm");
+      const { addLiquidity } = await import("@/lib/chain/amm");
       const amount0Wei = ethers.parseUnits(amount0, pool.token0.decimals).toString();
       const amount1Wei = ethers.parseUnits(amount1, pool.token1.decimals).toString();
       const result = await addLiquidity({
-        pushChainClient, token0: pool.pool.token0, token1: pool.pool.token1, fee: pool.fee,
+        chainClient, token0: pool.pool.token0, token1: pool.pool.token1, fee: pool.fee,
         amount0Desired: amount0Wei, amount1Desired: amount1Wei, recipient: address,
         tickLower: selectedTickLower, tickUpper: selectedTickUpper,
-        originChain: walletCtx?.universalAccount?.chain || null,
         onStep: (_step: any, label: string, status: string) => { setStepLabel(label); if (status === "error") setTxError(label); },
       });
       if (result.success) { setTxHash(result.txHash); setTxDone(true); setAmount0(""); setAmount1(""); }
@@ -1163,8 +1149,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, pushChainCl
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Header — pools are PRC-20 on Robinhood Chain, so label them that way
-          (e.g. pSOL/WPC on Robinhood Chain) rather than by the origin-asset name. */}
+      {/* Header */}
       <div className="flex flex-wrap items-center gap-2 sm:gap-3">
         <button onClick={onBack} className="font-family-ThaleahFat text-peach-300 cursor-pointer bg-transparent text-base">← BACK</button>
         <TokenPair t0={pool.token0} t1={pool.token1} size={36} />
@@ -1200,8 +1185,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, pushChainCl
         ))}
       </div>
 
-      {/* Pooled amounts — show PRC-20 name + "Robinhood Chain" since the pool
-          holds the Robinhood Chain representation, not the origin-chain asset. */}
+      {/* Pooled amounts */}
       <div className="grid grid-cols-2 gap-2">
         {[{ tok: pool.token0, reserve: pool.reserve0 }, { tok: pool.token1, reserve: pool.reserve1 }].map((item, i) => {
           const poolDisp = getPoolDisplayInfo(item.tok);
@@ -1246,7 +1230,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, pushChainCl
 
       {/* Actions */}
       {!isConnected ? (
-        <button onClick={() => walletCtx?.handleConnectToPushWallet?.()} className="font-family-ThaleahFat bg-peach-500 border-3 w-full cursor-pointer rounded-lg border-[#523525] px-8 py-3 text-xl tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.02]">
+        <button onClick={() => walletCtx?.handleConnectWallet?.()} className="font-family-ThaleahFat bg-peach-500 border-3 w-full cursor-pointer rounded-lg border-[#523525] px-8 py-3 text-xl tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.02]">
           CONNECT WALLET
         </button>
       ) : txDone ? (

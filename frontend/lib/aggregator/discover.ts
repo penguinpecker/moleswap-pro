@@ -12,7 +12,7 @@
  * and Velodrome/CLFactory are excluded because the immutable router cannot call their swap callbacks.
  */
 import { createPublicClient, http, encodeFunctionData, decodeAbiParameters, type Address } from "viem";
-import { robinhoodChain } from "@/lib/pushchain/wagmi-config";
+import { robinhoodChain } from "@/lib/mole/chain";
 import type { PoolRow } from "./client";
 
 const MC3 = "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;

@@ -3,18 +3,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUpDown, Clock, Fuel, Search, X } from "lucide-react";
 import { DappStep } from ".";
 import Image from "next/image";
-import { getChains, getTokensForChain, type RelayChain } from "@/lib/relay/api";
-import { relayClient } from "@/lib/relay/client";
-import { usePushWallet } from "@/lib/pushchain/provider";
-import { getTokenByAddress, POOLS, CONTRACTS, getPoolDisplayInfo, TOKENS } from "@/lib/pushchain/contracts";
-import { estimateSwapDetails } from "@/lib/pushchain/amm";
+import { getChains, getTokensForChain, tokenFallbackIcon, type ChainEntry } from "@/lib/chain/tokenList";
+import { useWallet } from "@/lib/chain/provider";
+import { getTokenByAddress, POOLS, CONTRACTS, getPoolDisplayInfo, TOKENS } from "@/lib/chain/contracts";
+import { loadPoolRows } from "@/lib/chain/amm";
+import { LivePairSession, type LiveQuote } from "@/lib/aggregator/live";
 import { getOrCreateUser, getUserSwapHistory } from "@/lib/supabase/api";
 import { getTokenBalance } from "@/lib/wallet/walletClient";
-import { fetchOriginBalance } from "@/lib/wallet/originBalance";
 import { useRouter } from "next/navigation";
 import type { Address } from "viem";
 import { createPublicClient, http, isAddress } from "viem";
-import { robinhoodChain } from "@/lib/pushchain/wagmi-config";
+import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { createClient as createSupabaseBrowser } from "@/lib/supabase/client";
 import { tokenHasPool } from "@/lib/aggregator/discover";
 import Settings from "../settings";
@@ -40,13 +39,8 @@ declare global {
 }
 
 /**
- * UI-facing display helpers. Always prefer the RelayCurrency's displaySymbol /
- * displaySubtitle when present — they carry real-asset names ("ETH", "SOL",
- * "USDT") with origin chain subtitles ("on Solana", "on Ethereum"). Fall back
- * to the raw symbol/name if a token hasn't been annotated yet.
- *
- * Accepts `unknown | null | undefined` so callers can pass `fromTokenMeta`
- * directly without null-checking — the helper returns safe defaults.
+ * UI display helpers — prefer displaySymbol/displaySubtitle, fall back to the
+ * raw symbol/name. Accepts null/undefined so callers pass metadata directly.
  */
 function displaySymbolOf(t: any): string {
   if (!t) return "";
@@ -59,7 +53,7 @@ function displaySubtitleOf(t: any): string {
 
 export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   const router = useRouter();
-  const pushWallet = usePushWallet();
+  const walletState = useWallet();
 
   // ----- Original state (kept) -----
   const [fromToken, setFromToken] = useState(""); // address
@@ -67,28 +61,23 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   const [amount, setAmount] = useState(""); // human amount
   const [showReceive, setShowReceive] = useState(false);
 
-  const [chains, setChains] = useState<RelayChain[]>([]);
+  const [chains, setChains] = useState<ChainEntry[]>([]);
   const [fromChainId, setFromChainId] = useState<string>("");
   const [toChainId, setToChainId] = useState<string>("");
 
   const [loadingChains, setLoadingChains] = useState(false);
-  const [quote, setQuote] = useState<any>(null);
+  // The live quote: recomputed locally on every keystroke and refreshed against
+  // fresh pool state every second (Jupiter-style). Null = no route / no input.
+  const [quote, setQuote] = useState<LiveQuote | null>(null);
   const [quoteRefreshing, setQuoteRefreshing] = useState(false);
-  const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const sessionRef = useRef<LivePairSession | null>(null);
+  const [sessionEpoch, setSessionEpoch] = useState(0);
   const [quoteUpdatedAt, setQuoteUpdatedAt] = useState<number | null>(null);
-  const [ttlLeft, setTtlLeft] = useState<number>(0);
+  const [secondsSinceUpdate, setSecondsSinceUpdate] = useState<number>(0);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
-  const [pushEstimate, setPushEstimate] = useState<{ etaSeconds: number; totalGas: number; txCount: number; breakdown: string[] } | null>(null);
   const [fromTokenBalance, setFromTokenBalance] = useState<string | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
-  // Origin-chain balance for cross-chain users: e.g. Phantom user's actual
-  // SOL on Solana Devnet (shown alongside pSOL balance so they understand
-  // what gets bridged in when they swap).
-  const [originBalance, setOriginBalance] = useState<string | null>(null);
-  // For Solana origins, whether Phantom is actually on Devnet. When false,
-  // any bridge attempt fails with "Me: Unexpected error" from Phantom.
-  const [phantomClusterWarning, setPhantomClusterWarning] = useState<string | null>(null);
   const [recipientAddress, setRecipientAddress] = useState<string | null>(null);
   const [isEditingRecipient, setIsEditingRecipient] = useState(false);
   // Store balances for tokens in the selection modal: key = "chainId-tokenAddress"
@@ -117,7 +106,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   const [swapHistory, setSwapHistory] = useState<any[]>([]);
   // ----- Load chains (kept) -----
   // Deep-link support: `?from=<addr>&fromChainId=<id>&to=<addr>&toChainId=<id>`
-  // lets other screens (e.g. pools "GET pSOL" CTA) open the swap with the
+  // lets other screens open the swap with the
   // route already wired. Params are read from `window.location` to avoid
   // Next.js Suspense requirements on `useSearchParams`.
   useEffect(() => {
@@ -131,7 +120,12 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
           let initToChainId = String(c[0].id);
           let initFromToken =
             c[0].currency?.address || "0x0000000000000000000000000000000000000000";
-          let initToToken = "0x2971824Db68229D087931155C2b8bB820B275809";
+          // Default receive side = USDG, the chain's stable leg. (The registry is
+          // the source of truth — a token address the registry doesn't know
+          // renders a broken card, so deep-links are validated below.)
+          let initToToken =
+            TOKENS.find((t) => t.symbol === "USDG")?.address ||
+            "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 
           // URL overrides — only if the chain id appears in the loaded list
           // (otherwise keep defaults so the picker doesn't show an empty chain).
@@ -143,11 +137,20 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
             const urlToCid = sp.get("toChainId");
             const knownChain = (id: string | null) =>
               !!id && c.some((ch) => String(ch.id) === id);
+            const knownToken = (addr: string | null) =>
+              !!addr &&
+              c.some((ch) =>
+                getTokensForChain(ch).some(
+                  (t) => t.address?.toLowerCase() === addr.toLowerCase(),
+                ),
+              );
 
             if (knownChain(urlFromCid)) initFromChainId = urlFromCid!;
             if (knownChain(urlToCid)) initToChainId = urlToCid!;
-            if (urlFrom) initFromToken = urlFrom;
-            if (urlTo) initToToken = urlTo;
+            // Unknown deep-linked tokens keep the defaults instead of breaking
+            // the quote card with unresolvable metadata.
+            if (knownToken(urlFrom)) initFromToken = urlFrom!;
+            if (knownToken(urlTo)) initToToken = urlTo!;
           }
 
           setFromChainId(initFromChainId);
@@ -163,53 +166,32 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setMounted(true);
   }, []);
 
-  // Session-owner guard. When the user has connected (or is connecting) via the
-  // Push Universal Wallet modal, Push owns the session — any direct read of
-  // window.ethereum / WalletConnect would stomp the resolved UEA with a stale
-  // MetaMask address (since MetaMask wins the EIP-1193 injection race whenever
-  // both MM and Phantom are installed). We mirror the flag into a ref so the
-  // mount-only effects below can consult the *current* value without capturing
-  // stale closures.
-  const pushOwnsSessionRef = useRef(false);
+  // Wallet address mirror. useWallet() (wagmi) is the single source of truth;
+  // this keeps the local walletAddress/recipient/history in sync with it.
   useEffect(() => {
-    pushOwnsSessionRef.current =
-      pushWallet.isConnected || pushWallet.isConnecting;
-  }, [pushWallet.isConnected, pushWallet.isConnecting]);
-
-  // Sync wallet address from PushChain context
-  useEffect(() => {
-    if (pushWallet.isConnected && pushWallet.address) {
-      if (pushWallet.address !== walletAddress) {
-        diagnostics.logSessionEvent("PushChain wallet changed", {
-          from: walletAddress?.slice(0, 10),
-          to: pushWallet.address?.slice(0, 10),
-        });
+    if (walletState.isConnected && walletState.address) {
+      if (walletState.address !== walletAddress) {
         setSwapHistory([]);
         try { window.sessionStorage?.removeItem("moleswap_history"); } catch {}
       }
-      setWalletAddress(pushWallet.address);
-      setRecipientAddress(pushWallet.address);
-      setShowReceive(true);
-    }
-    if (!pushWallet.isConnected && walletAddress) {
-      diagnostics.logSessionEvent("PushChain wallet disconnected", {
-        previousAddress: walletAddress?.slice(0, 10),
-      });
+      setWalletAddress(walletState.address);
+      setRecipientAddress((r) => r || walletState.address);
+    } else if (!walletState.isConnected && walletAddress) {
       setWalletAddress(null);
       setRecipientAddress(null);
-      setShowReceive(false);
       setFromTokenBalance(null);
       setSwapHistory([]);
       try { window.sessionStorage?.removeItem("moleswap_history"); } catch {}
     }
-  }, [pushWallet.isConnected, pushWallet.address]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletState.isConnected, walletState.address]);
 
   // Load persistent swap history from Supabase
   useEffect(() => {
-    if (!pushWallet.isConnected || !pushWallet.address) return;
+    if (!walletState.isConnected || !walletState.address) return;
     (async () => {
       try {
-        const user = await getOrCreateUser(pushWallet.address!);
+        const user = await getOrCreateUser(walletState.address!);
         if (!user?.id) return;
         const history = await getUserSwapHistory(user.id, 50);
         if (!history || history.length === 0) return;
@@ -224,8 +206,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
             toAmount: s.to_amount || "0",
             txHash: s.tx_hash || "",
             timestamp: s.created_at,
-            fromLogo: fromInfo?.logoURI || "/placeholder-logo.png",
-            toLogo: toInfo?.logoURI || "/placeholder-logo.png",
+            fromLogo: fromInfo?.logoURI || tokenFallbackIcon(s.from_token, fromInfo?.symbol),
+            toLogo: toInfo?.logoURI || tokenFallbackIcon(s.to_token, toInfo?.symbol),
           };
         });
         setSwapHistory(mapped);
@@ -233,201 +215,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         console.warn("[MoleSwap] Failed to load swap history from DB:", e);
       }
     })();
-  }, [pushWallet.isConnected, pushWallet.address]);
-  useEffect(() => {
-    const checkWalletConnection = async () => {
-      if (typeof window === "undefined") return;
-
-      // Guard: only accept 0x-prefixed 42-char EVM addresses.
-      // Phantom (and some other multi-chain wallets) inject window.ethereum
-      // but return their Solana pubkey from eth_accounts when that's the
-      // active account. Writing that pubkey into walletAddress leaks it into
-      // eth_getBalance calls and breaks the Robinhood Chain RPC.
-      const isEvmAddress = (s: unknown): s is string =>
-        typeof s === "string" && /^0x[0-9a-fA-F]{40}$/.test(s);
-
-      // Check MetaMask / injected provider
-      const eth = window.ethereum;
-      if (eth?.request) {
-        try {
-          const accounts: string[] = await eth.request({
-            method: "eth_accounts",
-          });
-          const first = accounts?.[0];
-          // Skip if Push owns the session — eth_accounts is a silent read that
-          // would otherwise stomp the resolved UEA with MetaMask's address
-          // during the Phantom → UEA resolution window.
-          if (isEvmAddress(first) && !pushOwnsSessionRef.current) {
-            setWalletAddress(first);
-            setRecipientAddress(first); // Initialize recipient to wallet address
-            setShowReceive(true);
-          }
-          // else: probably Phantom returning Solana pubkey — ignore, let
-          // the push-wallet provider (usePushWallet) set walletAddress to
-          // the correct UEA once resolved.
-        } catch (e) {
-          // Silently fail if wallet is not connected
-        }
-      }
-
-      // Listen for account changes
-      if (eth?.on) {
-        const onAccountsChanged = (accounts: string[]) => {
-          // Ignore MetaMask account events while Push owns the session —
-          // otherwise switching MM accounts would silently overwrite the
-          // Phantom user's UEA.
-          if (pushOwnsSessionRef.current) return;
-
-          const first = accounts?.[0];
-          // CRITICAL: Clear swap history when wallet changes to prevent cross-wallet data leakage
-          diagnostics.logSessionEvent("MetaMask accountsChanged", {
-            newAccount: first?.slice(0, 10) || "none",
-          });
-          setSwapHistory([]);
-          try { window.sessionStorage?.removeItem("moleswap_history"); } catch {}
-
-          if (isEvmAddress(first)) {
-            setWalletAddress(first);
-            setRecipientAddress(first); // Update recipient when wallet changes
-            setShowReceive(true);
-          } else if (!first) {
-            setWalletAddress(null);
-            setRecipientAddress(null);
-            setShowReceive(false);
-            setFromTokenBalance(null);
-          }
-          // else: non-EVM address (e.g. Solana pubkey from Phantom) — ignore
-        };
-        eth.on("accountsChanged", onAccountsChanged);
-
-        return () => {
-          eth.removeListener?.("accountsChanged", onAccountsChanged);
-        };
-      }
-    };
-
-    checkWalletConnection();
-  }, []);
-
-  // ----- Listen for WalletConnect events -----
-  useEffect(() => {
-    const setupWalletConnect = async () => {
-      try {
-        const { getWalletConnectProvider } = await import(
-          "@/lib/wallet/walletconnect/provider"
-        );
-        const provider = await getWalletConnectProvider();
-        if (provider) {
-          // Same hex guard as the window.ethereum path — reject non-EVM addresses.
-          const isEvmAddr = (s: unknown): s is string =>
-            typeof s === "string" && /^0x[0-9a-fA-F]{40}$/.test(s);
-
-          // Listen for account changes from WalletConnect
-          provider.on("accountsChanged", (accounts: string[]) => {
-            // Ignore WC account events while Push owns the session.
-            if (pushOwnsSessionRef.current) return;
-
-            const first = accounts?.[0];
-            // CRITICAL: Clear swap history when wallet changes to prevent cross-wallet data leakage
-            diagnostics.logSessionEvent("WalletConnect accountsChanged", {
-              newAccount: first?.slice(0, 10) || "none",
-            });
-            setSwapHistory([]);
-            try { window.sessionStorage?.removeItem("moleswap_history"); } catch {}
-
-            if (isEvmAddr(first)) {
-              setWalletAddress(first);
-              setRecipientAddress(first);
-              setShowReceive(true);
-            } else if (!first) {
-              setWalletAddress(null);
-              setRecipientAddress(null);
-              setShowReceive(false);
-            }
-          });
-
-          // Listen for disconnect events from WalletConnect
-          provider.on("disconnect", () => {
-            // A WC-session disconnect shouldn't clobber an active Push session.
-            if (pushOwnsSessionRef.current) return;
-
-            diagnostics.logSessionEvent("WalletConnect disconnected");
-            setWalletAddress(null);
-            setRecipientAddress(null);
-            setShowReceive(false);
-            setFromTokenBalance(null);
-            // CRITICAL: Clear swap history on disconnect
-            setSwapHistory([]);
-            try { window.sessionStorage?.removeItem("moleswap_history"); } catch {}
-          });
-
-          // Listen for chain changes
-          provider.on("chainChanged", () => {
-            // Chain changed, but wallet is still connected
-            // Optionally refresh chain-specific data here
-          });
-
-          // Check if already connected via WalletConnect — but only adopt the
-          // WC address if Push isn't already the session owner.
-          const wcFirst = provider.accounts?.[0];
-          if (isEvmAddr(wcFirst) && !pushOwnsSessionRef.current) {
-            setWalletAddress(wcFirst);
-            setRecipientAddress(wcFirst);
-            setShowReceive(true);
-          }
-        }
-      } catch (error) {
-        // Provider might not be initialized yet, that's okay
-      }
-    };
-
-    setupWalletConnect();
-  }, []);
-
-  // ----- Listen for custom wallet disconnect event -----
-  useEffect(() => {
-    const handleWalletDisconnect = () => {
-      diagnostics.logSessionEvent("Custom walletDisconnected event");
-      setWalletAddress(null);
-      setRecipientAddress(null);
-      setShowReceive(false);
-      setFromTokenBalance(null);
-      // CRITICAL: Clear swap history on disconnect
-      setSwapHistory([]);
-      try { window.sessionStorage?.removeItem("moleswap_history"); } catch {}
-    };
-
-    window.addEventListener("walletDisconnected", handleWalletDisconnect);
-    return () => {
-      window.removeEventListener("walletDisconnected", handleWalletDisconnect);
-    };
-  }, []);
-
-  // ----- Listen for custom wallet connection event from ConnectWalletButton -----
-  useEffect(() => {
-    const handleWalletConnected = (event: Event) => {
-      const customEvent = event as CustomEvent<{ address: string }>;
-      const addr = customEvent.detail?.address;
-      // Same hex guard — reject non-EVM addresses that would break Push RPC calls
-      if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) {
-        diagnostics.logSessionEvent("Custom walletConnected event", {
-          address: addr.slice(0, 10),
-        });
-        // CRITICAL: Clear swap history when new wallet connects (might be different user)
-        setSwapHistory([]);
-        try { window.sessionStorage?.removeItem("moleswap_history"); } catch {}
-
-        setWalletAddress(addr);
-        setRecipientAddress(addr);
-        setShowReceive(true);
-      }
-    };
-
-    window.addEventListener("walletConnected", handleWalletConnected);
-    return () => {
-      window.removeEventListener("walletConnected", handleWalletConnected);
-    };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletState.isConnected, walletState.address]);
 
   // ----- Derived chain/token lists (kept) -----
   // Since all virtual chains share id=4663, find the chain GROUP containing
@@ -476,7 +265,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                   symbol: String(symbol),
                   name: String(name),
                   decimals: Number(decimals),
-                  logoURI: "/tokens/eth.svg",
+                  logoURI: tokenFallbackIcon(q, String(symbol)),
                   displaySymbol: String(symbol),
                   displaySubtitle: "Imported · Robinhood Chain",
                   sourceChain: "Robinhood Chain",
@@ -529,47 +318,6 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     [allTokens, toToken],
   );
 
-  // Bridge-out preview: when toToken is bridgeable AND the user's wallet
-  // origin matches the toToken's origin chain, we'll auto-deliver the real
-  // asset to their external wallet after the swap. Surface this in the card
-  // BEFORE the user clicks "Start Swapping" so there are no surprises.
-  // The preview pulls labels from the same PRC20_BRIDGE_MAP used by the
-  // actual send flow in SwapPage.tsx, so label text is always consistent.
-  const [bridgeOutPreview, setBridgeOutPreview] = useState<{
-    label: string;
-    originSymbol: string;
-  } | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        if (!toToken || !pushWallet.originChain || !pushWallet.origin) {
-          if (!cancelled) setBridgeOutPreview(null);
-          return;
-        }
-        const { canAutoBridgeFrom, getBridgeInfoForPrc20 } = await import(
-          "@/lib/pushchain/prc20-bridge-map"
-        );
-        if (!canAutoBridgeFrom(toToken, pushWallet.originChain)) {
-          if (!cancelled) setBridgeOutPreview(null);
-          return;
-        }
-        const info = getBridgeInfoForPrc20(toToken);
-        if (info && !cancelled) {
-          setBridgeOutPreview({
-            label: info.uiLabel,
-            originSymbol: info.originSymbol,
-          });
-        }
-      } catch {
-        if (!cancelled) setBridgeOutPreview(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [toToken, pushWallet.originChain, pushWallet.origin]);
-
   // ----- Amount -> wei (kept) -----
   const amountWei = useMemo(() => {
     const decimals = fromTokenMeta?.decimals ?? 18;
@@ -597,374 +345,244 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     );
   }, [fromChainId, toChainId, fromToken, toToken, amountWei]);
 
-  // ----- Fetch quote (kept) -----
-  const fetchQuote = useMemo(
-    () => async () => {
-      if (!canQuote) {
+  // ----- Live quote engine -----
+  // One session per pair: init loads the registry + on-chain pool discovery +
+  // full pool state. After that, quoting is pure math over the cached snapshot
+  // (instant per keystroke) and a 1-second loop refreshes the snapshot in ONE
+  // batched Multicall3 read, Jupiter-style — no per-tick discovery, no RPC bursts.
+  const NATIVE_MARKER = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+  const toAggToken = (a: string) => {
+    const l = (a || "").toLowerCase();
+    return !l ||
+      l === "0x0000000000000000000000000000000000000000" ||
+      l === "native" ||
+      l === "eth"
+      ? NATIVE_MARKER
+      : a;
+  };
+
+  useEffect(() => {
+    if (!fromToken || !toToken) return;
+    let cancelled = false;
+    sessionRef.current = null;
+    setQuote(null);
+    setQuoteRefreshing(true);
+    (async () => {
+      try {
+        const rows = await loadPoolRows();
+        const s = new LivePairSession(
+          toAggToken(fromToken),
+          toAggToken(toToken),
+          CONTRACTS.WETH,
+        );
+        await s.init(rows);
+        if (cancelled) return;
+        sessionRef.current = s;
+        setSessionEpoch((e) => e + 1);
+      } catch (e) {
+        console.error("[MoleSwap] pair session init failed:", e);
+      } finally {
+        if (!cancelled) setQuoteRefreshing(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromToken, toToken]);
+
+  // Pure recompute off the cached snapshot — runs on every keystroke and after
+  // every state refresh. Never touches the network.
+  const computeQuoteNow = useMemo(
+    () => () => {
+      const s = sessionRef.current;
+      if (!s || !canQuote) {
         setQuote(null);
         return;
       }
-      setQuoteRefreshing(true);
-      try {
-        // Check if this is a wrap operation (native to wrapped native on same chain)
-        // Relay API requires user and recipient to match for wrap operations
-        const nativeAddress = "0x0000000000000000000000000000000000000000";
-        const fromTokenLower = fromToken?.toLowerCase() || "";
-        const isFromNative =
-          !fromToken ||
-          fromToken === "" ||
-          fromTokenLower === nativeAddress ||
-          fromTokenLower === "native" ||
-          fromTokenLower === "eth" ||
-          fromTokenLower === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-
-        const isSameChain = fromChainId === toChainId;
-        // If same chain and from native token, likely a wrap operation
-        // Also check if toToken is a wrapped version (has a contract address)
-        const toTokenLower = toToken?.toLowerCase() || "";
-        const isToWrapped =
-          toToken &&
-          toTokenLower !== nativeAddress &&
-          toTokenLower !== "" &&
-          toTokenLower !== "native" &&
-          toTokenLower !== "eth";
-
-        const isWrapOperation =
-          isSameChain && isFromNative && isToWrapped && walletAddress;
-
-        // For wrap operations (ETH to WETH), user and recipient MUST match
-        // For other operations, use recipient address or fallback to wallet address
-        const finalRecipient = isWrapOperation
-          ? walletAddress
-          : recipientAddress || walletAddress;
-
-        // Ensure user and recipient match for wrap operations
-        const finalUser = walletAddress || undefined;
-        const finalRecipientForQuote = isWrapOperation
-          ? finalUser // Force recipient to match user for wraps
-          : finalRecipient;
-
-        const q = await relayClient.actions.getQuote(
-          {
-            chainId: Number(fromChainId),
-            toChainId: Number(toChainId),
-            currency: fromToken,
-            toCurrency: toToken,
-            amount: amountWei,
-            tradeType: "EXACT_INPUT",
-            user: finalUser,
-            recipient: finalRecipientForQuote || undefined,
-          },
-          true,
-        );
-        setQuote(q);
-        setQuoteUpdatedAt(Date.now());
-      } catch (e: any) {
-        // Log error for debugging
-        const errorMessage = e?.message || String(e);
-        console.error("Error fetching quote:", errorMessage);
-
-        // If it's a wrap operation error, provide helpful message
-        if (
-          errorMessage.includes("USER_RECIPIENT_MISMATCH") ||
-          errorMessage.includes("user and recipient must match")
-        ) {
-          console.warn(
-            "Wrap operation detected: user and recipient must match. " +
-              "Using wallet address as recipient.",
-          );
-        }
-
-        setQuote(null);
-      } finally {
-        setQuoteRefreshing(false);
-      }
+      const q = s.quote({
+        amountIn: BigInt(amountWei || "0"),
+        recipient:
+          recipientAddress ||
+          walletAddress ||
+          "0x000000000000000000000000000000000000dEaD",
+        slippageBps: 50,
+        decimalsIn: fromTokenMeta?.decimals ?? 18,
+        decimalsOut: toTokenMeta?.decimals ?? 18,
+      });
+      setQuote(q);
+      if (q) setQuoteUpdatedAt(q.updatedAt);
     },
     [
       canQuote,
-      fromChainId,
-      toChainId,
-      fromToken,
-      toToken,
       amountWei,
-      walletAddress,
       recipientAddress,
+      walletAddress,
+      fromTokenMeta?.decimals,
+      toTokenMeta?.decimals,
+      sessionEpoch,
     ],
   );
 
   useEffect(() => {
-    // Initial fetch when inputs change
-    fetchQuote();
-    // Reset refresh timer
-    if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-    if (canQuote) {
-      refreshTimerRef.current = setInterval(() => {
-        fetchQuote();
-      }, 25000); // refresh ~25s
-    }
-    return () => {
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-    };
-  }, [fetchQuote, canQuote]);
+    computeQuoteNow();
+  }, [computeQuoteNow]);
 
+  // The 1-second live refresh. Skips while the tab is hidden and while a
+  // previous refresh is still in flight (the session guards re-entrancy).
   useEffect(() => {
-    if (fromChainId !== toChainId || String(fromChainId) !== "4663" || !amountWei || amountWei === "0" || !walletAddress) {
-      setPushEstimate(null);
-      return;
-    }
-    let cancelled = false;
-    estimateSwapDetails({
-      tokenIn: fromToken || "0x0000000000000000000000000000000000000000",
-      tokenOut: toToken || "0x0000000000000000000000000000000000000000",
-      amountIn: amountWei,
-      recipient: walletAddress,
-    }).then(est => { if (!cancelled) setPushEstimate(est); })
-      .catch(() => { if (!cancelled) setPushEstimate(null); });
-    return () => { cancelled = true; };
-  }, [fromChainId, toChainId, fromToken, toToken, amountWei, walletAddress]);
+    if (!canQuote) return;
+    const id = setInterval(async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      const s = sessionRef.current;
+      if (!s) return;
+      try {
+        await s.refresh();
+        computeQuoteNow();
+      } catch {
+        /* keep the previous quote on a failed refresh */
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [canQuote, computeQuoteNow]);
 
-  // ----- TTL (kept) -----
+  // "Updated Xs ago" ticker — makes staleness visible if the RPC ever stalls.
   useEffect(() => {
     const id = setInterval(() => {
-      if (!quoteUpdatedAt) return setTtlLeft(0);
-      const elapsed = Math.floor((Date.now() - quoteUpdatedAt) / 1000);
-      const left = Math.max(0, 30 - elapsed);
-      setTtlLeft(left);
-    }, 1000);
+      if (!quoteUpdatedAt) return setSecondsSinceUpdate(0);
+      setSecondsSinceUpdate(
+        Math.max(0, Math.floor((Date.now() - quoteUpdatedAt) / 1000)),
+      );
+    }, 500);
     return () => clearInterval(id);
   }, [quoteUpdatedAt]);
 
-  // ----- Helpers from original (kept) -----
+  // ----- Display derivations (all from the typed LiveQuote) -----
   const formatTokenAmount = (
-    wei: string | undefined,
+    wei: string | bigint | undefined,
     decimals: number | undefined,
   ) => {
-    if (!wei || !decimals) return "-";
+    if (wei === undefined || wei === null || decimals === undefined || decimals === null)
+      return "-";
     try {
       const s = wei.toString();
       const pad = decimals - Math.min(decimals, s.length);
       const full = pad > 0 ? "0".repeat(pad) + s : s;
       const i = full.slice(0, full.length - decimals) || "0";
-      const f = full.slice(-decimals).replace(/0+$/, "");
+      const f = full.slice(-decimals).replace(/0+$/, "").slice(0, 8);
       return f ? `${i}.${f}` : i;
     } catch {
       return "-";
     }
   };
 
-  const expectedOutWei = useMemo(() => {
-    if (!quote) return undefined;
-    return (
-      quote.toAmount ||
-      quote.expectedOutput ||
-      quote.output?.amount ||
-      quote.amountOut ||
-      quote.details?.toAmount ||
-      quote.details?.to?.amount ||
-      quote.details?.currencyOut?.amount ||
-      quote.steps?.[0]?.toAmount ||
-      quote.steps?.[0]?.to?.amount ||
-      quote.steps?.[0]?.outputAmount
-    );
-  }, [quote]);
-
   const expectedOut = useMemo(
-    () => formatTokenAmount(expectedOutWei, toTokenMeta?.decimals),
-    [expectedOutWei, toTokenMeta?.decimals],
+    () => (quote ? formatTokenAmount(quote.amountOut, toTokenMeta?.decimals) : "-"),
+    [quote, toTokenMeta?.decimals],
+  );
+  const minReceived = useMemo(
+    () => (quote ? formatTokenAmount(quote.minAmountOut, toTokenMeta?.decimals) : "-"),
+    [quote, toTokenMeta?.decimals],
   );
 
-  const routeLabel = useMemo(() => {
-    if (quote?.route?.name) return quote.route.name;
-    if (Array.isArray(quote?.sources) && quote.sources.length) {
-      return quote.sources.map((s: any) => s?.name || s).join(" → ");
-    }
-    if (Array.isArray(quote?.steps) && quote.steps.length) {
-      return quote.steps
-        .map((s: any) => s?.name || s?.source || "")
-        .filter(Boolean)
-        .join(" → ");
-    }
-    return undefined;
+  // USD helper: USDG ≈ $1; ETH/WETH priced from the live WETH/USDG pool spot.
+  const usdValueOf = useMemo(
+    () => (human: number, tokenAddr: string | undefined) => {
+      if (!isFinite(human) || human <= 0 || !tokenAddr) return null;
+      const a = tokenAddr.toLowerCase();
+      const usdg = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+      const wethLc = CONTRACTS.WETH.toLowerCase();
+      if (a === usdg) return human;
+      const ethUsd = quote?.usdPerWeth ?? null;
+      if (ethUsd && (a === wethLc || a === "0x0000000000000000000000000000000000000000"))
+        return human * ethUsd;
+      return null;
+    },
+    [quote?.usdPerWeth],
+  );
+
+  const expectedOutUsd = useMemo(() => {
+    if (!quote || !toTokenMeta?.decimals) return null;
+    const human = Number(quote.amountOut) / Math.pow(10, toTokenMeta.decimals);
+    return usdValueOf(human, toTokenMeta?.address);
+  }, [quote, toTokenMeta?.decimals, toTokenMeta?.address, usdValueOf]);
+
+  // Per-part route rows: "47% · ETH → WETH → USDG · PancakeSwap V3 (0.05%)"
+  const routeRows = useMemo(() => {
+    if (!quote) return [];
+    const symbolFor = (addr: string) => {
+      const a = addr.toLowerCase();
+      if (a === NATIVE_MARKER.toLowerCase()) return "ETH";
+      const t = allTokens.find((x) => x.address?.toLowerCase() === a);
+      if (t) return displaySymbolOf(t);
+      if (a === CONTRACTS.WETH.toLowerCase()) return "WETH";
+      return `${addr.slice(0, 6)}…`;
+    };
+    return quote.routes.map((r) => {
+      const path = [
+        symbolFor(r.hops[0]?.tokenIn ?? ""),
+        ...r.hops.map((h) => symbolFor(h.tokenOut)),
+      ].join(" → ");
+      const venues = [...new Set(r.hops.map((h) => `${h.venue} (${h.feePct})`))].join(" · ");
+      return {
+        pct: r.splitPct.toFixed(r.splitPct % 1 === 0 ? 0 : 1),
+        path,
+        venues,
+        out: formatTokenAmount(r.amountOut, toTokenMeta?.decimals),
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quote, allTokens, toTokenMeta?.decimals]);
+
+  const rateLabel = useMemo(() => {
+    if (!quote || !isFinite(quote.execRate) || quote.execRate <= 0) return undefined;
+    const digits = quote.execRate >= 100 ? 2 : quote.execRate >= 1 ? 4 : 6;
+    return `1 ${displaySymbolOf(fromTokenMeta)} = ${quote.execRate.toLocaleString(undefined, { maximumFractionDigits: digits })} ${displaySymbolOf(toTokenMeta)}`;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quote, fromTokenMeta?.symbol, toTokenMeta?.symbol]);
+
+  const priceImpactLabel = useMemo(() => {
+    if (!quote || quote.priceImpactPct === null) return null;
+    const v = quote.priceImpactPct;
+    return {
+      text: v < 0.01 ? "<0.01%" : `${v.toFixed(2)}%`,
+      tone: v >= 3 ? "text-red-400" : v >= 1 ? "text-yellow-400" : "text-green-300",
+      severe: v >= 3,
+    };
   }, [quote]);
 
-  const feesLabel = useMemo(() => {
-    if (!quote) return undefined;
-    let usd =
-      quote?.feesUsd ??
-      quote?.totalFeesUsd ??
-      quote?.fees?.totalUsd ??
-      quote?.fees?.usd ??
-      quote?.breakdown?.totalUsd ??
-      quote?.totalUsd;
-    if (!usd && quote?.fees) {
-      if (Array.isArray(quote.fees.breakdown)) {
-        usd = quote.fees.breakdown.reduce(
-          (acc: number, f: any) => acc + Number(f?.usd || f?.usdValue || 0),
-          0,
-        );
-      } else if (typeof quote.fees === "object") {
-        for (const k of Object.keys(quote.fees)) {
-          const v = (quote.fees as any)[k];
-          if (k.toLowerCase().includes("usd") && typeof v === "number") {
-            usd = v;
-            break;
-          }
-        }
-      }
-    }
-    if (!usd && Array.isArray(quote?.steps)) {
-      usd = quote.steps.reduce(
-        (acc: number, s: any) =>
-          acc + Number(s?.fees?.usd || s?.fees?.totalUsd || 0),
-        0,
-      );
-    }
-    if (!usd && typeof quote?.details?.fees === "object") {
-      usd = quote.details.fees.usd || quote.details.fees.totalUsd;
-    }
-    return usd ? `$${Number(usd).toFixed(2)} fees` : undefined;
+  const networkFeeLabel = useMemo(() => {
+    if (!quote) return null;
+    if (quote.gasEth === null) return `~${(Number(quote.gasUnits) / 1000).toFixed(0)}k gas`;
+    const usd = quote.usdPerWeth ? quote.gasEth * quote.usdPerWeth : null;
+    const eth = quote.gasEth < 0.000001 ? "<0.000001" : quote.gasEth.toFixed(6);
+    return usd !== null ? `${eth} ETH ($${usd.toFixed(4)})` : `${eth} ETH`;
   }, [quote]);
-  const isPushChainSwap = fromChainId === toChainId && String(fromChainId) === "4663";
+  const isRhSwap = fromChainId === toChainId && String(fromChainId) === "4663";
 
   // Detect if swap involves a thin liquidity pool — only warn when the user's
-  // selected token IS the thin-liquidity token (not WPC, which appears in every pool)
+  // selected token IS the thin-liquidity token (not WETH, which appears in every pool)
   const thinPoolWarning = useMemo(() => {
     if (!fromToken || !toToken) return null;
-    const actualFrom = fromToken === "0x0000000000000000000000000000000000000000" ? CONTRACTS.WPC : fromToken;
-    const actualTo = toToken === "0x0000000000000000000000000000000000000000" ? CONTRACTS.WPC : toToken;
-    const wpc = CONTRACTS.WPC.toLowerCase();
-    // For each thin pool, check if the non-WPC token matches from or to
+    const actualFrom = fromToken === "0x0000000000000000000000000000000000000000" ? CONTRACTS.WETH : fromToken;
+    const actualTo = toToken === "0x0000000000000000000000000000000000000000" ? CONTRACTS.WETH : toToken;
+    const wethLc = CONTRACTS.WETH.toLowerCase();
+    // For each thin pool, check if the non-WETH token matches from or to
     const thinPool = POOLS.find(p => {
       if (!p.thinLiquidity) return false;
-      const thinToken = p.token0.toLowerCase() === wpc ? p.token1.toLowerCase() : p.token0.toLowerCase();
+      const thinToken = p.token0.toLowerCase() === wethLc ? p.token1.toLowerCase() : p.token0.toLowerCase();
       return thinToken === actualFrom.toLowerCase() || thinToken === actualTo.toLowerCase();
     });
     return thinPool ? `${thinPool.name} has very low liquidity — expect high slippage or failed swaps.` : null;
   }, [fromToken, toToken]);
 
-  const feesDisplayLabel = feesLabel || (isPushChainSwap && quote
-    ? (pushEstimate ? `~${(pushEstimate.totalGas / 1000).toFixed(0)}k gas • 0.25% fee` : "~0.25% fee")
-    : undefined);
-  const etaSeconds = useMemo(() => {
-    const direct =
-      quote?.estimatedTimeSeconds ??
-      quote?.etaSeconds ??
-      quote?.durationSeconds ??
-      quote?.details?.etaSeconds;
-    if (direct) return direct;
-    const detailsEta = (quote as any)?.details?.eta?.seconds;
-    if (detailsEta) return detailsEta;
-    if (Array.isArray(quote?.steps)) {
-      let eta: number | undefined;
-      for (const s of quote.steps) {
-        const sEta = s?.etaSeconds ?? s?.durationSeconds ?? s?.eta?.seconds;
-        if (sEta && (!eta || sEta > eta)) eta = sEta;
-        if (Array.isArray(s?.items)) {
-          for (const it of s.items) {
-            const iEta =
-              it?.etaSeconds ?? it?.durationSeconds ?? it?.eta?.seconds;
-            if (iEta && (!eta || iEta > eta)) eta = iEta;
-          }
-        }
-      }
-      return eta;
-    }
-    if (fromChainId === toChainId && String(fromChainId) === "4663" && pushEstimate) {
-      return pushEstimate.etaSeconds;
-    }
-    return undefined;
-  }, [quote, fromChainId, toChainId, pushEstimate]);
-  const rateLabel = useMemo(() => {
-    try {
-      if (
-        !expectedOutWei ||
-        !amountWei ||
-        !fromTokenMeta?.decimals ||
-        !toTokenMeta?.decimals
-      )
-        return undefined;
-      const fromPow = Math.pow(10, fromTokenMeta.decimals);
-      const toPow = Math.pow(10, toTokenMeta.decimals);
-      const outNum = Number(expectedOutWei);
-      const inNum = Number(amountWei);
-      if (!isFinite(outNum) || !isFinite(inNum) || inNum === 0)
-        return undefined;
-      const rate = outNum / toPow / (inNum / fromPow);
-      if (!isFinite(rate)) return undefined;
-      return `1 ${displaySymbolOf(fromTokenMeta)} = ${(rate * 1).toFixed(6)} ${displaySymbolOf(toTokenMeta)}`;
-    } catch {
-      return undefined;
-    }
-  }, [
-    expectedOutWei,
-    amountWei,
-    fromTokenMeta?.decimals,
-    toTokenMeta?.decimals,
-    fromTokenMeta?.symbol,
-    toTokenMeta?.symbol,
-  ]);
-
-  // Calculate USD value of balance from quote price
+  // Balance USD value from the live spot (USDG ≈ $1, ETH/WETH via the pool).
   const balanceUsdValue = useMemo(() => {
-    if (!fromTokenBalance || !quote || !amountWei) return null;
-
-    try {
-      // Try to get USD value from various quote fields
-      const inputUsd =
-        quote?.fromAmountUsd ??
-        quote?.inputUsd ??
-        quote?.amountInUsd ??
-        quote?.details?.fromAmountUsd ??
-        quote?.details?.inputUsd;
-
-      if (inputUsd && amountWei) {
-        // Calculate price per token
-        const fromPow = Math.pow(10, fromTokenMeta?.decimals ?? 18);
-        const amountNum = Number(amountWei) / fromPow;
-
-        if (amountNum > 0) {
-          const pricePerToken = Number(inputUsd) / amountNum;
-          const balanceNum = Number(fromTokenBalance);
-          return balanceNum * pricePerToken;
-        }
-      }
-
-      // Fallback: try to calculate from output USD if available
-      const outputUsd =
-        quote?.toAmountUsd ??
-        quote?.outputUsd ??
-        quote?.amountOutUsd ??
-        quote?.details?.toAmountUsd ??
-        quote?.details?.outputUsd;
-
-      if (outputUsd && amountWei && expectedOutWei) {
-        const fromPow = Math.pow(10, fromTokenMeta?.decimals ?? 18);
-        const toPow = Math.pow(10, toTokenMeta?.decimals ?? 18);
-        const amountNum = Number(amountWei) / fromPow;
-        const outputNum = Number(expectedOutWei) / toPow;
-
-        if (amountNum > 0 && outputNum > 0) {
-          // Calculate exchange rate and infer input USD from output USD
-          const exchangeRate = outputNum / amountNum;
-          const inputUsdFromOutput = Number(outputUsd) / exchangeRate;
-          const pricePerToken = inputUsdFromOutput / amountNum;
-          const balanceNum = Number(fromTokenBalance);
-          return balanceNum * pricePerToken;
-        }
-      }
-
-      return null;
-    } catch {
-      return null;
-    }
-  }, [
-    fromTokenBalance,
-    quote,
-    amountWei,
-    expectedOutWei,
-    fromTokenMeta?.decimals,
-    toTokenMeta?.decimals,
-  ]);
+    if (!fromTokenBalance) return null;
+    const n = Number(fromTokenBalance);
+    if (!isFinite(n) || n <= 0) return null;
+    return usdValueOf(n, fromTokenMeta?.address || fromToken);
+  }, [fromTokenBalance, fromTokenMeta?.address, fromToken, usdValueOf]);
 
   const shortAddress = (addr?: string | null) => {
     if (!addr) return "";
@@ -1003,27 +621,22 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     }
   };
 
+  // Token logos: the TOKEN's own logo, else a deterministic per-token identicon.
+  // Never the chain icon — that made every unknown token render as ETH.
   const fromLogo = useMemo(
-    () =>
-      fromTokenMeta?.logoURI ||
-      fromChain?.iconUrl ||
-      fromChain?.logoUrl ||
-      "/placeholder-logo.png",
-    [fromTokenMeta?.logoURI, fromChain?.iconUrl, fromChain?.logoUrl],
+    () => fromTokenMeta?.logoURI || tokenFallbackIcon(fromToken, displaySymbolOf(fromTokenMeta)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [fromTokenMeta?.logoURI, fromToken, fromTokenMeta?.symbol],
   );
   const toLogo = useMemo(
-    () =>
-      toTokenMeta?.logoURI ||
-      toChain?.iconUrl ||
-      toChain?.logoUrl ||
-      "/placeholder-logo.png",
-    [toTokenMeta?.logoURI, toChain?.iconUrl, toChain?.logoUrl],
+    () => toTokenMeta?.logoURI || tokenFallbackIcon(toToken, displaySymbolOf(toTokenMeta)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [toTokenMeta?.logoURI, toToken, toTokenMeta?.symbol],
   );
 
   const handleConnectWallet = async () => {
     try {
-      // PushChain universal wallet connection (primary)
-      pushWallet.connect();
+      walletState.connect();
     } catch (e) {
       // optional toast
     }
@@ -1065,32 +678,32 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     onNext("swap", {
       quote,
       fromToken: fromToken || "ETH",
-      toToken: toToken || "USDC",
+      toToken,
       amount: amount || "0",
       expectedOut: expectedOut || "0",
+      minReceived: minReceived || "0",
       fromTokenMeta,
       toTokenMeta,
       fromChain,
       toChain,
-      routeLabel: routeLabel || "Auto",
-      feesLabel: feesDisplayLabel || "-",
-      etaSeconds: typeof etaSeconds === "number" ? etaSeconds : undefined,
+      routeLabel:
+        routeRows.length > 0
+          ? routeRows.map((r) => `${r.pct}% ${r.path}`).join("  |  ")
+          : "Auto",
+      feesLabel: networkFeeLabel || "-",
+      priceImpact: priceImpactLabel?.text,
       rateLabel: rateLabel || "-",
       walletAddress,
       recipientAddress: recipientAddress || walletAddress,
     });
   };
 
-  // ----- Show Receive automatically when ready (kept) -----
-  // Note: showReceive is now primarily controlled by wallet connection
-  // This effect ensures receive panel shows when all conditions are met
+  // Preview the quote as soon as there's a pair + amount — no wallet required
+  // (Jupiter-style: see the price before connecting). The swap button still
+  // gates on the wallet.
   useEffect(() => {
-    if (walletAddress && fromToken && toToken && Number(amount) > 0) {
-      setShowReceive(true);
-    } else if (!walletAddress) {
-      setShowReceive(false);
-    }
-  }, [walletAddress, fromToken, toToken, amount]);
+    setShowReceive(Boolean(fromToken && toToken && Number(amount) > 0));
+  }, [fromToken, toToken, amount]);
 
   // ----- Fetch balance when wallet, chain, and token are selected -----
   useEffect(() => {
@@ -1111,30 +724,15 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       }
 
       try {
-        // Prefer the ORIGIN-chain balance for bridgeable PRC-20s when the
-        // user's connected origin chain matches the token's bridge origin —
-        // that's the amount they actually hold in Phantom/MetaMask and the
-        // amount that gets auto-bridged on swap. Falling back to the
-        // Push-chain PRC-20 balance would show a post-bridge leftover
-        // (usually 0 for first-time users) and — critically — make the
-        // MAX/50%/20% buttons compute against the wrong number.
-        const originPubkey = (pushWallet as any)?.origin || null;
-        const userOriginChain = (pushWallet as any)?.originChain || null;
-        let balance: string | null = null;
-        if ((fromTokenMeta as any)?.bridgeable && originPubkey && userOriginChain) {
-          balance = await fetchOriginBalance(fromToken, originPubkey, userOriginChain);
-        }
-        if (balance === null) {
-          const chain = chains.find((c) => String(c.id) === fromChainId);
-          const vmType = chain?.vmType;
-          balance = await getTokenBalance(
-            walletAddress as Address,
-            fromToken,
-            Number(fromChainId),
-            fromTokenMeta?.decimals,
-            vmType,
-          );
-        }
+        const chain = chains.find((c) => String(c.id) === fromChainId);
+        const vmType = chain?.vmType;
+        const balance = await getTokenBalance(
+          walletAddress as Address,
+          fromToken,
+          Number(fromChainId),
+          fromTokenMeta?.decimals,
+          vmType,
+        );
 
         if (!cancelled) {
           setFromTokenBalance(balance);
@@ -1156,241 +754,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     return () => {
       cancelled = true;
     };
-  }, [walletAddress, fromChainId, fromToken, fromTokenMeta?.decimals, (fromTokenMeta as any)?.bridgeable, chains, pushWallet.origin, pushWallet.originChain]);
-
-  // ═══ ORIGIN-CHAIN BALANCE + PHANTOM DEVNET CHECK ═══════════════════════
-  // When user is on a non-Push origin chain AND selects a bridgeable token
-  // whose origin matches, fetch their actual origin-chain balance so the UI
-  // can show "You have 0.93 SOL on Solana to bridge" — much clearer than
-  // "Balance: 0 pSOL" (which is true but useless for a user about to bridge).
-  //
-  // Also detects Phantom cluster mismatch: if origin is Solana Devnet but
-  // Phantom is on Mainnet, warn before the user burns a signing attempt.
-  useEffect(() => {
-    let cancelled = false;
-
-    const fetchOriginContext = async () => {
-      if (!pushWallet.isConnected || !pushWallet.origin || !pushWallet.originChain || !fromToken) {
-        if (!cancelled) {
-          setOriginBalance(null);
-          setPhantomClusterWarning(null);
-        }
-        return;
-      }
-
-      try {
-        // Dynamic import to avoid bundling the bridge map in pages that don't need it
-        const { getBridgeInfoForPrc20 } = await import("@/lib/pushchain/prc20-bridge-map");
-        const bridge = getBridgeInfoForPrc20(fromToken);
-        if (!bridge) {
-          if (!cancelled) {
-            setOriginBalance(null);
-            setPhantomClusterWarning(null);
-          }
-          return;
-        }
-
-        const originMatches =
-          bridge.originChain.toLowerCase() === pushWallet.originChain!.toLowerCase();
-        if (!originMatches) {
-          if (!cancelled) {
-            setOriginBalance(null);
-            setPhantomClusterWarning(null);
-          }
-          return;
-        }
-
-        // ─ Solana origin path ─
-        if (bridge.originChain.startsWith("solana:")) {
-          // Check Phantom cluster. Phantom injects window.solana; `isConnected`
-          // is true and `publicKey` matches pushWallet.origin. We check cluster
-          // by querying the RPC Phantom is currently using.
-          try {
-            const solWin = (window as any)?.solana;
-            if (solWin?.isPhantom) {
-              // Phantom's injected provider doesn't expose cluster directly,
-              // but we can probe: try to fetch a devnet-only program account.
-              // Simpler: just hit devnet RPC ourselves for the balance. If the
-              // user's pubkey resolves with a nonzero balance on devnet, they
-              // likely have it there. If it's zero but they claim to have SOL,
-              // they're probably on mainnet.
-              const res = await fetch("https://api.devnet.solana.com", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: 1,
-                  method: "getBalance",
-                  params: [pushWallet.origin],
-                }),
-              });
-              const json = await res.json();
-              const lamports: number | undefined = json?.result?.value;
-              if (typeof lamports === "number") {
-                const sol = lamports / 1e9;
-                if (!cancelled) {
-                  setOriginBalance(sol.toFixed(6));
-                  // If devnet balance is 0, the user might be on mainnet.
-                  // Not a hard error — they may just not have bridged yet —
-                  // but surface a gentle warning.
-                  setPhantomClusterWarning(
-                    sol === 0
-                      ? "⚠️ 0 SOL detected on Solana Devnet. If Phantom shows a balance, make sure Testnet Mode is ON in Phantom Settings → Developer Settings."
-                      : null
-                  );
-                }
-                return;
-              }
-            }
-          } catch (err) {
-            // Swallow — origin balance display is best-effort
-            console.warn("[MoleSwap] Origin balance fetch failed:", err);
-          }
-
-          if (!cancelled) {
-            setOriginBalance(null);
-            setPhantomClusterWarning(null);
-          }
-          return;
-        }
-
-        // ─ Solana origin, ERC-20/SPL token path (e.g. USDT on Solana Devnet) ─
-        // Read the SPL token balance at the associated token account.
-        if (bridge.originChain.startsWith("solana:") && bridge.originSymbol !== "SOL") {
-          try {
-            const resp = await fetch("https://api.devnet.solana.com", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                jsonrpc: "2.0",
-                id: 1,
-                method: "getTokenAccountsByOwner",
-                params: [
-                  pushWallet.origin,
-                  { mint: bridge.originAddress },
-                  { encoding: "jsonParsed" },
-                ],
-              }),
-            });
-            const json = await resp.json();
-            const accounts = json?.result?.value || [];
-            let total = 0;
-            for (const acc of accounts) {
-              const amt = acc?.account?.data?.parsed?.info?.tokenAmount?.uiAmount;
-              if (typeof amt === "number") total += amt;
-            }
-            if (!cancelled) {
-              setOriginBalance(total.toFixed(6));
-              setPhantomClusterWarning(null);
-            }
-          } catch (err) {
-            console.warn("[MoleSwap] SPL token balance fetch failed:", err);
-            if (!cancelled) {
-              setOriginBalance(null);
-              setPhantomClusterWarning(null);
-            }
-          }
-          return;
-        }
-
-        // ─ EVM origin path ─ (Sepolia / Arbitrum / Base / BNB Testnet)
-        // Map the SDK's CAIP-style chain identifier to a public testnet RPC
-        // so we can query the user's native or ERC-20 balance directly. This
-        // gives real-time "+X available to bridge" info in the UI — same
-        // pattern as the Solana path above.
-        if (bridge.originChain.startsWith("eip155:")) {
-          const EVM_RPC: Record<string, string> = {
-            "eip155:11155111": "https://ethereum-sepolia-rpc.publicnode.com",
-            "eip155:421614":   "https://arbitrum-sepolia-rpc.publicnode.com",
-            "eip155:84532":    "https://base-sepolia-rpc.publicnode.com",
-            "eip155:97":       "https://bsc-testnet-rpc.publicnode.com",
-          };
-          const rpcUrl = EVM_RPC[bridge.originChain.toLowerCase()];
-          if (!rpcUrl) {
-            if (!cancelled) {
-              setOriginBalance(null);
-              setPhantomClusterWarning(null);
-            }
-            return;
-          }
-
-          try {
-            const userAddr = pushWallet.origin;
-            let balance: bigint = 0n;
-            if (bridge.originSymbol === "ETH") {
-              // Native balance
-              const resp = await fetch(rpcUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: 1,
-                  method: "eth_getBalance",
-                  params: [userAddr, "latest"],
-                }),
-              });
-              const json = await resp.json();
-              if (json?.result) balance = BigInt(json.result);
-            } else {
-              // ERC-20 balanceOf(address)
-              // 0x70a08231 = balanceOf(address) selector
-              const data =
-                "0x70a08231" +
-                userAddr.toLowerCase().replace(/^0x/, "").padStart(64, "0");
-              const resp = await fetch(rpcUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: 1,
-                  method: "eth_call",
-                  params: [{ to: bridge.originAddress, data }, "latest"],
-                }),
-              });
-              const json = await resp.json();
-              if (json?.result && json.result !== "0x") balance = BigInt(json.result);
-            }
-
-            // Format respecting the origin-chain decimals (native ETH is 18,
-            // USDT on each chain is 6 per the bridge map).
-            const decimals = bridge.originDecimals;
-            const divisor = 10n ** BigInt(decimals);
-            const whole = balance / divisor;
-            const frac = balance % divisor;
-            // Build a float-safe decimal string without Number overflow
-            const fracStr = frac.toString().padStart(decimals, "0").slice(0, 6);
-            const formatted = `${whole.toString()}.${fracStr}`;
-
-            if (!cancelled) {
-              setOriginBalance(formatted);
-              setPhantomClusterWarning(null);
-            }
-            return;
-          } catch (err) {
-            console.warn("[MoleSwap] EVM origin balance fetch failed:", err);
-            if (!cancelled) {
-              setOriginBalance(null);
-              setPhantomClusterWarning(null);
-            }
-            return;
-          }
-        }
-
-        if (!cancelled) {
-          setOriginBalance(null);
-          setPhantomClusterWarning(null);
-        }
-      } catch (err) {
-        console.warn("[MoleSwap] fetchOriginContext error:", err);
-      }
-    };
-
-    fetchOriginContext();
-    return () => {
-      cancelled = true;
-    };
-  }, [pushWallet.isConnected, pushWallet.origin, pushWallet.originChain, fromToken]);
-
+  }, [walletAddress, fromChainId, fromToken, fromTokenMeta?.decimals, (fromTokenMeta as any)?.bridgeable, chains, walletState.origin, walletState.originChain]);
 
   // ----- Modal select logic -----
   // open modal: seed selectedNetwork with the chain group containing the current token
@@ -1398,10 +762,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setSelectionMode(mode);
     setSearchQuery("");
     setSearchQueryNetwork("");
-    // Destination is ALWAYS Robinhood Chain — proceeds of every swap land as a
-    // PRC-20 on Push (no outbound bridge today). Hard-code Robinhood Chain for
-    // the TO picker so users can't select Ethereum/Solana/Base/Arbitrum/BNB
-    // destinations that would mislead them about where the asset ends up.
+    // The app runs on one chain, so the TO picker is fixed to Robinhood Chain.
     if (mode === "to") {
       setSelectedNetwork("Robinhood Chain");
       return;
@@ -1421,14 +782,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setSelectedNetwork("");
   };
 
-  // List of networks filtered by search.
-  //
-  // FROM: show every chain (user may hold real assets on Ethereum / Solana /
-  //       Base / Arbitrum / BNB to bridge IN, plus Robinhood Chain natives).
-  // TO:   only Robinhood Chain. Destination of every swap is a PRC-20 sitting on
-  //       Robinhood Chain — no outbound bridge is wired today, so listing
-  //       Ethereum/Solana/etc. as destinations would lie about where the
-  //       asset ends up.
+  // Network list (single chain — Robinhood Chain — filtered by search).
   const filteredNetworks = useMemo(() => {
     const src = selectionMode === "to"
       ? chains.filter((c) => c.name === "Robinhood Chain")
@@ -1441,25 +795,23 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   }, [chains, searchQueryNetwork, selectionMode]);
 
   // Tokens for the currently selected network in the modal.
-  // For TO mode we merge every swappable token (across every source chain)
-  // into the Robinhood Chain group, because that's where they all live as PRC-20s.
   const modalChain =
     chains.find((c) => c.name === selectedNetwork) || null;
   const modalTokens = useMemo(() => {
     const seen = new Set<string>();
     const merged: ReturnType<typeof getTokensForChain> = [];
-    const push = (t: any) => {
+    const add = (t: any) => {
       const key = (t.address || "").toLowerCase();
       if (!key || seen.has(key)) return;
       seen.add(key);
       merged.push(t);
     };
     if (selectionMode === "to") {
-      for (const c of chains) for (const t of getTokensForChain(c)) push(t);
+      for (const c of chains) for (const t of getTokensForChain(c)) add(t);
     } else if (modalChain) {
-      for (const t of getTokensForChain(modalChain)) push(t);
+      for (const t of getTokensForChain(modalChain)) add(t);
     }
-    for (const t of importedTokens) push(t); // user-imported tokens are selectable in both modes
+    for (const t of importedTokens) add(t); // user-imported tokens are selectable in both modes
     return merged;
   }, [modalChain, chains, selectionMode, importedTokens]);
 
@@ -1519,39 +871,19 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       });
 
       // Fetch balances for all tokens in parallel (batched).
-      //
-      // For bridgeable PRC-20s where the user is connected via the matching
-      // origin chain (Phantom user picking "SOL on Solana", Sepolia MetaMask
-      // picking "ETH on Ethereum", etc.), show the ORIGIN-CHAIN balance — the
-      // amount they actually hold in their wallet and can bridge in. Falling
-      // back to the Push-chain PRC-20 balance would surface the post-bridge
-      // amount (often 0 for first-time users) and confuse them.
-      const originPubkey = (pushWallet as any)?.origin || null;
-      const userOriginChain = (pushWallet as any)?.originChain || null;
       const balancePromises = tokensToFetch.map(async (token) => {
         if (cancelled) return null;
 
         const balanceKey = `${selectedNetwork}-${token.address}`;
 
         try {
-          // Try origin-chain balance first when the token is bridgeable and
-          // the user is connected via its origin chain. Returns null when
-          // inapplicable (different origin chain, non-bridgeable token, etc.).
-          let balance: string | null = null;
-          if ((token as any).bridgeable && originPubkey && userOriginChain) {
-            balance = await fetchOriginBalance(token.address, originPubkey, userOriginChain);
-          }
-          // Fall back to Push-chain PRC-20 balance — either the token isn't
-          // bridgeable from this origin, or the origin probe failed.
-          if (balance === null) {
-            balance = await getTokenBalance(
-              walletAddress as Address,
-              token.address,
-              chainId,
-              token.decimals,
-              vmType,
-            );
-          }
+          const balance = await getTokenBalance(
+            walletAddress as Address,
+            token.address,
+            chainId,
+            token.decimals,
+            vmType,
+          );
 
           if (!cancelled) {
             return { balanceKey, balance };
@@ -1619,7 +951,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
 
   const handleSelectToken = (tokenAddress: string) => {
     if (!selectedNetwork) return;
-    // All tokens live on PushChain — always set chainId to 4663
+    // Single chain — always set chainId to 4663 (Robinhood Chain)
     if (selectionMode === "from") {
       setFromChainId("4663");
       setFromToken(tokenAddress);
@@ -1700,12 +1032,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                 {selectedNetwork ? (
                   filteredModalTokens.length > 0 ? (
                     filteredModalTokens.map((token, idx) => {
-                      // FROM picker shows the ORIGIN-asset framing ("SOL on
-                      // Solana", "ETH on Ethereum") because the user holds
-                      // those assets on the origin chain and they get
-                      // bridged in. TO picker shows the PRC-20 framing
-                      // ("pETH on Robinhood Chain", "USDT.eth on Robinhood Chain")
-                      // because that's where the output actually lands.
+                      // Token row framing pulls symbol/subtitle from the registry.
                       const tokenInfo = TOKENS.find(
                         (t) => t.address?.toLowerCase() === token.address?.toLowerCase(),
                       );
@@ -2194,16 +1521,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                     upfront so they know the swap completes with a destination
                     settlement on their home chain. No extra clicks from the
                     user — they just see the promise of where funds will land. */}
-                {/* Destination-clarity banner — tells the user EXACTLY what
-                    asset lands where. Today the outbound bridge (Route 2 UOA
-                    → CEA) isn't wired, so the proceeds of any swap stay as a
-                    PRC-20 on Robinhood Chain. Don't promise native ETH/SOL on
-                    origin until the outbound is implemented (see
-                    lib/pushchain/amm.ts). Always render the truth instead of
-                    the aspirational bridge-out preview.
-                    TODO(outbound): once buildOutboundRequest + execute is
-                    wired, swap this banner to the true origin-delivery label
-                    and key it on an `outboundWired` flag. */}
+                {/* Confirms the exact asset the user receives on Robinhood Chain. */}
                 {toTokenMeta && (
                   <div className="relative z-10 mx-auto -mt-2 w-full px-6 sm:w-[90%]">
                     <p className="font-family-ThaleahFat text-xs tracking-wider uppercase text-[#7DD3FC] sm:text-sm">
@@ -2266,12 +1584,6 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                             ) : (
                               <p className="font-family-ThaleahFat text-base tracking-widest text-yellow-100 uppercase sm:text-lg">
                                 Unable to load balance
-                              </p>
-                            )}
-                            {/* Phantom cluster warning */}
-                            {phantomClusterWarning && (
-                              <p className="font-family-ThaleahFat mt-1 text-xs tracking-wide text-yellow-400">
-                                {phantomClusterWarning}
                               </p>
                             )}
                           </div>
@@ -2392,17 +1704,22 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                 />
                 <div className="relative z-10 mx-auto mt-4 w-[95%] sm:mt-12 sm:w-[90%]">
                   {!quote ? (
-                    <div className="rounded bg-black/40 p-4 text-sm text-[#BCBCBC]">
-                      No quote yet. Select chains, tokens and amount.
+                    <div className="rounded bg-black/40 p-4 text-left text-sm text-[#BCBCBC]">
+                      {quoteRefreshing
+                        ? "Scanning every live pool for the best route…"
+                        : canQuote
+                          ? "No route with live liquidity for this pair."
+                          : "Select tokens and enter an amount to get a live quote."}
                     </div>
                   ) : (
                     <div className="relative z-50 p-4">
-                      <div className="flex w-full flex-col justify-between gap-4 py-1 sm:px-4">
+                      <div className="flex w-full flex-col justify-between gap-3 py-1 sm:px-4">
+                        {/* Headline: what you receive */}
                         <div className="flex items-center justify-between">
                           <div className="border-ground-button-border h-8 w-8 overflow-hidden rounded-lg border-2 bg-black/50 sm:h-12 sm:w-12">
                             <Image
                               src={toLogo}
-                              alt="Receive Logo"
+                              alt={`${displaySymbolOf(toTokenMeta)} logo`}
                               width={48}
                               height={48}
                               className="h-full w-full object-cover"
@@ -2410,42 +1727,88 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                           </div>
                           <div className="mr-auto ml-4 min-w-0 flex-1 overflow-hidden text-left">
                             <div className="font-family-ThaleahFat text-lg text-yellow-100 truncate sm:text-3xl">
-                              {expectedOut || "-"}
+                              {expectedOut} {displaySymbolOf(toTokenMeta)}
                             </div>
                             <div className="text-sm font-semibold text-[#BCBCBC]">
-                              <span>
-                                {displaySymbolOf(toTokenMeta)} on{" "}
-                                {toChain?.displayName || toChain?.name}
+                              {expectedOutUsd !== null && (
+                                <span>≈ ${expectedOutUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })} · </span>
+                              )}
+                              <span className="text-green-300">
+                                LIVE · updated {secondsSinceUpdate <= 1 ? "just now" : `${secondsSinceUpdate}s ago`}
                               </span>
-                              {feesDisplayLabel ? (
-                                <>
-                                  {" "}
-                                  • <span>{feesDisplayLabel}</span>
-                                </>
-                              ) : null}
                             </div>
                           </div>
                           <button className="border-ground-button-border bg-ground-button justify-center rounded border-2 p-1 text-yellow-100">
                             <ArrowDown className="z-10 h-4 w-4" />
                           </button>
                         </div>
+
+                        {/* Rate */}
+                        <div className="text-left text-xs font-semibold text-[#BCBCBC]">
+                          {rateLabel}
+                        </div>
+
                         <div className="bg-peach-500 h-[1px] w-full" />
-                        <div className="space-y-1 text-left">
-                          <div className="text-sm text-yellow-200">
-                            <Fuel className="inline-block h-4 w-4" /> ETA:{" "}
-                            {etaSeconds ? `${etaSeconds}s` : "-"} • Expires in:{" "}
-                            {ttlLeft}s
+
+                        {/* Detail rows */}
+                        <div className="space-y-1.5 text-left text-xs sm:text-sm">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[#9a9a9a]">Min received</span>
+                            <span className="text-yellow-100">
+                              {minReceived} {displaySymbolOf(toTokenMeta)}
+                            </span>
                           </div>
-                          <div className="text-xs font-semibold text-[#BCBCBC]">
-                            {rateLabel ||
-                              `From ${displaySymbolOf(fromTokenMeta)} to ${displaySymbolOf(toTokenMeta)}`}
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[#9a9a9a]">Slippage</span>
+                            <span className="text-yellow-100">{(quote.slippageBps / 100).toFixed(2)}%</span>
                           </div>
-                          {routeLabel && (
-                            <div className="text-xs text-[#9a9a9a]">
-                              Route: {routeLabel}
+                          {priceImpactLabel && (
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[#9a9a9a]">Price impact</span>
+                              <span className={priceImpactLabel.tone}>{priceImpactLabel.text}</span>
                             </div>
                           )}
+                          {networkFeeLabel && (
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[#9a9a9a]">
+                                <Fuel className="mr-1 inline-block h-3.5 w-3.5" />
+                                Network fee
+                              </span>
+                              <span className="text-yellow-100">{networkFeeLabel}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[#9a9a9a]">Aggregator fee</span>
+                            <span className="text-green-300">0%</span>
+                          </div>
                         </div>
+
+                        {/* Route breakdown — every split, its path and venue */}
+                        {routeRows.length > 0 && (
+                          <>
+                            <div className="bg-peach-500 h-[1px] w-full" />
+                            <div className="space-y-1 text-left">
+                              <div className="text-xs font-bold tracking-wider text-[#9a9a9a] uppercase">
+                                Route · {quote.poolsQuoted} pools scanned
+                              </div>
+                              {routeRows.map((r, i) => (
+                                <div key={i} className="flex items-baseline justify-between gap-2 text-xs">
+                                  <span className="text-yellow-100 whitespace-nowrap">{r.pct}%</span>
+                                  <span className="min-w-0 flex-1 truncate text-[#BCBCBC]">{r.path}</span>
+                                  <span className="text-[#9a9a9a] whitespace-nowrap">{r.venues}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )}
+
+                        {priceImpactLabel?.severe && (
+                          <div className="rounded bg-red-900/40 px-2 py-1 text-left text-xs text-red-300">
+                            ⚠️ High price impact — this trade moves the pool
+                            price by {priceImpactLabel.text}. Consider a smaller
+                            amount.
+                          </div>
+                        )}
                       </div>
                       <Image
                         src="/quest/header-quest-bg.png"

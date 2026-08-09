@@ -1,9 +1,9 @@
 export {
-  PushChainWalletProvider,
-  usePushWallet,
-  usePushWalletContext,
-  usePushChainClient,
-  PushUI,
+  WalletProvider,
+  useWallet,
+  useWalletContext,
+  useChainClient,
+  WalletUI,
 } from "./provider";
 
 export {
@@ -17,14 +17,14 @@ export {
   getPairReserves,
   approveToken,
   getProvider,
-  PUSHCHAIN_RPC,
-  PUSHCHAIN_CHAIN_ID,
-  PUSHCHAIN_TOKENS,
+  RH_RPC_URL,
+  RH_CHAIN_ID,
+  RH_TOKENS,
   AMM_ROUTER,
   AMM_FACTORY,
 } from "./amm";
 
-export type { PushChainToken, Pool, SwapQuote, AddLiquidityParams, RemoveLiquidityParams, LiquidityPosition, UniversalTxOptions } from "./amm";
+export type { RhToken, Pool, SwapQuote, AddLiquidityParams, RemoveLiquidityParams, LiquidityPosition, TxOptions } from "./amm";
 
 export {
   CONTRACTS,
@@ -35,7 +35,7 @@ export {
   getSwappableTokens,
   findPool,
   POSITION_MANAGER_ABI,
-  WPC_ABI,
+  WETH_ABI,
   TICK_SPACINGS,
   MIN_TICK,
   MAX_TICK,

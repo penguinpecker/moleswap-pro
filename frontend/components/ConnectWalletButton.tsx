@@ -2,12 +2,12 @@
 import React, { useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import { LogOut, Copy, Check, ChevronDown } from "lucide-react";
-import { usePushWallet } from "@/lib/pushchain/provider";
+import { useWallet } from "@/lib/chain/provider";
 import { ChainSelectorButton } from "./ChainSelectorButton";
 
 export function ConnectWalletButton() {
   const { address, isConnected, isConnecting, onRH, switchToRH, connectWith, wallets, disconnect } =
-    usePushWallet();
+    useWallet();
   const [copied, setCopied] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showPicker, setShowPicker] = useState(false);

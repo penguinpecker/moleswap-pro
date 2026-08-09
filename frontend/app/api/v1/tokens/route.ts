@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import { TOKENS, CONTRACTS } from "@/lib/pushchain/contracts";
+import { TOKENS, CONTRACTS } from "@/lib/chain/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
       sourceChain: t.sourceChain,
       logoURI: t.logoURI,
       isNative: t.address === "0x0000000000000000000000000000000000000000",
-      isWrappedNative: t.address.toLowerCase() === CONTRACTS.WPC.toLowerCase(),
+      isWrappedNative: t.address.toLowerCase() === CONTRACTS.WETH.toLowerCase(),
     }));
 
     if (chain) {
@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
         swapRouter: CONTRACTS.SWAP_ROUTER,
         quoterV2: CONTRACTS.QUOTER_V2,
         positionManager: CONTRACTS.POSITION_MANAGER,
-        wpc: CONTRACTS.WPC,
+        weth: CONTRACTS.WETH,
         moleswapFeeRouter: CONTRACTS.MOLESWAP_FEE_ROUTER,
         moleswapLiquidityProxy: CONTRACTS.MOLESWAP_LIQUIDITY_PROXY,
       },

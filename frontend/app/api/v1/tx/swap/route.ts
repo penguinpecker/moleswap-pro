@@ -2,10 +2,10 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, PUSHCHAIN_RPC, PUSHCHAIN_CHAIN_ID,
+  CONTRACTS, RH_RPC_URL, RH_CHAIN_ID,
   SWAP_ROUTER_ABI, ERC20_ABI, FEE_ROUTER_ABI,
   getTokenByAddress, findPool,
-} from "@/lib/pushchain/contracts";
+} from "@/lib/chain/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,49 +44,49 @@ export async function POST(req: NextRequest) {
 
     const isNativeIn = tokenIn === ethers.ZeroAddress;
     const isNativeOut = tokenOut === ethers.ZeroAddress;
-    const actualIn = isNativeIn ? CONTRACTS.WPC : tokenIn;
-    const actualOut = isNativeOut ? CONTRACTS.WPC : tokenOut;
+    const actualIn = isNativeIn ? CONTRACTS.WETH : tokenIn;
+    const actualOut = isNativeOut ? CONTRACTS.WETH : tokenOut;
     const amountInBig = BigInt(amountIn);
     const txDeadline = deadline || Math.floor(Date.now() / 1000) + 1800;
 
     const isWrap =
       isNativeIn &&
-      actualOut.toLowerCase() === CONTRACTS.WPC.toLowerCase();
+      actualOut.toLowerCase() === CONTRACTS.WETH.toLowerCase();
     const isUnwrap =
-      actualIn.toLowerCase() === CONTRACTS.WPC.toLowerCase() &&
+      actualIn.toLowerCase() === CONTRACTS.WETH.toLowerCase() &&
       isNativeOut;
 
     if (isWrap) {
-      const wpcIface = new ethers.Interface(["function deposit() payable"]);
+      const wethIface = new ethers.Interface(["function deposit() payable"]);
       return apiResponse({
         type: "wrap",
-        description: "Wrap native PC → WPC (1:1)",
+        description: "Wrap native ETH → WETH (1:1)",
         transactions: [
           {
-            to: CONTRACTS.WPC,
+            to: CONTRACTS.WETH,
             value: amountIn,
-            data: wpcIface.encodeFunctionData("deposit"),
-            description: "deposit() — wrap PC to WPC",
+            data: wethIface.encodeFunctionData("deposit"),
+            description: "deposit() — wrap PC to WETH",
           },
         ],
-        chainId: PUSHCHAIN_CHAIN_ID,
+        chainId: RH_CHAIN_ID,
       });
     }
 
     if (isUnwrap) {
-      const wpcIface = new ethers.Interface(["function withdraw(uint256 wad)"]);
+      const wethIface = new ethers.Interface(["function withdraw(uint256 wad)"]);
       return apiResponse({
         type: "unwrap",
-        description: "Unwrap WPC → native PC (1:1)",
+        description: "Unwrap WETH → native ETH (1:1)",
         transactions: [
           {
-            to: CONTRACTS.WPC,
+            to: CONTRACTS.WETH,
             value: "0",
-            data: wpcIface.encodeFunctionData("withdraw", [amountInBig]),
-            description: "withdraw() — unwrap WPC to PC",
+            data: wethIface.encodeFunctionData("withdraw", [amountInBig]),
+            description: "withdraw() — unwrap WETH to PC",
           },
         ],
-        chainId: PUSHCHAIN_CHAIN_ID,
+        chainId: RH_CHAIN_ID,
       });
     }
 
@@ -100,12 +100,12 @@ export async function POST(req: NextRequest) {
     const transactions: any[] = [];
 
     if (isNativeIn) {
-      const wpcIface = new ethers.Interface(["function deposit() payable"]);
+      const wethIface = new ethers.Interface(["function deposit() payable"]);
       transactions.push({
-        to: CONTRACTS.WPC,
+        to: CONTRACTS.WETH,
         value: amountIn,
-        data: wpcIface.encodeFunctionData("deposit"),
-        description: "Step 1: Wrap PC → WPC",
+        data: wethIface.encodeFunctionData("deposit"),
+        description: "Step 1: Wrap PC → WETH",
       });
     }
 
@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
     const MAX_UINT =
       "115792089237316195423570985008687907853269984665640564039457584007913129639935";
     transactions.push({
-      to: isNativeIn ? CONTRACTS.WPC : tokenIn,
+      to: isNativeIn ? CONTRACTS.WETH : tokenIn,
       value: "0",
       data: approveIface.encodeFunctionData("approve", [
         CONTRACTS.MOLESWAP_FEE_ROUTER,
@@ -149,8 +149,8 @@ export async function POST(req: NextRequest) {
       pool: pool?.address || null,
       fee: poolFee,
       transactions,
-      chainId: PUSHCHAIN_CHAIN_ID,
-      rpc: PUSHCHAIN_RPC,
+      chainId: RH_CHAIN_ID,
+      rpc: RH_RPC_URL,
       note: "Sign and send transactions sequentially. Wait for each to confirm before sending the next.",
     });
   } catch (err: any) {

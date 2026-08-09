@@ -3,13 +3,12 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowLeft, Fuel } from "lucide-react";
 import { DappStep } from ".";
 import Image from "next/image";
-import { relayClient } from "@/lib/relay/client";
 import { getWalletClient } from "@/lib/wallet/walletClient";
-import type { RelayCurrency, RelayChain } from "@/lib/relay/api";
-import { usePushWallet } from "@/lib/pushchain/provider";
+import type { TokenEntry, ChainEntry } from "@/lib/chain/tokenList";
+import { useWallet } from "@/lib/chain/provider";
 import { diagnostics } from "@/lib/diagnostics";
 
-// Extract tx hash from PushChain SDK response (may be Object)
+// Extract tx hash from a wallet/client response (may be an object)
 const extractHash = (result: any): string => {
   if (!result) return "";
   if (typeof result === "string") return result;
@@ -20,11 +19,7 @@ const extractHash = (result: any): string => {
   return "";
 };
 
-/**
- * Prefer the real-asset display symbol (e.g. "ETH", "SOL", "USDT") surfaced
- * through RelayCurrency.displaySymbol over the internal `pETH`/`USDT.eth`
- * style identifiers. Fallback chain mirrors ExchangePage.displaySymbolOf.
- */
+/** Prefer TokenEntry.displaySymbol; fallback chain mirrors ExchangePage.displaySymbolOf. */
 const displaySymbolOf = (t: any, fallback?: string): string => {
   if (!t) return fallback || "";
   return t.displaySymbol || t.symbol || fallback || "";
@@ -39,10 +34,10 @@ interface SwapPageProps {
     toToken: string;
     amount: string;
     expectedOut: string;
-    fromTokenMeta?: RelayCurrency;
-    toTokenMeta?: RelayCurrency;
-    fromChain?: RelayChain;
-    toChain?: RelayChain;
+    fromTokenMeta?: TokenEntry;
+    toTokenMeta?: TokenEntry;
+    fromChain?: ChainEntry;
+    toChain?: ChainEntry;
     routeLabel?: string;
     feesLabel?: string;
     etaSeconds?: number;
@@ -63,96 +58,31 @@ export const SwapPage = ({
   onSwapStart,
   onSwapComplete,
 }: SwapPageProps) => {
-  const pushWallet = usePushWallet();
+  const walletState = useWallet();
   const [isExecuting, setIsExecuting] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [txHashes, setTxHashes] = useState<string[]>([]);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
-  const [approving, setApproving] = useState(false);
-  const [approvalHash, setApprovalHash] = useState<string | null>(null);
-  const [requireApproval, setRequireApproval] = useState<boolean | null>(null);
-
-  // ═══ BRIDGE-IN DETECTION ═════════════════════════════════════════════════
-  // When the user's wallet origin chain matches the fromToken's origin chain,
-  // executeSwap will auto-prepend a bridge step that locks the real origin
-  // asset (SOL on Phantom, ETH on MetaMask Sepolia, etc.) and mints PRC-20
-  // into the UEA atomically with the swap. This matches RamenFi's behavior.
-  //
-  // This flag is only used to inform the UI — the actual bridge is decided
-  // server-side in executeSwap based on the same predicate.
-  const originChainForHooks =
-    (pushWallet as any)?.originChain ||
-    (pushWallet as any)?.universalAccount?.chain ||
-    null;
-  const [bridgeInInfo, setBridgeInInfo] = useState<{
-    eligible: boolean;
-    uiLabel: string;
-    originSymbol: string;
-  } | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        if (!swapData.fromToken || !originChainForHooks) {
-          if (!cancelled) setBridgeInInfo(null);
-          return;
-        }
-        const { canAutoBridgeFrom, getBridgeInfoForPrc20 } = await import(
-          "@/lib/pushchain/prc20-bridge-map"
-        );
-        if (!canAutoBridgeFrom(swapData.fromToken, originChainForHooks)) {
-          if (!cancelled) setBridgeInInfo(null);
-          return;
-        }
-        const info = getBridgeInfoForPrc20(swapData.fromToken);
-        if (info && !cancelled) {
-          setBridgeInInfo({
-            eligible: true,
-            uiLabel: info.uiLabel,
-            originSymbol: info.originSymbol,
-          });
-        }
-      } catch (err) {
-        console.warn("[MoleSwap] bridge-in eligibility probe failed:", err);
-        if (!cancelled) setBridgeInInfo(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [swapData.fromToken, originChainForHooks]);
 
   // Step list is derived from the quote (which knows the exact route: wrap/no-wrap,
   // approve-or-skip, single-hop vs multi-hop) rather than hardcoded. This ensures
   // we only render steps that actually apply to this swap.
   const initialSwapSteps = useMemo(() => {
-    const quoteSteps: Array<{ label?: string }> = Array.isArray(swapData.quote?.steps)
-      ? swapData.quote.steps
-      : [];
-    // Only keep on-chain tx steps (quote includes an "approval" helper step for
-    // the relay flow that isn't part of the actual swap execution).
-    const known = ["Wrap PC → WPC", "Unwrap WPC → PC", "Approve token", "Swap tokens", "Swap → WPC", "Approve WPC", "Swap WPC →"];
-    const txSteps = quoteSteps.filter(s => typeof s?.label === "string" && known.includes(s.label as string));
-    let base = txSteps.length > 0
-      ? txSteps.map(s => ({ label: s.label as string, status: "pending" as const }))
-      // Fallback for when quote.steps is missing — best-guess 2-step default.
+    // Native ETH in needs no approval; ERC-20 in may need one (executeSwap
+    // checks the live allowance and skips the step when it is already set).
+    const isNativeIn =
+      !swapData.fromToken ||
+      swapData.fromToken === "0x0000000000000000000000000000000000000000" ||
+      swapData.fromToken.toLowerCase() === "eth" ||
+      swapData.fromToken.toLowerCase() === "native";
+    return isNativeIn
+      ? [{ label: "Swap tokens", status: "pending" as const }]
       : [
           { label: "Approve token", status: "pending" as const },
           { label: "Swap tokens", status: "pending" as const },
         ];
-    // If bridge-in is eligible, the entire flow collapses into ONE signature
-    // (origin-chain lock + UEA upgrade + approve + swap all atomic). Show a
-    // single combined row so the user isn't surprised by a 1-click signing
-    // experience for what looks like a 3-step flow.
-    if (bridgeInInfo?.eligible) {
-      base = [
-        { label: `Bridge ${bridgeInInfo.originSymbol} from ${bridgeInInfo.uiLabel} & swap`, status: "pending" as const },
-      ];
-    }
-    return base;
-  }, [swapData.quote, bridgeInInfo]);
+  }, [swapData.fromToken]);
 
   const [swapSteps, setSwapSteps] = useState<Array<{ label: string; status: "pending" | "signing" | "confirmed" | "error" }>>(initialSwapSteps);
 
@@ -171,41 +101,6 @@ export const SwapPage = ({
       return "";
     }
   }, [swapData.amount, swapData.fromTokenMeta?.decimals]);
-
-  // Detect if approval is needed from quote steps
-  const approvalInfo = useMemo(() => {
-    const steps = swapData.quote?.steps;
-    if (!Array.isArray(steps)) return null;
-    // Heuristics to find an approval step
-    const approveStep = steps.find((s: any) => {
-      const name = (s?.name || s?.description || "").toString().toLowerCase();
-      const type = (s?.type || s?.operation || "").toString().toLowerCase();
-      const data =
-        s?.transaction?.data || s?.tx?.data || s?.request?.data || "";
-      return (
-        name.includes("approv") ||
-        type.includes("approv") ||
-        (typeof data === "string" && data.startsWith("0x095ea7b3"))
-      );
-    });
-    if (!approveStep) return null;
-    // Try to extract spender from step; fallback to route/quote details
-    const spender =
-      approveStep?.spender ||
-      approveStep?.to ||
-      swapData.quote?.details?.spender ||
-      swapData.quote?.spender;
-    const token = swapData.fromTokenMeta?.address || swapData.fromToken;
-    return spender && token ? { token, spender } : null;
-  }, [
-    swapData.quote?.steps,
-    swapData.fromTokenMeta?.address,
-    swapData.fromToken,
-    swapData.quote?.details?.spender,
-    swapData.quote?.spender,
-  ]);
-
-  const needsApproval = Boolean(approvalInfo);
 
   // Helper: wait for a tx receipt to be mined
   const waitForReceipt = async (txHash: string, timeoutMs = 90000) => {
@@ -231,16 +126,16 @@ export const SwapPage = ({
     }
 
     // Guard 2: Check wallet connection
-    if (!pushWallet.isConnected) {
+    if (!walletState.isConnected) {
       setExecutionError("Wallet not connected. Please connect your wallet first.");
       diagnostics.logSessionEvent("Swap blocked - wallet not connected");
       return;
     }
 
     // Guard 3: Check SDK client
-    if (!pushWallet.pushChainClient) {
+    if (!walletState.chainClient) {
       setExecutionError("Wallet is still initializing. Please wait a moment and try again.");
-      diagnostics.logSessionEvent("Swap blocked - pushChainClient not ready");
+      diagnostics.logSessionEvent("Swap blocked - chainClient not ready");
       return;
     }
 
@@ -254,99 +149,12 @@ export const SwapPage = ({
 
     // ═══ DIAGNOSTICS: Log swap attempt with wallet state ═══
     diagnostics.logSwapAttempt({
-      isConnected: pushWallet.isConnected,
-      hasAddress: !!pushWallet.address,
-      hasPushChainClient: !!pushWallet.pushChainClient,
-      hasUniversal: !!(pushWallet.pushChainClient as any)?.universal,
-      originChain: (pushWallet as any)?.originChain || null,
+      isConnected: walletState.isConnected,
+      hasAddress: !!walletState.address,
+      hasChainClient: !!walletState.chainClient,
     });
 
     try {
-      // ═══ PRE-FLIGHT: Phantom cluster check ═══════════════════════════
-      // If origin is Solana Devnet AND fromToken is bridgeable from Solana,
-      // the SDK will try to sign a Solana tx against Robinhood Chain's gateway
-      // program at `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` (Devnet).
-      // If Phantom is connected to Mainnet instead, the signing throws
-      // "Me: Unexpected error" — a cryptic Phantom error that obscures
-      // the real issue. Check the user's Devnet balance first: if it's 0
-      // but they claim to have SOL, they're on the wrong cluster.
-      const originChain =
-        (pushWallet as any)?.originChain ||
-        (pushWallet as any)?.universalAccount?.chain ||
-        null;
-      const isSolanaOrigin =
-        typeof originChain === "string" &&
-        originChain.toLowerCase().startsWith("solana:");
-      const origin = (pushWallet as any)?.origin || null;
-
-      // Diagnostic: log the actual shapes we see from pushWallet so Solana
-      // preflight issues are traceable in user-submitted logs.
-      console.log("[MoleSwap] Preflight origin check:", {
-        originChain,
-        isSolanaOrigin,
-        originType: typeof origin,
-        originPreview: typeof origin === "string" ? origin.slice(0, 8) + "..." : String(origin).slice(0, 30),
-      });
-
-      if (isSolanaOrigin && typeof origin === "string" && origin.length > 0) {
-        try {
-          const { canAutoBridgeFrom } = await import("@/lib/pushchain/prc20-bridge-map");
-          if (canAutoBridgeFrom(swapData.fromToken, originChain)) {
-            // Single Devnet-balance check: the Push Solana gateway is on
-            // Devnet only, so we need the user to have Devnet SOL covering
-            // (bridge amount + ~5k lamport fees). Mainnet-balance fingerprinting
-            // was a dead end: public Mainnet RPCs reject browser requests with
-            // 403, and the real cause of the earlier "Unexpected error" was
-            // actually the helper dispatch mode (see amm.ts — Solana helper
-            // now routes via MULTICALL_TARGET_ADDRESS, not the raw `to`).
-            const res = await fetch("https://api.devnet.solana.com", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                jsonrpc: "2.0", id: 1, method: "getBalance", params: [origin],
-              }),
-            });
-            const json = await res.json();
-            const lamports: number | undefined = json?.result?.value;
-            const amountHuman = Number(swapData.amount || "0");
-            const decimalsIn = swapData.fromTokenMeta?.decimals ?? 9;
-            const requiredLamports = Math.ceil(amountHuman * 10 ** decimalsIn) + 5_000;
-            console.log("[MoleSwap] Devnet balance check:", {
-              pubkey: origin.slice(0, 8) + "...",
-              devnetLamports: lamports,
-              requiredLamports,
-            });
-
-            if (typeof lamports === "number" && lamports === 0) {
-              throw new Error(
-                "Your Solana Devnet balance is 0. If Phantom shows a SOL balance, it's on Mainnet — " +
-                  "Robinhood Chain's bridge only works with Devnet. Open Phantom → Settings → Developer " +
-                  "Settings → enable Testnet Mode, then switch the network to Solana Devnet. Get " +
-                  "free Devnet SOL from https://faucet.solana.com/"
-              );
-            }
-            if (
-              typeof lamports === "number" &&
-              Number.isFinite(requiredLamports) &&
-              lamports < requiredLamports
-            ) {
-              const haveSol = (lamports / 1e9).toFixed(6);
-              const needSol = (requiredLamports / 1e9).toFixed(6);
-              throw new Error(
-                `Not enough Devnet SOL to bridge. You have ${haveSol} SOL but need ~${needSol} SOL (including fees). ` +
-                  "Get free Devnet SOL from https://faucet.solana.com/"
-              );
-            }
-          }
-        } catch (preflightErr: any) {
-          const m = preflightErr?.message || "";
-          if (m.includes("Devnet") || m.includes("Mainnet") || m.includes("Phantom")) {
-            throw preflightErr;
-          }
-          console.warn("[MoleSwap] Devnet balance probe failed (non-fatal):", preflightErr);
-        }
-      }
-
       // Get expected chain ID from the quote
       const expectedChainId = swapData.fromChain?.id
         ? Number(swapData.fromChain.id)
@@ -356,27 +164,26 @@ export const SwapPage = ({
         throw new Error("Unable to determine expected chain ID from quote.");
       }
 
-      // Skip external wallet client entirely for PushChain-connected wallets
-      // (including Phantom/Solana). Calling getWalletClient() blindly uses
-      // window.ethereum, which picks MetaMask when both are installed — even
-      // if the user connected via Phantom.
-      const wallet = pushWallet.isConnected ? null : await getWalletClient();
-      if (!wallet && !pushWallet.address) {
+      // Skip the raw window.ethereum client when the wagmi provider owns the
+      // session — reading window.ethereum directly can pick a different
+      // injected wallet than the one the user connected.
+      const wallet = walletState.isConnected ? null : await getWalletClient();
+      if (!wallet && !walletState.address) {
         throw new Error("No wallet available. Please connect your wallet.");
       }
 
-      // Ensure PushChain SDK client is fully initialized before swapping.
+      // Ensure the wallet client is fully initialized before swapping.
       // The client may be null during the brief window between wallet connect
       // and SDK initialization. User sees "Cannot read property 'universal'"
       // if we proceed without this guard.
-      if (pushWallet.isConnected && !pushWallet.pushChainClient) {
+      if (walletState.isConnected && !walletState.chainClient) {
         throw new Error(
           "Wallet is still initializing. Please wait a moment and try again."
         );
       }
 
-      // Get the current account - prefer PushChain universal account
-      const currentAddress = pushWallet.address || (wallet ? (await wallet.getAddresses())?.[0] : null);
+      // Get the current account — prefer the connected provider's address
+      const currentAddress = walletState.address || (wallet ? (await wallet.getAddresses())?.[0] : null);
 
       if (!currentAddress) {
         throw new Error(
@@ -384,63 +191,21 @@ export const SwapPage = ({
         );
       }
 
-      // Check current chain ID and switch if needed
-      // Skip for PushChain universal wallet — it handles cross-chain natively
-      if (wallet && !pushWallet.isConnected) {
+      // Check current chain ID and switch to Robinhood Chain if needed
+      if (wallet && !walletState.isConnected) {
         try {
           const currentChainId = await wallet.getChainId();
           if (currentChainId !== expectedChainId) {
             console.log(`[MoleSwap] Chain mismatch: wallet on ${currentChainId}, need ${expectedChainId}. Auto-switching...`);
 
-            // Chain configurations for auto-add (all supported chains)
+            // Robinhood Chain config for wallet_addEthereumChain.
             const chainConfigs: Record<number, any> = {
-              // Robinhood Chain mainnet
               4663: {
                 chainId: "0x1237",
                 chainName: "Robinhood Chain",
                 nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
                 rpcUrls: ["https://rpc.mainnet.chain.robinhood.com"],
                 blockExplorerUrls: ["https://robinhoodchain.blockscout.com"],
-              },
-              // Ethereum Sepolia
-              11155111: {
-                chainId: "0xaa36a7",
-                chainName: "Sepolia",
-                nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
-                rpcUrls: ["https://rpc.sepolia.org", "https://ethereum-sepolia.publicnode.com"],
-                blockExplorerUrls: ["https://sepolia.etherscan.io"],
-              },
-              // Arbitrum Sepolia
-              421614: {
-                chainId: "0x66eee",
-                chainName: "Arbitrum Sepolia",
-                nativeCurrency: { name: "Arbitrum ETH", symbol: "ETH", decimals: 18 },
-                rpcUrls: ["https://sepolia-rollup.arbitrum.io/rpc", "https://arbitrum-sepolia.publicnode.com"],
-                blockExplorerUrls: ["https://sepolia.arbiscan.io"],
-              },
-              // Base Sepolia
-              84532: {
-                chainId: "0x14a34",
-                chainName: "Base Sepolia",
-                nativeCurrency: { name: "Base ETH", symbol: "ETH", decimals: 18 },
-                rpcUrls: ["https://sepolia.base.org", "https://base-sepolia.publicnode.com"],
-                blockExplorerUrls: ["https://sepolia.basescan.org"],
-              },
-              // BNB Testnet
-              97: {
-                chainId: "0x61",
-                chainName: "BNB Smart Chain Testnet",
-                nativeCurrency: { name: "tBNB", symbol: "tBNB", decimals: 18 },
-                rpcUrls: ["https://data-seed-prebsc-1-s1.binance.org:8545", "https://bsc-testnet.publicnode.com"],
-                blockExplorerUrls: ["https://testnet.bscscan.com"],
-              },
-              // Ethereum Mainnet (for reference)
-              1: {
-                chainId: "0x1",
-                chainName: "Ethereum Mainnet",
-                nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-                rpcUrls: ["https://eth.llamarpc.com", "https://ethereum.publicnode.com"],
-                blockExplorerUrls: ["https://etherscan.io"],
               },
             };
 
@@ -486,13 +251,12 @@ export const SwapPage = ({
             console.log(`[MoleSwap] Successfully switched to chain ${expectedChainId}`);
           }
         } catch (chainError: any) {
-          if (!pushWallet.isConnected) {
+          if (!walletState.isConnected) {
             throw new Error(
               `Chain switch failed: ${chainError?.message || "Unknown error"}. Please switch to ${swapData.fromChain?.displayName || swapData.fromChain?.name || `chain ${expectedChainId}`} manually.`
             );
           }
-          // PushChain wallet connected — skip chain check
-          console.log("PushChain universal wallet — skipping chain check");
+          console.log("[MoleSwap] provider-owned session — skipping chain check");
         }
       }
 
@@ -512,214 +276,25 @@ export const SwapPage = ({
         );
       }
 
-      // Clone quote and recursively replace all burn addresses with user's address
-      const quote = JSON.parse(JSON.stringify(swapData.quote)); // Deep clone
-
-      // Recursively replace all burn addresses in the quote object
-      const replaceBurnAddresses = (obj: any): any => {
-        if (obj === null || obj === undefined) return obj;
-
-        if (typeof obj === "string") {
-          // Replace string if it's a burn address
-          return isBurnAddr(obj) ? currentAddress : obj;
-        }
-
-        if (Array.isArray(obj)) {
-          return obj.map((item) => replaceBurnAddresses(item));
-        }
-
-        if (typeof obj === "object") {
-          const result: any = {};
-          for (const key in obj) {
-            if (Object.prototype.hasOwnProperty.call(obj, key)) {
-              const value = obj[key];
-
-              // Special handling for common address fields
-              if (
-                (key.toLowerCase().includes("sender") ||
-                  key.toLowerCase().includes("from") ||
-                  key.toLowerCase().includes("user") ||
-                  key.toLowerCase().includes("account")) &&
-                typeof value === "string" &&
-                isBurnAddr(value)
-              ) {
-                result[key] = currentAddress;
-              } else if (typeof value === "string" && isBurnAddr(value)) {
-                // Replace any string that matches burn address
-                result[key] = currentAddress;
-              } else {
-                result[key] = replaceBurnAddresses(value);
-              }
-            }
-          }
-          return result;
-        }
-
-        return obj;
-      };
-
-      // Replace all burn addresses recursively
-      const cleanedQuote = replaceBurnAddresses(quote);
-      // Remove approval step from the quote so execute doesn't prompt a second, limited approval
-      const isApprovalStep = (s: any) => {
-        const name = (s?.name || s?.description || "").toString().toLowerCase();
-        const type = (s?.type || s?.operation || "").toString().toLowerCase();
-        const data =
-          s?.transaction?.data || s?.tx?.data || s?.request?.data || "";
-        return (
-          name.includes("approv") ||
-          type.includes("approv") ||
-          (typeof data === "string" && data.startsWith("0x095ea7b3"))
-        );
-      };
-      const filteredQuote = {
-        ...cleanedQuote,
-        steps: Array.isArray(cleanedQuote?.steps)
-          ? cleanedQuote.steps.filter((s: any) => !isApprovalStep(s))
-          : cleanedQuote?.steps,
-      };
-
-      // Debug: verify no burn addresses remain
-      const quoteString = JSON.stringify(cleanedQuote);
-      const hasBurnAddr = burnAddresses.some((ba) =>
-        quoteString.toLowerCase().includes(ba.toLowerCase()),
-      );
-      if (hasBurnAddr) {
-        // eslint-disable-next-line no-console
-        console.warn("Warning: Burn address still found in cleaned quote");
-      }
-
       let finalTxHashes: string[] = [];
       let hasStarted = false;
-      // If approval is indicated by quote, verify on-chain allowance first.
-      // Skip entirely for PushChain wallets — our executeSwap checks allowance
-      // internally via the public RPC (no wallet prompt needed).
-      if (!pushWallet.isConnected && needsApproval && approvalInfo) {
-        try {
-          const walletForCheck = await getWalletClient();
-          if (!walletForCheck) throw new Error("No wallet available.");
-          // ERC20 allowance(owner, spender)
-          const erc20AllowanceAbi = [
-            {
-              type: "function",
-              name: "allowance",
-              stateMutability: "view",
-              inputs: [
-                { name: "owner", type: "address" },
-                { name: "spender", type: "address" },
-              ],
-              outputs: [{ name: "remaining", type: "uint256" }],
-            },
-          ] as const;
-          const currentAllowance = await (walletForCheck as any).readContract({
-            address: approvalInfo.token as `0x${string}`,
-            abi: erc20AllowanceAbi as any,
-            functionName: "allowance",
-            args: [currentAddress, approvalInfo.spender],
-          });
-          const allowanceBn = BigInt(
-            currentAllowance?.toString?.() ?? currentAllowance ?? 0,
-          );
-          const needed =
-            amountWei && amountWei !== "" ? BigInt(amountWei) : BigInt(0);
-          if (allowanceBn >= needed) {
-            setRequireApproval(false);
-          } else {
-            setRequireApproval(true);
-          }
-        } catch {
-          // if allowance check fails, fall back to requiring approval
-          setRequireApproval(true);
-        }
-      }
 
-      // If approval required, perform it first
-      // Skip for PushChain wallet — our executeSwap handles approval internally
-      if (
-        !pushWallet.isConnected &&
-        needsApproval &&
-        approvalInfo &&
-        (requireApproval === null || requireApproval === true)
-      ) {
-        try {
-          setApproving(true);
-          const walletForApprove = await getWalletClient();
-          if (!walletForApprove)
-            throw new Error("No wallet available for approval.");
-          // minimal ERC20 ABI for approve
-          const erc20ApproveAbi = [
-            {
-              type: "function",
-              name: "approve",
-              stateMutability: "nonpayable",
-              inputs: [
-                { name: "spender", type: "address" },
-                { name: "amount", type: "uint256" },
-              ],
-              outputs: [{ name: "", type: "bool" }],
-            },
-          ] as const;
-          // Use decimal BigInt via constructor to avoid literal/exponentiation target issues
-          const MAX_UINT256 = BigInt(
-            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
-          );
-          const hash = await (walletForApprove as any).writeContract({
-            address: approvalInfo.token as `0x${string}`,
-            abi: erc20ApproveAbi as any,
-            functionName: "approve",
-            // Always approve unlimited to avoid repeated approvals on future swaps
-            args: [approvalInfo.spender, MAX_UINT256],
-          });
-          setApprovalHash(typeof hash === "string" ? hash : hash?.hash || null);
-          if (typeof hash === "string") {
-            await waitForReceipt(hash);
-          } else if (hash?.hash) {
-            await waitForReceipt(hash.hash);
-          }
-        } finally {
-          setApproving(false);
-        }
-      }
-
-      // Execute swap via PushChain AMM (3-step: wrap → approve → swap)
+      // Execute through MoleRouter (fresh quote at execution time inside executeSwap).
       onSwapStart?.();
       hasStarted = true;
       setCurrentStep("Preparing swap...");
 
-      const { executeSwap: pushSwap, setWalletOriginChain } = await import("@/lib/pushchain/amm");
-
-      // Tell amm.ts which origin chain the wallet is on, so sendTx can skip
-      // direct EVM signing for Solana-origin wallets (Phantom) and go straight
-      // to universal TX. Phantom injects window.ethereum but can't sign for 0xa475.
-      setWalletOriginChain(
-        (pushWallet as any)?.originChain ||
-        (pushWallet as any)?.universalAccount?.chain ||
-        null,
-      );
+      const { executeSwap: runSwap } = await import("@/lib/chain/amm");
 
       setCurrentStep("Preparing swap...");
-      // Reset steps to the quote-derived list (wrap is only present if native input,
-      // approve only if allowance insufficient, multi-hop has 4 steps, etc.)
+      // Reset steps to the derived list (approve only appears for ERC-20 input).
       setSwapSteps(initialSwapSteps);
 
-      // Custom recipient support: ExchangePage lets the user enter a
-      // destination address distinct from their UEA. That value is piped
-      // through `swapData.recipientAddress` (see ExchangePage.tsx:978). If
-      // present AND it looks like a valid EVM hex, route the swap proceeds
-      // there; otherwise default to the UEA so nothing silently sends to an
-      // unintended address on malformed input.
       // Custom recipient support: ExchangePage pipes the user's typed
-      // destination through swapData.recipientAddress. We split it into two
-      // params for executeSwap:
-      //   - `recipient`       = caller / UEA (used for approvals, balance
-      //                         lookups, msg.sender anchor).
-      //   - `outputRecipient` = optional custom destination; when set and
-      //                         different from `recipient`, executeSwap
-      //                         skips FeeRouter and routes via UniV3
-      //                         SwapRouter directly (which accepts a
-      //                         recipient param). Custom-recipient swaps
-      //                         therefore skip the 0.25% house fee — the
-      //                         niche-case trade-off documented in amm.ts.
+      // destination through swapData.recipientAddress. `recipient` stays the
+      // caller (approvals, balance anchor); `outputRecipient` is where the
+      // swap output lands when set. MoleRouter enforces the same minimum-out
+      // either way and takes no fee.
       const isHexAddr = (s: unknown): s is string =>
         typeof s === "string" && /^0x[0-9a-fA-F]{40}$/.test(s);
       const customRecipient =
@@ -731,22 +306,13 @@ export const SwapPage = ({
         console.log("[MoleSwap] Custom recipient in use:", customRecipient);
       }
 
-      const swapResult = await pushSwap({
-        pushChainClient: pushWallet.pushChainClient,
+      const swapResult = await runSwap({
+        chainClient: walletState.chainClient,
         tokenIn: swapData.fromToken,
         tokenOut: swapData.toToken,
-        amountIn: swapData.quote?.amountIn || amountWei,
-        amountOutMin: swapData.quote?.amountOut || "0",
-        recipient: currentAddress,            // caller — always the UEA
-        outputRecipient: customRecipient,     // optional; null → proceeds land at UEA
-        fee: swapData.quote?.fee,
-        // Pass origin chain — executeSwap uses this to pick between multicall
-        // (1 sig for Phantom/MM-Sepolia cross-chain) vs sequential (N sigs
-        // for Push-native EOAs). See RamenFi's sE orchestrator.
-        originChain:
-          (pushWallet as any)?.originChain ||
-          (pushWallet as any)?.universalAccount?.chain ||
-          null,
+        amountIn: swapData.quote?.amountIn?.toString?.() || amountWei,
+        recipient: currentAddress,            // caller
+        outputRecipient: customRecipient,     // optional; null → proceeds land at caller
         onStep: (_stepIdx, label, status) => {
           // Match emitted label to the step row in the quote-derived list.
           // Label casing from amm.ts is now normalized to match quote.steps.
@@ -761,16 +327,9 @@ export const SwapPage = ({
               return next;
             }
 
-            // Multicall mode: executeSteps emits bundled labels like "Swap",
-            // "Bridge & swap", "2-hop swap", "Bridge & 4-hop swap" etc.
-            // These don't match quote.steps 1:1 because the multicall bundles
-            // approve+swap+approve+swap into one signature. Collapse the UI
-            // to show all steps transitioning together.
-            const isBundledLabel =
-              /^bridge\s*&/i.test(normalized) ||
-              /^\d+-hop swap$/i.test(normalized) ||
-              normalized.toLowerCase() === "swap" ||
-              normalized.toLowerCase() === "bridge funds";
+            // Bundled labels ("Swap") cover several UI rows at once —
+            // transition the remaining pending rows together.
+            const isBundledLabel = normalized.toLowerCase() === "swap";
 
             if (isBundledLabel) {
               // Transition all remaining pending rows to the same status
@@ -875,14 +434,7 @@ export const SwapPage = ({
       });
     } catch (error: any) {
       // ═══ DIAGNOSTICS: Analyze and log error ═══
-      // Pass originChain so analyzeError can detect Phantom "Signature request
-      // failed" (classic Solana mainnet/devnet cluster mismatch) and surface
-      // the concrete Phantom Testnet-Mode fix instead of a generic message.
-      const originChainForErr =
-        (pushWallet as any)?.originChain ||
-        (pushWallet as any)?.universalAccount?.chain ||
-        null;
-      const analysis = diagnostics.analyzeError(error, { originChain: originChainForErr });
+      const analysis = diagnostics.analyzeError(error, {});
       console.error("Swap execution error:", error);
       console.log("[MoleSwap:Diagnostics] Error analysis:", analysis);
 
@@ -893,11 +445,10 @@ export const SwapPage = ({
         durationMs: Date.now() - swapStartTime,
       });
 
-      // Prefer the actionable suggestion (e.g. Phantom testnet-mode instructions)
-      // over the raw SDK error, which for Solana failures is almost always the
+      // Prefer the actionable suggestion over the raw wallet error, which is
       // unhelpful string "Signature request failed".
       const userFacing =
-        analysis.category === "PHANTOM_REJECTED" || analysis.category === "WRONG_NETWORK"
+        analysis.category === "WRONG_NETWORK"
           ? analysis.suggestion
           : error?.message || "Failed to execute swap";
       setExecutionError(userFacing);
@@ -1029,12 +580,8 @@ export const SwapPage = ({
                   <div className="font-family-ThaleahFat text-3xl text-zinc-100">
                     {swapData.expectedOut || "0"}
                   </div>
-                  {/* Destination label: the asset lands as a PRC-20 on Push
-                      Chain (at the UEA or the custom recipient), NOT on the
-                      origin chain. Previously read `on <toChain>` which lied
-                      for bridged tokens like pETH (user got pETH on Push,
-                      not native ETH on Ethereum). When outbound Route 2 is
-                      wired, switch this back to toChain. */}
+                  {/* The asset lands on Robinhood Chain, at the caller or the
+                      custom recipient. */}
                   <div className="text-sm font-semibold text-stone-300">
                     {swapData.feesLabel || ""} •{" "}
                     {(swapData.toTokenMeta as any)?.symbol || displaySymbolOf(swapData.toTokenMeta, swapData.toToken)} on Robinhood Chain
@@ -1135,8 +682,7 @@ export const SwapPage = ({
             </div>
           )}
 
-          {/* Error Message — actionable messages (Phantom setup, balance) can be
-              ~400 chars; don't truncate them. Short raw SDK strings are displayed as-is. */}
+          {/* Error Message — actionable messages can be long; don't truncate. */}
           {executionError && (
             <div className="relative z-50 max-w-full overflow-hidden rounded-lg bg-red-900/40 p-4 text-center text-sm text-red-200">
               <p className="font-family-ThaleahFat mb-1 text-base text-red-300">SWAP FAILED</p>
@@ -1147,9 +693,9 @@ export const SwapPage = ({
           )}
           {/* Start Swapping Button */}
           {/* Case 1: Wallet not connected — show connect prompt */}
-          {!pushWallet.isConnected && !pushWallet.isConnecting ? (
+          {!walletState.isConnected && !walletState.isConnecting ? (
             <button
-              onClick={() => pushWallet.connect?.()}
+              onClick={() => walletState.connect?.()}
               className="relative w-full cursor-pointer rounded py-4 text-xl font-bold text-white transition-all hover:scale-105"
             >
               <span>CONNECT WALLET</span>
@@ -1161,7 +707,7 @@ export const SwapPage = ({
                 className="absolute inset-0 z-[-1] h-full w-full object-fill"
               />
             </button>
-          ) : pushWallet.isConnecting ? (
+          ) : walletState.isConnecting ? (
             /* Case 2: Wallet is connecting */
             <button
               disabled
@@ -1176,7 +722,7 @@ export const SwapPage = ({
                 className="absolute inset-0 z-[-1] h-full w-full object-fill"
               />
             </button>
-          ) : !pushWallet.pushChainClient ? (
+          ) : !walletState.chainClient ? (
             /* Case 3: Connected but SDK not ready */
             <button
               disabled
@@ -1199,11 +745,7 @@ export const SwapPage = ({
               className="relative w-full cursor-pointer rounded py-4 text-xl font-bold text-white transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <span>
-                {isExecuting
-                  ? currentStep || "SWAPPING..."
-                  : needsApproval
-                    ? "APPROVE"
-                    : "START SWAPPING"}
+                {isExecuting ? currentStep || "SWAPPING..." : "START SWAPPING"}
               </span>
               <Image
                 src="/dapp/connect-wallet.png"

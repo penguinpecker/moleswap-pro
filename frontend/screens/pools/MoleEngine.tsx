@@ -11,7 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createPublicClient, http, type Address } from "viem";
-import { robinhoodChain } from "@/lib/pushchain/wagmi-config";
+import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { fetchV4MolePool } from "@/lib/aggregator/venues/v4Reader";
 import { getQueueSchedule } from "@/lib/mole/queueClient";
 import { secondsUntilCutoff, type QueueSchedule } from "@/lib/mole/queue";

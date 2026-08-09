@@ -2,11 +2,11 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, PUSHCHAIN_RPC, PUSHCHAIN_CHAIN_ID,
+  CONTRACTS, RH_RPC_URL, RH_CHAIN_ID,
   POSITION_MANAGER_ABI, LIQUIDITY_PROXY_ABI, ERC20_ABI,
   TICK_SPACINGS, MIN_TICK, MAX_TICK,
   getTokenByAddress,
-} from "@/lib/pushchain/contracts";
+} from "@/lib/chain/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -82,9 +82,9 @@ export async function POST(req: NextRequest) {
     }
 
     const actualA =
-      tokenA === ethers.ZeroAddress ? CONTRACTS.WPC : tokenA;
+      tokenA === ethers.ZeroAddress ? CONTRACTS.WETH : tokenA;
     const actualB =
-      tokenB === ethers.ZeroAddress ? CONTRACTS.WPC : tokenB;
+      tokenB === ethers.ZeroAddress ? CONTRACTS.WETH : tokenB;
 
     const [token0, token1] =
       actualA.toLowerCase() < actualB.toLowerCase()
@@ -99,7 +99,7 @@ export async function POST(req: NextRequest) {
     const txDeadline = deadline || Math.floor(Date.now() / 1000) + 3600;
     const transactions: any[] = [];
 
-    const provider = new ethers.JsonRpcProvider(PUSHCHAIN_RPC);
+    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
     const factory = new ethers.Contract(CONTRACTS.FACTORY, FACTORY_ABI, provider);
     let existingPool: string;
     try {
@@ -147,10 +147,10 @@ export async function POST(req: NextRequest) {
       if (needsWrap && BigInt(wrapAmount) > 0n) {
         const wpcIface = new ethers.Interface(["function deposit() payable"]);
         transactions.push({
-          to: CONTRACTS.WPC,
+          to: CONTRACTS.WETH,
           value: wrapAmount,
           data: wpcIface.encodeFunctionData("deposit"),
-          description: "Wrap native PC → WPC",
+          description: "Wrap native PC → WETH",
         });
       }
 
@@ -241,8 +241,8 @@ export async function POST(req: NextRequest) {
       fee,
       feeTier: `${fee / 10000}%`,
       transactions,
-      chainId: PUSHCHAIN_CHAIN_ID,
-      rpc: PUSHCHAIN_RPC,
+      chainId: RH_CHAIN_ID,
+      rpc: RH_RPC_URL,
       note: "Sign and send transactions sequentially. Wait for each to confirm before sending the next. For new pools, the pool address from createPool must be used in the initialize step.",
     });
   } catch (err: any) {

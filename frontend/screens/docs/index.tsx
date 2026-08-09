@@ -355,28 +355,28 @@ export default function ApiDocsPage() {
             <p>Get a swap quote from the MoleSwap API in under 30 seconds. No API key needed.</p>
 
             <h3>1. Get a Swap Quote</h3>
-            <p>Fetch a real-time quote for swapping 1 PC (Robinhood Chain native token) to pETH:</p>
+            <p>Fetch a real-time quote for swapping 1 ETH (Robinhood Chain native token) to USDG:</p>
             <CodeTabs tabs={[
-              { label: "cURL", lang: "bash", code: `curl "${BASE}/api/v1/quote?tokenIn=0x0000000000000000000000000000000000000000&tokenOut=0x2971824Db68229D087931155C2b8bB820B275809&amountIn=1000000000000000000"` },
+              { label: "cURL", lang: "bash", code: `curl "${BASE}/api/v1/quote?tokenIn=0x0000000000000000000000000000000000000000&tokenOut=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168&amountIn=1000000000000000000"` },
               { label: "JavaScript", lang: "js", code: `const res = await fetch(
   "${BASE}/api/v1/quote?" + new URLSearchParams({
     tokenIn: "0x0000000000000000000000000000000000000000",
-    tokenOut: "0x2971824Db68229D087931155C2b8bB820B275809",
-    amountIn: "1000000000000000000"  // 1 PC in wei
+    tokenOut: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    amountIn: "1000000000000000000"  // 1 ETH in wei
   })
 );
 const { data } = await res.json();
-console.log(\`1 PC = \${data.amountOutFormatted} pETH\`);
+console.log(\`1 ETH = \${data.amountOutFormatted} USDG\`);
 console.log(\`Route: \${data.route}\`);` },
               { label: "Python", lang: "python", code: `import requests
 
 resp = requests.get(f"${BASE}/api/v1/quote", params={
     "tokenIn": "0x0000000000000000000000000000000000000000",
-    "tokenOut": "0x2971824Db68229D087931155C2b8bB820B275809",
-    "amountIn": "1000000000000000000"  # 1 PC in wei
+    "tokenOut": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "amountIn": "1000000000000000000"  # 1 ETH in wei
 })
 data = resp.json()["data"]
-print(f"1 PC = {data['amountOutFormatted']} pETH")
+print(f"1 ETH = {data['amountOutFormatted']} USDG")
 print(f"Route: {data['route']}")` },
             ]} />
 
@@ -387,7 +387,7 @@ print(f"Route: {data['route']}")` },
   -H "Content-Type: application/json" \\
   -d '{
     "tokenIn": "0x0000000000000000000000000000000000000000",
-    "tokenOut": "0x2971824Db68229D087931155C2b8bB820B275809",
+    "tokenOut": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
     "amountIn": "1000000000000000000",
     "recipient": "0xYOUR_WALLET_ADDRESS",
     "slippageBps": 50
@@ -397,7 +397,7 @@ print(f"Route: {data['route']}")` },
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
     tokenIn: "0x0000000000000000000000000000000000000000",
-    tokenOut: "0x2971824Db68229D087931155C2b8bB820B275809",
+    tokenOut: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
     amountIn: "1000000000000000000",
     recipient: "0xYOUR_WALLET_ADDRESS",
     slippageBps: 50
@@ -420,7 +420,7 @@ from web3 import Web3
 
 resp = requests.post(f"${BASE}/api/v1/tx/swap", json={
     "tokenIn": "0x0000000000000000000000000000000000000000",
-    "tokenOut": "0x2971824Db68229D087931155C2b8bB820B275809",
+    "tokenOut": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
     "amountIn": "1000000000000000000",
     "recipient": "0xYOUR_WALLET_ADDRESS",
     "slippageBps": 50
@@ -473,10 +473,10 @@ X-RateLimit-Reset: 1711234627` }]} />
 
             <h3>Token Addresses</h3>
             <p>All tokens on Robinhood Chain are ERC-20 (ERC-20 equivalent). Use the zero address <code>0x000...000</code> for
-              native PC. The API automatically handles wrapping PC → WETH when needed.</p>
+              native ETH. The API automatically handles wrapping ETH → WETH when needed.</p>
 
             <h3>WETH (Wrapped Robinhood Chain)</h3>
-            <p>WETH is the wrapped version of the native PC token, similar to WETH on Ethereum. All AMM pools are paired
+            <p>WETH is the wrapped version of native ETH on Robinhood Chain. All AMM pools are paired
               against WETH. When you swap from native PC, the API automatically includes a wrap step.</p>
 
             <h3>Fee Tiers</h3>
@@ -499,7 +499,7 @@ X-RateLimit-Reset: 1711234627` }]} />
             <h3>Multi-Hop Routing</h3>
             <InfoCard icon="🔄" title="Automatic route discovery">
               When no direct pool exists for a token pair, the API automatically routes through WETH as an intermediary.
-              For example, <code>pETH → USDC.eth</code> routes as <code>pETH → WETH → USDC.eth</code>. This is our custom
+              For example, a token→token swap routes as <code>TOKEN → WETH → TOKEN</code>. This is our custom
               routing logic — not provided by Robinhood Chain out of the box. Any new token paired with WETH is instantly
               swappable against all other tokens in the ecosystem.
             </InfoCard>
@@ -532,7 +532,7 @@ X-RateLimit-Reset: 1711234627` }]} />
 
             <h3>Query Parameters</h3>
             <ParamTable params={[
-              { name: "chain", type: "string", required: false, desc: "Filter by source chain: Ethereum, Solana, Base, Arbitrum, BNB Chain, Robinhood Chain" },
+              { name: "active", type: "boolean", required: false, desc: "Only return tokens that have at least one live pool" },
               { name: "search", type: "string", required: false, desc: "Search by symbol, name, or contract address" },
             ]} />
 
@@ -541,12 +541,12 @@ X-RateLimit-Reset: 1711234627` }]} />
               { label: "cURL", lang: "bash", code: `# All tokens
 curl "${BASE}/api/v1/tokens"
 
-# Filter by source chain
-curl "${BASE}/api/v1/tokens?chain=Solana"
+# Only tokens with a live pool
+curl "${BASE}/api/v1/tokens?active=true"
 
 # Search by symbol
 curl "${BASE}/api/v1/tokens?search=USDC"` },
-              { label: "JavaScript", lang: "js", code: `const res = await fetch("${BASE}/api/v1/tokens?chain=Solana");
+              { label: "JavaScript", lang: "js", code: `const res = await fetch("${BASE}/api/v1/tokens?active=true");
 const { data } = await res.json();
 console.log(data.tokens);       // Token list
 console.log(data.contracts);    // Core contract addresses` },
@@ -592,7 +592,7 @@ data.pools.forEach(p => console.log(\`\${p.name}: price \${p.price.toFixed(4)}\`
 
             <h3>Examples</h3>
             <CodeTabs tabs={[
-              { label: "cURL", lang: "bash", code: `# pETH/WETH pool
+              { label: "cURL", lang: "bash", code: `# WETH/USDG pool
 curl "${BASE}/api/v1/pool/0x012d5C099f8AE00009f40824317a18c3A342f622"` },
               { label: "JavaScript", lang: "js", code: `const { data } = await fetch(
   "${BASE}/api/v1/pool/0x012d5C099f8AE00009f40824317a18c3A342f622"
@@ -628,14 +628,14 @@ console.log(\`Explorer: \${data.explorer}\`);` },
 
             <h3>Examples</h3>
             <CodeTabs tabs={[
-              { label: "cURL", lang: "bash", code: `# Direct swap: 1 PC → pETH
-curl "${BASE}/api/v1/quote?tokenIn=0x0000000000000000000000000000000000000000&tokenOut=0x2971824Db68229D087931155C2b8bB820B275809&amountIn=1000000000000000000"
+              { label: "cURL", lang: "bash", code: `# Direct swap: 1 ETH → USDG
+curl "${BASE}/api/v1/quote?tokenIn=0x0000000000000000000000000000000000000000&tokenOut=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168&amountIn=1000000000000000000"
 
-# Multi-hop: 0.1 pETH → USDC.eth (routes through WETH automatically)
-curl "${BASE}/api/v1/quote?tokenIn=0x2971824Db68229D087931155C2b8bB820B275809&tokenOut=0x7A58048036206bB898008b5bBDA85697DB1e5d66&amountIn=100000000000000000"` },
+# Any token with liquidity is routable (via WETH automatically)
+curl "${BASE}/api/v1/quote?tokenIn=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168&tokenOut=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168&amountIn=100000000000000000"` },
               { label: "JavaScript", lang: "js", code: `const quote = await fetch("${BASE}/api/v1/quote?" + new URLSearchParams({
   tokenIn: "0x0000000000000000000000000000000000000000",
-  tokenOut: "0x2971824Db68229D087931155C2b8bB820B275809",
+  tokenOut: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
   amountIn: "1000000000000000000"
 })).then(r => r.json());
 
@@ -650,7 +650,7 @@ if (quote.data.type === "multi_hop") {
             <h3>Try it</h3>
             <Playground method="GET" path="/api/v1/quote" defaultParams={{
               tokenIn: "0x0000000000000000000000000000000000000000",
-              tokenOut: "0x2971824Db68229D087931155C2b8bB820B275809",
+              tokenOut: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
               amountIn: "1000000000000000000",
             }} />
           </section>
@@ -682,7 +682,7 @@ if (quote.data.type === "multi_hop") {
             <h3>Try it</h3>
             <Playground method="POST" path="/api/v1/tx/swap" defaultBody={{
               tokenIn: "0x0000000000000000000000000000000000000000",
-              tokenOut: "0x2971824Db68229D087931155C2b8bB820B275809",
+              tokenOut: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
               amountIn: "1000000000000000000",
               recipient: "0x0000000000000000000000000000000000000001",
               slippageBps: 50,
@@ -750,7 +750,7 @@ if (quote.data.type === "multi_hop") {
 
             <h3>Try it</h3>
             <Playground method="POST" path="/api/v1/tx/add-liquidity" defaultBody={{
-              token0: "0x2971824Db68229D087931155C2b8bB820B275809",
+              token0: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
               token1: "0xE17DD2E0509f99E9ee9469Cf6634048Ec5a3ADe9",
               amount0Desired: "500000000000000000",
               amount1Desired: "1000000000000000000",
@@ -863,7 +863,7 @@ const pool = await mole.getPool("0x012d5C...");
 
 const quote = await mole.getQuote({
   tokenIn: "0x0000000000000000000000000000000000000000",
-  tokenOut: "0x2971824Db68229D087931155C2b8bB820B275809",
+  tokenOut: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
   amountIn: "1000000000000000000",
 });
 // quote.type = "direct" | "multi_hop" | "wrap_unwrap"
@@ -895,8 +895,9 @@ mole.getExplorerUrl("0xTX_HASH");
             ]} />
 
             <InfoCard icon="📝" title="SDK availability">
-              The SDK source is in the repo at <code>sdk/index.ts</code>. It will be published to npm as
-              <code>@moleswap/sdk</code>. In the meantime, you can copy the file directly into your project.
+              The TypeScript SDK will be published to npm as <code>@moleswap/sdk</code>. Until then,
+              the REST endpoints above are the stable integration surface — they need no API key and
+              return the same routes the app uses.
             </InfoCard>
           </section>
 

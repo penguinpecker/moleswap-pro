@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseUnits, formatUnits } from "viem";
 import { BackgroundImage, NavBar } from "../shared";
 import { ConnectWalletButton } from "@/components/ConnectWalletButton";
-import { usePushWallet } from "@/lib/pushchain/provider";
+import { useWallet } from "@/lib/chain/provider";
 import { WETH, USDG } from "@/lib/mole/chain";
 import { QueuePhase, secondsUntilCutoff, type QueueSchedule, type EpochState } from "@/lib/mole/queue";
 import {
@@ -41,7 +41,7 @@ function outputToken(zeroForOne: boolean) {
 }
 
 export default function QueuePage() {
-  const { address, isConnected, onRH } = usePushWallet();
+  const { address, isConnected, onRH } = useWallet();
   const [schedule, setSchedule] = useState<(QueueSchedule & { maxResidualSlippageBps: number }) | null>(null);
   const [epoch, setEpochState] = useState<EpochState | null>(null);
   const [orders, setOrders] = useState<UserOrderView[]>([]);

@@ -8,8 +8,8 @@ import { LucideIcon } from "lucide-react";
 import { NavBar } from "../shared";
 import { getQuests } from "@/lib/supabase/api";
 import { getQuestsWithProgress, progressQuestsForAction, type QuestWithProgress } from "@/lib/supabase/quests";
-import { usePushWalletContext, usePushChainClient, PushUI } from "@/lib/pushchain/provider";
-import { usePushWallet } from "@/lib/pushchain/provider";
+import { useWalletContext, useChainClient, WalletUI } from "@/lib/chain/provider";
+import { useWallet } from "@/lib/chain/provider";
 import { getOrCreateUser } from "@/lib/supabase/api";
 import MoleWhack from "@/screens/MoleWhack";
 
@@ -150,13 +150,13 @@ export const QuestCardComponent = () => {
   const gameQuestTriggered = React.useRef(false);
   const questsPerPage = 8;
 
-  const walletCtx = usePushWalletContext();
-  const { pushChainClient } = usePushChainClient();
-  const isConnected = walletCtx?.connectionStatus === PushUI.CONSTANTS.CONNECTION.STATUS.CONNECTED;
-  // Use the `usePushWallet` hook which resolves the UEA hex address and
-  // filters out Solana base58 pubkeys that would otherwise corrupt DB writes
+  const walletCtx = useWalletContext();
+  const { chainClient } = useChainClient();
+  const isConnected = walletCtx?.connectionStatus === WalletUI.CONSTANTS.CONNECTION.STATUS.CONNECTED;
+  // Use the `useWallet` hook which resolves the UEA hex address and
+  // resolves the connected EVM address
   // (quest progress keyed by wallet_address).
-  const { address: walletAddress } = usePushWallet();
+  const { address: walletAddress } = useWallet();
 
   const loadQuests = async () => {
     let uid: string | null = null;

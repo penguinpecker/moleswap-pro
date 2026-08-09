@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import Script from "next/script";
 import "./globals.css";
 import { ConditionalFooter } from "@/components/ConditionalFooter";
-import { PushChainWalletProvider } from "@/lib/pushchain/provider";
+import { WalletProvider } from "@/lib/chain/provider";
 
 // Analytics is opt-in via env so this deploy never reports to a foreign GA property.
 const GA_ID = process.env.NEXT_PUBLIC_GA_ID;
@@ -71,12 +71,12 @@ export default function RootLayout({
         )}
       </head>
       <body className="custom-scrollbar">
-        <PushChainWalletProvider network="testnet">
+        <WalletProvider>
           <div className="flex min-h-screen flex-col">
             <main className="flex-1">{children}</main>
             <ConditionalFooter />
           </div>
-        </PushChainWalletProvider>
+        </WalletProvider>
       </body>
     </html>
   );

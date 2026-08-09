@@ -39,8 +39,8 @@ export default function AboutPage() {
                 <p className="font-family-ThaleahFat text-peach-300/70 text-sm leading-relaxed sm:text-base">MoleSwap is a next-generation ecosystem designed for traders who demand efficiency, community, and a fresh take on decentralized finance. Every swap is a strategic move, every connection strengthens the network, and every interaction brings a new layer of value to the community.</p>
               </div>
               <div>
-                <h3 className="text-peach-300 text-shadow-header font-family-ThaleahFat mb-2 text-lg tracking-wider uppercase sm:text-2xl">Universal AMM & Cross-Chain Aggregator</h3>
-                <p className="font-family-ThaleahFat text-peach-300/70 text-sm leading-relaxed sm:text-base">At the heart of MoleSwap lies the Universal AMM and a powerful cross-chain DEX aggregator, engineered to route trades through the most efficient liquidity tunnels across DeFi. No matter where liquidity resides, MoleSwap finds it. One swap, best price, zero friction.</p>
+                <h3 className="text-peach-300 text-shadow-header font-family-ThaleahFat mb-2 text-lg tracking-wider uppercase sm:text-2xl">DEX Aggregator & AMM</h3>
+                <p className="font-family-ThaleahFat text-peach-300/70 text-sm leading-relaxed sm:text-base">MoleSwap is a DEX aggregator and automated liquidity manager on Robinhood Chain. It routes every trade across all live venues and settles through an immutable executor that guarantees your minimum output on-chain. One swap, best price, on-chain guarantee.</p>
               </div>
               <div>
                 <h3 className="text-peach-300 text-shadow-header font-family-ThaleahFat mb-2 text-lg tracking-wider uppercase sm:text-2xl">Community & SocialFi</h3>

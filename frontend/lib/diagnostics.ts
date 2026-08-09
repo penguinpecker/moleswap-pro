@@ -1,9 +1,8 @@
 /**
  * diagnostics — lightweight, dependency-free telemetry shim.
  *
- * The original module wired deep into the Push universal-wallet lifecycle. On Robinhood Chain there's
- * no such lifecycle, so this is a thin console logger that preserves the exact method surface the app
- * calls (logConnected, logSwapAttempt, analyzeError, …). Everything is best-effort and never throws.
+ * A thin console logger that preserves the method surface the app calls
+ * (logConnected, logSwapAttempt, analyzeError, …). Best-effort, never throws.
  */
 
 type Any = any;
@@ -18,7 +17,7 @@ function log(tag: string, ...args: Any[]) {
 export const diagnostics = {
   logConnected: () => log("wallet connected"),
   logDisconnect: () => log("wallet disconnected"),
-  logPushChainClientReady: (_client?: Any) => log("wallet client ready"),
+  logChainClientReady: (_client?: Any) => log("wallet client ready"),
   logAddressResolved: (address?: string | null, origin?: string | null) =>
     log("address resolved", { address, origin }),
   checkWalletInvariants: (_state?: Any) => {},

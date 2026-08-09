@@ -4,14 +4,14 @@ import Image from "next/image";
 import { parseUnits, formatUnits } from "viem";
 import { BackgroundImage, NavBar } from "../shared";
 import { ConnectWalletButton } from "@/components/ConnectWalletButton";
-import { usePushWallet } from "@/lib/pushchain/provider";
+import { useWallet } from "@/lib/chain/provider";
 import { WETH, USDG } from "@/lib/mole/chain";
 import { getAlmPositions, almDeposit, almWithdraw, type AlmPosition } from "@/lib/mole/vault";
 
 const TOKENS = [WETH, USDG];
 
 export default function VaultPage() {
-  const { address, isConnected, onRH } = usePushWallet();
+  const { address, isConnected, onRH } = useWallet();
   const [tokenIdx, setTokenIdx] = useState(0); // 0 = WETH, 1 = USDG
   const [amount, setAmount] = useState("");
   const [positions, setPositions] = useState<AlmPosition[]>([]);

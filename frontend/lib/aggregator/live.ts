@@ -1,0 +1,424 @@
+/**
+ * live.ts — the 1-second live quote session behind the exchange page.
+ *
+ * Split of responsibilities, and why it exists at all: quoting is pure math over cached pool state
+ * (`getQuote` never touches the network), so the ONLY thing that has to be paced is the state refresh.
+ * A session holds the pool set for one pair, refreshes the DYNAMIC state (slot0, in-range liquidity,
+ * tick window) for every pool in ONE Multicall3 round trip per second, and recomputes the quote locally
+ * on every tick or keystroke. This is what makes the quote feel live without re-running discovery or
+ * bursting the RPC — the exact failure that once 429'd the endpoint and broke ETH→USDG entirely.
+ */
+
+import { fetchRelevantPoolStates, type PoolRow } from "./client";
+import { getQuote, NATIVE, type Quote } from "./quote";
+import { encodePlan, type EncodedPlan } from "./router";
+import type { PoolState, TickData } from "./venues/v3Pool";
+import { decodeSlot0, decodeUint, decodePopulatedTicks, INDEXER_SELECTORS, DEFAULT_WORD_RADIUS } from "./indexer";
+import { fetchV4MolePool } from "./venues/v4Reader";
+import { discoverForPair } from "./discover";
+import { PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
+
+const MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11";
+const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+const AGGREGATE3_SELECTOR = "0x82ad56cb";
+
+const lc = (a: string) => a.toLowerCase();
+
+/* ------------------------------------------------------------------ raw aggregate3 encode/decode */
+
+function pad32(hexNo0x: string): string {
+  return hexNo0x.padStart(64, "0");
+}
+function encAddress(addr: string): string {
+  return pad32(addr.toLowerCase().replace(/^0x/, ""));
+}
+function encInt16(v: number): string {
+  return pad32(BigInt.asUintN(256, BigInt(v)).toString(16));
+}
+
+interface RawCall {
+  target: string;
+  callData: string; // 0x-prefixed
+}
+
+/** ABI-encode Multicall3.aggregate3((address,bool,bytes)[]) by hand — no ABI dependency. */
+function encodeAggregate3(calls: RawCall[]): string {
+  const head: string[] = [];
+  const tail: string[] = [];
+  // outer: one dynamic arg at offset 0x20; then array length
+  let dynOffset = calls.length * 32; // offsets area size within the array's data region
+  const bodies: string[] = [];
+  for (const c of calls) {
+    const data = c.callData.replace(/^0x/, "");
+    const dataLen = data.length / 2;
+    const padded = data.padEnd(Math.ceil(dataLen / 32) * 64, "0");
+    // tuple: target, allowFailure(true), offset-to-bytes(0x60), bytes-len, bytes
+    const body =
+      encAddress(c.target) +
+      pad32("1") +
+      pad32((0x60).toString(16)) +
+      pad32(dataLen.toString(16)) +
+      padded;
+    bodies.push(body);
+  }
+  for (const body of bodies) {
+    head.push(pad32(dynOffset.toString(16)));
+    dynOffset += body.length / 2;
+  }
+  return (
+    AGGREGATE3_SELECTOR +
+    pad32((0x20).toString(16)) +
+    pad32(calls.length.toString(16)) +
+    head.join("") +
+    bodies.join("")
+  );
+}
+
+/** Decode aggregate3's (bool success, bytes returnData)[] result. */
+function decodeAggregate3(hex: string): { success: boolean; data: string }[] {
+  const body = hex.replace(/^0x/, "");
+  const word = (i: number) => body.slice(i * 64, i * 64 + 64);
+  const uintAt = (i: number) => Number(BigInt("0x" + word(i)));
+  const arrayBase = uintAt(0) / 32; // usually 1
+  const len = uintAt(arrayBase);
+  const out: { success: boolean; data: string }[] = [];
+  for (let i = 0; i < len; i++) {
+    const tupleOffset = arrayBase + 1 + uintAt(arrayBase + 1 + i) / 32;
+    const success = BigInt("0x" + word(tupleOffset)) === 1n;
+    const bytesOffset = tupleOffset + uintAt(tupleOffset + 1) / 32;
+    const bytesLen = uintAt(bytesOffset);
+    const data = "0x" + body.slice((bytesOffset + 1) * 64, (bytesOffset + 1) * 64 + bytesLen * 2);
+    out.push({ success, data });
+  }
+  return out;
+}
+
+async function rpcCall(rpc: string, to: string, data: string): Promise<string> {
+  const res = await fetch(rpc, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to, data }, "latest"] }),
+  });
+  const j = await res.json();
+  if (j.error) throw new Error(j.error.message || "rpc error");
+  return j.result as string;
+}
+
+/* ----------------------------------------------------------------------------- UI-facing quote */
+
+export interface LiveRouteHop {
+  venue: string; // "PancakeSwap V3" | "Uniswap V3" | "MoleSwap v4"
+  feePct: string; // "0.05%"
+  tokenIn: string;
+  tokenOut: string;
+  poolAddress: string;
+}
+
+export interface LiveRoute {
+  hops: LiveRouteHop[];
+  splitPct: number; // 0..100, share of amountIn
+  amountIn: bigint;
+  amountOut: bigint;
+}
+
+export interface LiveQuote {
+  amountIn: bigint;
+  amountOut: bigint;
+  /** The on-chain floor MoleRouter enforces — the ONLY promise the contract makes. */
+  minAmountOut: bigint;
+  slippageBps: number;
+  routes: LiveRoute[];
+  /** Execution vs spot, percent (0.42 = 0.42% worse than spot). Null when spot is unavailable. */
+  priceImpactPct: number | null;
+  /** tokenOut per tokenIn, decimals-adjusted (for "1 ETH = 1,918.4 USDG"). */
+  execRate: number;
+  /** USD value helpers, derived from the deepest live WETH/USDG pool — no external price feed. */
+  usdPerWeth: number | null;
+  /** Modeled gas for the router call (calibrated against real receipts; display-grade). */
+  gasUnits: bigint;
+  gasEth: number | null;
+  encoded: EncodedPlan;
+  value: bigint;
+  updatedAt: number;
+  poolsQuoted: number;
+}
+
+/* ----------------------------------------------------------------------------------- the session */
+
+const VENUE_LABELS: Record<string, string> = {
+  pancake_v3: "PancakeSwap V3",
+  uniswap_v3: "Uniswap V3",
+  mole_v4: "MoleSwap v4",
+};
+
+// Display-grade gas model, calibrated against real MoleRouter receipts on RH mainnet.
+const GAS_BASE = 60_000n;
+const GAS_PER_V3_HOP = 95_000n;
+const GAS_PER_V4_HOP = 140_000n;
+
+export class LivePairSession {
+  private states: PoolState[] = [];
+  private venueByAddr = new Map<string, string>();
+  private gasPriceWei: bigint | null = null;
+  private refreshing = false;
+  private gasPriceAge = 0;
+  readonly tokenIn: string;
+  readonly tokenOut: string;
+  readonly weth: string;
+  private readonly rpc: string;
+
+  constructor(tokenIn: string, tokenOut: string, weth: string) {
+    this.tokenIn = tokenIn;
+    this.tokenOut = tokenOut;
+    this.weth = weth;
+    this.rpc =
+      (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) || ROBINHOOD_RPC_URL;
+  }
+
+  get poolCount(): number {
+    return this.states.length;
+  }
+
+  get poolStates(): readonly PoolState[] {
+    return this.states;
+  }
+
+  /** Full load: registry + on-chain discovery + complete state fetch. Call once per pair. */
+  async init(rows: PoolRow[]): Promise<void> {
+    // Venue labels: registry rows first, then discovery (cached 60s inside discoverForPair, so this
+    // is not a second network round trip after fetchRelevantPoolStates already ran it).
+    for (const r of rows) if (r.address) this.venueByAddr.set(lc(r.address), VENUE_LABELS[r.venue] ?? "V3 pool");
+    try {
+      const discovered = await discoverForPair(this.tokenIn, this.tokenOut, this.weth);
+      for (const r of discovered) if (r.address) this.venueByAddr.set(lc(r.address), VENUE_LABELS[r.venue] ?? "V3 pool");
+    } catch {
+      /* labels fall back to generic */
+    }
+    this.states = await fetchRelevantPoolStates(rows, this.tokenIn, this.tokenOut, this.weth);
+    await this.refreshGasPrice();
+  }
+
+  private async refreshGasPrice(): Promise<void> {
+    try {
+      const res = await fetch(this.rpc, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_gasPrice", params: [] }),
+      });
+      const j = await res.json();
+      if (j.result) this.gasPriceWei = BigInt(j.result);
+      this.gasPriceAge = Date.now();
+    } catch {
+      /* keep the previous price */
+    }
+  }
+
+  /**
+   * Refresh the dynamic state of every known pool — ONE Multicall3 eth_call for all v3 pools
+   * (slot0 + liquidity + the tick window), plus the v4 StateView read when the v4 pool is in the set.
+   * Immutables (tokens, fee, spacing) are kept from init; ticks re-read around the LAST known tick,
+   * which self-heals next tick if price moves a whole word between refreshes.
+   */
+  async refresh(): Promise<void> {
+    if (this.refreshing || this.states.length === 0) return;
+    this.refreshing = true;
+    try {
+      const v3 = this.states.filter((s) => s.venue !== "UniswapV4");
+      const hasV4 = this.states.some((s) => s.venue === "UniswapV4");
+
+      const calls: RawCall[] = [];
+      const layout: { pool: PoolState; slot0Idx: number; liqIdx: number; wordIdxs: number[] }[] = [];
+      for (const p of v3) {
+        const slot0Idx = calls.length;
+        calls.push({ target: p.address, callData: INDEXER_SELECTORS.slot0 });
+        const liqIdx = calls.length;
+        calls.push({ target: p.address, callData: INDEXER_SELECTORS.liquidity });
+        const centerWord = Math.floor(Math.floor(p.tick / p.tickSpacing) / 256);
+        const wordIdxs: number[] = [];
+        for (let w = centerWord - DEFAULT_WORD_RADIUS; w <= centerWord + DEFAULT_WORD_RADIUS; w++) {
+          wordIdxs.push(calls.length);
+          calls.push({
+            target: PANCAKE_V3.tickLens,
+            callData: "0x" + INDEXER_SELECTORS.getPopulatedTicksInWord.replace(/^0x/, "") + encAddress(p.address) + encInt16(w),
+          });
+        }
+        layout.push({ pool: p, slot0Idx, liqIdx, wordIdxs });
+      }
+
+      const next: PoolState[] = [];
+      if (calls.length > 0) {
+        const raw = await rpcCall(this.rpc, MULTICALL3, encodeAggregate3(calls));
+        const results = decodeAggregate3(raw);
+        for (const item of layout) {
+          const slot0Res = results[item.slot0Idx];
+          const liqRes = results[item.liqIdx];
+          if (!slot0Res?.success || !liqRes?.success) {
+            next.push(item.pool); // keep the stale state rather than dropping the venue
+            continue;
+          }
+          try {
+            const slot0 = decodeSlot0(slot0Res.data);
+            const liquidity = decodeUint(liqRes.data);
+            const ticks: TickData[] = [];
+            for (const wi of item.wordIdxs) {
+              const r = results[wi];
+              if (r?.success && r.data && r.data !== "0x") ticks.push(...decodePopulatedTicks(r.data));
+            }
+            const byIndex = new Map<number, TickData>();
+            for (const t of ticks) byIndex.set(t.index, t);
+            next.push({
+              ...item.pool,
+              sqrtPriceX96: slot0.sqrtPriceX96,
+              tick: slot0.tick,
+              liquidity,
+              ticks: [...byIndex.values()].sort((a, b) => a.index - b.index),
+            });
+          } catch {
+            next.push(item.pool);
+          }
+        }
+      }
+
+      if (hasV4) {
+        try {
+          const v4 = await fetchV4MolePool();
+          if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) next.push(v4);
+          else {
+            const stale = this.states.find((s) => s.venue === "UniswapV4");
+            if (stale) next.push(stale);
+          }
+        } catch {
+          const stale = this.states.find((s) => s.venue === "UniswapV4");
+          if (stale) next.push(stale);
+        }
+      }
+
+      this.states = next;
+      if (Date.now() - this.gasPriceAge > 30_000) await this.refreshGasPrice();
+    } finally {
+      this.refreshing = false;
+    }
+  }
+
+  /** Pure quote off the cached snapshot — safe to call per keystroke and per refresh tick. */
+  quote(params: {
+    amountIn: bigint;
+    recipient: string;
+    slippageBps: number;
+    decimalsIn: number;
+    decimalsOut: number;
+  }): LiveQuote | null {
+    if (params.amountIn <= 0n || this.states.length === 0) return null;
+    let q: Quote;
+    try {
+      q = getQuote(this.states, {
+        tokenIn: this.tokenIn,
+        tokenOut: this.tokenOut,
+        amountIn: params.amountIn,
+        recipient: params.recipient,
+        nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
+        ttlSeconds: 300n,
+        slippageBps: params.slippageBps,
+        weth: this.weth,
+      });
+    } catch {
+      return null;
+    }
+
+    let encoded: EncodedPlan;
+    let value: bigint;
+    try {
+      ({ arg: encoded, value } = encodePlan(q.plan));
+    } catch {
+      return null;
+    }
+
+    const routes: LiveRoute[] = q.split.parts.map((part) => ({
+      hops: part.hops.map((h) => ({
+        venue:
+          h.pool.venue === "UniswapV4"
+            ? "MoleSwap v4"
+            : this.venueByAddr.get(lc(h.pool.address)) ?? "PancakeSwap V3",
+        feePct: `${(h.pool.fee / 10_000).toFixed(h.pool.fee % 10_000 === 0 ? 0 : 2)}%`,
+        tokenIn: h.tokenIn,
+        tokenOut: h.tokenOut,
+        poolAddress: h.pool.address,
+      })),
+      splitPct: Number((part.amountIn * 10_000n) / q.amountIn) / 100,
+      amountIn: part.amountIn,
+      amountOut: part.amountOut,
+    }));
+
+    // Price impact: execution rate vs the spot rate composed across each part's hops, weighted by
+    // each part's input share. All raw-unit ratios, so decimals cancel.
+    const spot = this.spotRateRaw(q);
+    const execRaw = Number(q.amountOut) / Number(q.amountIn);
+    const priceImpactPct = spot && spot > 0 ? Math.max(0, (1 - execRaw / spot) * 100) : null;
+
+    const decimalsAdj = Math.pow(10, params.decimalsIn - params.decimalsOut);
+    const execRate = execRaw * decimalsAdj;
+
+    let gasUnits = GAS_BASE;
+    for (const part of q.split.parts) {
+      for (const h of part.hops) gasUnits += h.pool.venue === "UniswapV4" ? GAS_PER_V4_HOP : GAS_PER_V3_HOP;
+    }
+    const gasEth = this.gasPriceWei !== null ? Number(gasUnits * this.gasPriceWei) / 1e18 : null;
+
+    return {
+      amountIn: q.amountIn,
+      amountOut: q.amountOut,
+      minAmountOut: q.minAmountOut,
+      slippageBps: params.slippageBps,
+      routes,
+      priceImpactPct,
+      execRate,
+      usdPerWeth: this.usdPerWeth(),
+      gasUnits,
+      gasEth,
+      encoded,
+      value,
+      updatedAt: Date.now(),
+      poolsQuoted: this.states.length,
+    };
+  }
+
+  /** Spot rate (tokenOut per tokenIn, RAW units) composed across the quote's hops, split-weighted. */
+  private spotRateRaw(q: Quote): number | null {
+    let weighted = 0;
+    for (const part of q.split.parts) {
+      let rate = 1;
+      for (const h of part.hops) {
+        const p = Number(h.pool.sqrtPriceX96) / 2 ** 96;
+        const price1per0 = p * p;
+        const zeroForOne = lc(h.tokenIn) === lc(h.pool.token0) ||
+          (lc(h.tokenIn) === lc(NATIVE) && lc(this.weth) === lc(h.pool.token0));
+        rate *= zeroForOne ? price1per0 : 1 / price1per0;
+      }
+      if (!isFinite(rate) || rate <= 0) return null;
+      weighted += rate * (Number(part.amountIn) / Number(q.amountIn));
+    }
+    return weighted > 0 && isFinite(weighted) ? weighted : null;
+  }
+
+  /** USD per WETH from the deepest live WETH/USDG pool in the snapshot (USDG ≈ $1). */
+  usdPerWeth(): number | null {
+    let best: PoolState | null = null;
+    for (const s of this.states) {
+      const t0 = lc(s.token0);
+      const t1 = lc(s.token1);
+      const isPair =
+        (t0 === lc(this.weth) && t1 === USDG_LC) || (t1 === lc(this.weth) && t0 === USDG_LC);
+      if (!isPair) continue;
+      if (!best || s.liquidity > best.liquidity) best = s;
+    }
+    if (!best) return null;
+    const p = Number(best.sqrtPriceX96) / 2 ** 96;
+    const price1per0 = p * p; // token1 raw per token0 raw
+    const wethIsToken0 = lc(best.token0) === lc(this.weth);
+    // USDG has 6 decimals, WETH 18 → human USD/WETH scales by 1e12.
+    const usd = wethIsToken0 ? price1per0 * 1e12 : (1 / price1per0) * 1e12;
+    return isFinite(usd) && usd > 0 ? usd : null;
+  }
+}
+
+export { NATIVE };

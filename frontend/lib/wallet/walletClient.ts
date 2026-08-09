@@ -9,7 +9,7 @@ import {
   type Chain,
   type Address,
 } from "viem";
-import { robinhoodChain } from "@/lib/pushchain/wagmi-config";
+import { robinhoodChain } from "@/lib/chain/wagmi-config";
 
 /**
  * Wallet/public client helpers — Robinhood Chain (4663) only.

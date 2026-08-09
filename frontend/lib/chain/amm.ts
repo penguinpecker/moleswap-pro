@@ -1,12 +1,10 @@
 /**
  * MoleSwap swap engine — Robinhood Chain (4663).
  *
- * This module kept its original path (`lib/pushchain/amm.ts`) and every export name the app consumes,
- * but the engine underneath is entirely different: there is no Push AMM / universal-tx multicall here.
  * Quotes come from the MoleSwap off-chain router (exact against the chain to the wei), and execution
  * goes through MoleRouter — the immutable on-chain aggregator executor — via the connected wallet.
  *
- * Design contract preserved for the UI:
+ * Design contract for the UI:
  *   - getSwapQuote()        → { amountIn, amountOut, tokenIn, tokenOut, fee, pool, priceImpact, gas }
  *   - estimateSwapDetails() → { etaSeconds, totalGas, txCount, breakdown }
  *   - executeSwap()         → { success, txHash?, error? }, emitting onStep(idx,label,status)
@@ -24,8 +22,8 @@ import {
   CONTRACTS,
   TOKENS,
   POOLS,
-  PUSHCHAIN_RPC,
-  PUSHCHAIN_CHAIN_ID,
+  RH_RPC_URL,
+  RH_CHAIN_ID,
   ERC20_ABI,
   POOL_ABI,
   getTokenByAddress,
@@ -36,12 +34,6 @@ import {
   type TokenInfo,
   type PoolInfo,
 } from "./contracts";
-import {
-  getBridgeInfoForPrc20,
-  canAutoBridgeFrom,
-  getSdkMoveableToken,
-  type Prc20BridgeInfo,
-} from "./prc20-bridge-map";
 import { robinhoodChain } from "./wagmi-config";
 import { moleRouterAbi, erc20Abi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { quoteSwap } from "@/lib/aggregator/client";
@@ -53,28 +45,25 @@ export {
   CONTRACTS,
   TOKENS,
   POOLS,
-  PUSHCHAIN_RPC,
-  PUSHCHAIN_CHAIN_ID,
+  RH_RPC_URL,
+  RH_CHAIN_ID,
   getTokenByAddress,
   findPool,
   getSwappableTokens,
   getDisplayInfo,
   getPoolDisplayInfo,
-  getBridgeInfoForPrc20,
-  canAutoBridgeFrom,
   type TokenInfo,
   type PoolInfo,
-  type Prc20BridgeInfo,
 };
 
 export const AMM_ROUTER = CONTRACTS.MOLE_ROUTER;
 export const AMM_FACTORY = CONTRACTS.FACTORY;
-export type PushChainToken = TokenInfo;
+export type RhToken = TokenInfo;
 export type Pool = PoolInfo;
-export const PUSHCHAIN_TOKENS = TOKENS;
+export const RH_TOKENS = TOKENS;
 
 const ZERO = "0x0000000000000000000000000000000000000000";
-const WETH = CONTRACTS.WPC;
+const WETH = CONTRACTS.WETH;
 const RH_CHAIN_HEX = "0x1237"; // 4663
 const DEFAULT_SLIPPAGE_BPS = 50;
 
@@ -90,17 +79,11 @@ export interface SwapQuote {
   gasEstimate: string;
 }
 
-export interface UniversalTxOptions {
+export interface TxOptions {
   payGasWithToken?: string;
   payGasSlippageBps?: number;
   onProgress?: (p: { id: string; title: string; message: string; level: string; timestamp: string }) => void;
 }
-
-export interface BridgeStep { type: "bridge"; [k: string]: any }
-export interface SwapStepCall { type: "swap"; [k: string]: any }
-export type SwapStep = BridgeStep | SwapStepCall;
-export interface ExecuteStepsResult { success: boolean; txHash?: string; error?: string }
-export interface ExecuteStepsParams { steps: SwapStep[]; [k: string]: any }
 
 export interface AddLiquidityParams {
   token0: string; token1: string; fee?: number;
@@ -112,17 +95,7 @@ export interface LiquidityPosition {
   liquidity: string; amount0: string; amount1: string; [k: string]: any;
 }
 
-/* ─── Constants kept for import compatibility (no longer used on a single chain) ─── */
-export const MULTICALL_TARGET_ADDRESS = ZERO as const;
-export const MULTICALL_SELECTOR = "0x1749e1e3" as const;
-export const UEA_MULTICALL_SELECTOR = "0x2cc2842d" as const;
-export const MIGRATION_SELECTOR = "0xcac656d6" as const;
-
-/* ─── Small helpers / legacy shims ─────────────────────────────────────── */
-export function isPushChain(_originChain: string | null | undefined): boolean {
-  return false; // single-chain app — nothing is "cross-chain" anymore
-}
-
+/* ─── Small helpers ─────────────────────────────────────────────────────── */
 export function extractTxHash(result: any): string {
   if (!result) return "";
   if (typeof result === "string") return result;
@@ -134,9 +107,6 @@ export function extractTxHash(result: any): string {
   return "";
 }
 
-export function isSwapStep(step: SwapStep): boolean {
-  return step?.type === "swap";
-}
 
 export function getContractErrorMessage(err: any): string {
   if (!err) return "Transaction failed";
@@ -148,22 +118,13 @@ export function getContractErrorMessage(err: any): string {
   return msg.slice(0, 160);
 }
 
-export async function ensureUeaUpgraded(_client: any): Promise<boolean> { return true; }
-export function createGuardedPushChainClient(client: any): any { return client; }
-
-// No-op: origin chain is meaningless on a single chain, but SwapPage imports and calls it.
-let _walletOrigin: string | null = null;
-export function setWalletOriginChain(origin: string | null | undefined): void {
-  _walletOrigin = origin ?? null;
-}
-
 export function getProvider(): ethers.JsonRpcProvider {
-  return new ethers.JsonRpcProvider(PUSHCHAIN_RPC, PUSHCHAIN_CHAIN_ID);
+  return new ethers.JsonRpcProvider(RH_RPC_URL, RH_CHAIN_ID);
 }
 
 /* ─── Pool registry loader (indexer → Supabase) ────────────────────────── */
 let _poolRowsCache: { at: number; rows: PoolRow[] } | null = null;
-async function loadPoolRows(): Promise<PoolRow[]> {
+export async function loadPoolRows(): Promise<PoolRow[]> {
   if (_poolRowsCache && Date.now() - _poolRowsCache.at < 30_000) return _poolRowsCache.rows;
   try {
     const sb = createClient();
@@ -294,7 +255,7 @@ function browserEth(): any {
 async function ensureChain(eth: any): Promise<void> {
   try {
     const cid = await eth.request({ method: "eth_chainId" });
-    if (parseInt(cid, 16) !== PUSHCHAIN_CHAIN_ID) {
+    if (parseInt(cid, 16) !== RH_CHAIN_ID) {
       await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: RH_CHAIN_HEX }] });
     }
   } catch (e: any) {
@@ -305,7 +266,7 @@ async function ensureChain(eth: any): Promise<void> {
         params: [{
           chainId: RH_CHAIN_HEX,
           chainName: "Robinhood Chain",
-          rpcUrls: [PUSHCHAIN_RPC],
+          rpcUrls: [RH_RPC_URL],
           nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
           blockExplorerUrls: ["https://robinhoodchain.blockscout.com"],
         }],
@@ -316,12 +277,12 @@ async function ensureChain(eth: any): Promise<void> {
 }
 
 function publicClient() {
-  return createPublicClient({ chain: robinhoodChain, transport: http(PUSHCHAIN_RPC) });
+  return createPublicClient({ chain: robinhoodChain, transport: http(RH_RPC_URL) });
 }
 
 /* ─── APPROVE ───────────────────────────────────────────────────────────── */
 export async function approveToken(
-  _pushChainClient: any,
+  _client: any,
   token: string,
   amount?: string,
   spender: string = CONTRACTS.MOLE_ROUTER,
@@ -350,7 +311,7 @@ export async function approveToken(
 
 /* ─── EXECUTE ───────────────────────────────────────────────────────────── */
 export async function executeSwap(params: {
-  pushChainClient?: any;
+  chainClient?: any;
   tokenIn: string;
   tokenOut: string;
   amountIn: string;
@@ -441,11 +402,6 @@ export async function executeSwap(params: {
   }
 }
 
-// Legacy step-executor entry point some callers import — funnels to executeSwap.
-export async function executeSteps(_params: ExecuteStepsParams): Promise<ExecuteStepsResult> {
-  return { success: false, error: "executeSteps is not used on Robinhood Chain" };
-}
-
 /* ─── POOLS / LIQUIDITY (read-only display for /pools) ─────────────────── */
 
 /** Live WETH/USDG pool rows: indexer registry + on-chain sqrtPrice/liquidity. */
@@ -518,6 +474,3 @@ export async function removeLiquidity(_params: RemoveLiquidityParams): Promise<{
 export async function collectFees(_params: { tokenId: number | string; [k: string]: any }): Promise<{ txHash: string; success: boolean; error?: string }> {
   return { txHash: "", success: false, error: "Fees are auto-compounded by the MoleSwap ALM." };
 }
-
-// Referenced by some legacy imports; harmless on a single chain.
-export { getSdkMoveableToken };

@@ -19,7 +19,7 @@ import {
   http,
   type Address,
 } from "viem";
-import { robinhoodChain } from "@/lib/pushchain/wagmi-config";
+import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { molePositionsAbi, erc20Abi } from "./abi";
 import {
   MOLE_ADDRESSES,

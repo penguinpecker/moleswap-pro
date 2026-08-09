@@ -14,7 +14,7 @@ import {
   http,
   type Address,
 } from "viem";
-import { robinhoodChain } from "@/lib/pushchain/wagmi-config";
+import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { erc20Abi } from "./abi";
 import { MOLE_ADDRESSES, WETH, USDG, ROBINHOOD_RPC_URL } from "./chain";
 import {

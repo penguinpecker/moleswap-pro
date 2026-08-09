@@ -6,7 +6,7 @@ import React, { useEffect, useState } from "react";
 import { NavBar } from "../shared";
 import { Copy, X, MessageCircle, Share2 } from "lucide-react";
 import { FaXTwitter } from "react-icons/fa6";
-import { usePushWallet } from "@/lib/pushchain/provider";
+import { useWallet } from "@/lib/chain/provider";
 import { getOrCreateUser, getUserRank } from "@/lib/supabase/api";
 const ProfilePage = () => {
   return (
@@ -102,7 +102,7 @@ const BackgroundImage = () => {
 };
 
 const ProfileCard = () => {
-  const { address, isConnected } = usePushWallet();
+  const { address, isConnected } = useWallet();
   const [profile, setProfile] = useState<any>(null);
   const [rank, setRank] = useState<any>(null);
   const [loading, setLoading] = useState(false);

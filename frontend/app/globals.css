@@ -373,9 +373,6 @@
 
 /* ═══ Wallet Button — MoleSwap Theme Override ═══ */
 
-/* Target ALL Push SDK rendered elements globally */
-/* The SDK renders buttons with inline styles, so we need !important on everything */
-
 /* Header connect button wrapper */
 .moleswap-wallet-btn {
   display: flex;
@@ -428,47 +425,6 @@
   transform: scale(1.02) !important;
 }
 
-/* Kill any purple/pink backgrounds from Push SDK */
-div[style*="background"][style*="rgb(200"],
-div[style*="background"][style*="rgb(180"],
-div[style*="background"][style*="#c"],
-div[style*="background"][style*="purple"],
-div[style*="background-color"][style*="rgb(200"],
-button[style*="background"][style*="rgb(200"],
-button[style*="background"][style*="rgb(180"],
-button[style*="background-color"][style*="rgb(200"] {
-  background: transparent !important;
-  background-color: transparent !important;
-}
-
-/* Target Push SDK specific class patterns */
-[class*="pushUniversal"] {
-  background: transparent !important;
-  background-color: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  font-family: 'ThaleahFat', sans-serif !important;
-  color: #000 !important;
-}
-
-[class*="pushUniversal"]:hover {
-  transform: scale(1.02) !important;
-}
-
-/* Hide Push SDK default icons inside header button */
-.moleswap-wallet-btn [class*="pushUniversal"] svg,
-.moleswap-wallet-btn [class*="pushUniversal"] img {
-  display: none !important;
-}
-
-/* Push SDK spans inside buttons */
-[class*="pushUniversal"] span,
-[class*="pushUniversal"] div {
-  font-family: 'ThaleahFat', sans-serif !important;
-  color: #000 !important;
-  letter-spacing: 0.1em !important;
-}
-
 /* Profile page connect button override */
 .moleswap-profile-connect div[style],
 .moleswap-profile-connect button[style],
@@ -486,11 +442,6 @@ button[style*="background-color"][style*="rgb(200"] {
   color: #feca61 !important;
   width: 100% !important;
   cursor: pointer !important;
-}
-
-.moleswap-profile-connect [class*="pushUniversal"] span,
-.moleswap-profile-connect [class*="pushUniversal"] div {
-  color: #feca61 !important;
 }
 
 /* Exchange page green connect wallet button override */
@@ -511,11 +462,6 @@ button[style*="background-color"][style*="rgb(200"] {
   width: 100% !important;
   cursor: pointer !important;
   box-shadow: 0px -4px 0px 0px #4A8B29 inset, 0px 4px 0px 0px rgba(255,255,255,0.3) inset !important;
-}
-
-.moleswap-exchange-connect [class*="pushUniversal"] span,
-.moleswap-exchange-connect [class*="pushUniversal"] div {
-  color: #fff !important;
 }
 
 /* Mobile optimization utilities */

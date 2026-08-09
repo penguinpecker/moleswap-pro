@@ -1,7 +1,8 @@
 /**
- * WalletConnect provider - DEPRECATED
- * Now using PushChain Universal Wallet
- * Kept as stubs to prevent import errors
+ * WalletConnect provider — stubs.
+ *
+ * WalletConnect is handled by the wagmi connector configured in wagmi-config.ts.
+ * These no-op stubs remain only so legacy dynamic imports don't break the build.
  */
 
 export async function getWalletConnectProvider() {
@@ -9,7 +10,6 @@ export async function getWalletConnectProvider() {
 }
 
 export async function connectWithWalletConnect(): Promise<string[]> {
-  console.warn("WalletConnect removed. Use PushChain Universal Wallet instead.");
   return [];
 }
 
