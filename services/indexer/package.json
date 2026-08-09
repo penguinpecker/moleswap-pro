@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Persistent pool indexer for the MoleSwap aggregator \u2014 discovers PancakeSwap V3 pools on Robinhood Chain and keeps the Supabase registry fresh.",
+  "description": "Incremental indexer for MoleSwap on Robinhood Chain — keeps mp_pools + the mp_tokens verified/liquidity list fresh every REFRESH_SECONDS.",
   "scripts": {
     "start": "node src/index.mjs"
   },
