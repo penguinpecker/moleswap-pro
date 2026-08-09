@@ -16,6 +16,7 @@ import type { PoolState, TickData } from "./venues/v3Pool";
 import { decodeSlot0, decodeUint, decodePopulatedTicks, INDEXER_SELECTORS, DEFAULT_WORD_RADIUS } from "./indexer";
 import { fetchV4MolePool } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
+import { FetchTransport } from "./transport";
 import { PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
 
 const MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11";
@@ -194,7 +195,17 @@ export class LivePairSession {
     } catch {
       /* labels fall back to generic */
     }
-    this.states = await fetchRelevantPoolStates(rows, this.tokenIn, this.tokenOut, this.weth);
+    // Fetch pool state over the SAME configured RPC as discovery/refresh — the default
+    // FetchTransport points at the public RPC, which rate-limits a many-pool fetch and
+    // silently drops most venues (measured: 14 pools discovered → only 2 survive on the
+    // public endpoint). Using the configured (Alchemy) RPC keeps the full set.
+    this.states = await fetchRelevantPoolStates(
+      rows,
+      this.tokenIn,
+      this.tokenOut,
+      this.weth,
+      new FetchTransport(this.rpc),
+    );
     await this.refreshGasPrice();
   }
 

@@ -560,21 +560,16 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   }, [quote]);
   const isRhSwap = fromChainId === toChainId && String(fromChainId) === "4663";
 
-  // Detect if swap involves a thin liquidity pool — only warn when the user's
-  // selected token IS the thin-liquidity token (not WETH, which appears in every pool)
+  // Liquidity warning driven by the LIVE quote's real price impact across every
+  // pool the aggregator scanned — not a hardcoded per-pool flag (which wrongly
+  // fired for deep pairs like WETH/USDG that merely also have a thin fee tier).
   const thinPoolWarning = useMemo(() => {
-    if (!fromToken || !toToken) return null;
-    const actualFrom = fromToken === "0x0000000000000000000000000000000000000000" ? CONTRACTS.WETH : fromToken;
-    const actualTo = toToken === "0x0000000000000000000000000000000000000000" ? CONTRACTS.WETH : toToken;
-    const wethLc = CONTRACTS.WETH.toLowerCase();
-    // For each thin pool, check if the non-WETH token matches from or to
-    const thinPool = POOLS.find(p => {
-      if (!p.thinLiquidity) return false;
-      const thinToken = p.token0.toLowerCase() === wethLc ? p.token1.toLowerCase() : p.token0.toLowerCase();
-      return thinToken === actualFrom.toLowerCase() || thinToken === actualTo.toLowerCase();
-    });
-    return thinPool ? `${thinPool.name} has very low liquidity — expect high slippage or failed swaps.` : null;
-  }, [fromToken, toToken]);
+    if (!quote || quote.priceImpactPct === null) return null;
+    if (quote.priceImpactPct >= 5) {
+      return `High price impact (${quote.priceImpactPct.toFixed(1)}%) — this pair is thin at this size. Try a smaller amount.`;
+    }
+    return null;
+  }, [quote]);
 
   // Balance USD value from the live spot (USDG ≈ $1, ETH/WETH via the pool).
   const balanceUsdValue = useMemo(() => {
