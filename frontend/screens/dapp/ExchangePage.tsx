@@ -12,11 +12,11 @@ import { getOrCreateUser, getUserSwapHistory } from "@/lib/supabase/api";
 import { getTokenBalance } from "@/lib/wallet/walletClient";
 import { useRouter } from "next/navigation";
 import type { Address } from "viem";
-import { createPublicClient, http, isAddress } from "viem";
+import { createPublicClient, http, isAddress, parseUnits, formatUnits, parseEther } from "viem";
 import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { createClient as createSupabaseBrowser } from "@/lib/supabase/client";
 import { tokenHasPool } from "@/lib/aggregator/discover";
-import { searchIndex, heldTokens, type IndexedToken, type HeldToken } from "@/lib/chain/tokenSearch";
+import { searchIndex, heldTokens, popularTokens, type IndexedToken, type HeldToken } from "@/lib/chain/tokenSearch";
 import Settings from "../settings";
 import { diagnostics } from "@/lib/diagnostics";
 
@@ -105,6 +105,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   // Tokens the connected wallet actually holds on Robinhood Chain (balanceOf sweep).
   const [heldList, setHeldList] = useState<HeldToken[]>([]);
   const [loadingHeld, setLoadingHeld] = useState(false);
+  // The default "verified" list: most-liquid vetted tokens on the chain.
+  const [popularList, setPopularList] = useState<IndexedToken[]>([]);
 
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -315,6 +317,18 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     };
   }, [searchQuery]);
 
+  // Load the default "verified" list (most-liquid vetted tokens) when the picker opens.
+  useEffect(() => {
+    if (selectionMode === "none") return;
+    let cancelled = false;
+    popularTokens(30).then((p) => {
+      if (!cancelled) setPopularList(p);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectionMode]);
+
   // When the picker opens with a connected wallet, sweep the wallet's balances across the whole
   // indexed token universe so we can surface the tokens the user actually holds.
   useEffect(() => {
@@ -400,6 +414,19 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         amountWei !== "0",
     );
   }, [fromChainId, toChainId, fromToken, toToken, amountWei]);
+
+  // True when the entered amount exceeds the wallet's balance — the swap would revert
+  // with TransferFailed on the token pull, so block it in the UI instead.
+  const insufficientBalance = useMemo(() => {
+    if (!walletAddress || !fromTokenBalance || !amountWei || amountWei === "0") return false;
+    try {
+      const balRaw = parseUnits(fromTokenBalance as `${number}`, fromTokenMeta?.decimals ?? 18);
+      return BigInt(amountWei) > balRaw;
+    } catch {
+      return false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress, fromTokenBalance, amountWei, fromTokenMeta?.decimals]);
 
   // ----- Live quote engine -----
   // One session per pair: init loads the registry + on-chain pool discovery +
@@ -698,31 +725,50 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     }
   };
 
-  // Helper functions to set amount based on balance percentage
+  // Percentage / MAX buttons. These work in RAW wei with BigInt so they can never
+  // exceed the on-chain balance — the previous float `.toFixed(6)` ROUNDED UP (e.g.
+  // 886.4120619274 → 886.412062), making the swap try to spend more than the wallet
+  // held, which reverts the whole tx with TransferFailed on the token pull.
+  const setAmountFromRaw = (raw: bigint, decimals: number) => {
+    if (raw <= 0n) {
+      setAmount("");
+      return;
+    }
+    setAmount(formatUnits(raw, decimals).replace(/\.?0+$/, ""));
+  };
   const setAmountPercentage = (percentage: number) => {
     if (!fromTokenBalance) return;
-    const balanceNum = Number(fromTokenBalance);
-    if (isNaN(balanceNum) || balanceNum <= 0) return;
-
-    const calculatedAmount = (balanceNum * percentage).toString();
-    // Format to avoid too many decimal places
     const decimals = fromTokenMeta?.decimals ?? 18;
-    const maxDecimals = Math.min(decimals, 6);
-    const formatted = Number(calculatedAmount).toFixed(maxDecimals);
-    setAmount(formatted.replace(/\.?0+$/, "")); // Remove trailing zeros
+    let raw: bigint;
+    try {
+      raw = parseUnits(fromTokenBalance as `${number}`, decimals);
+    } catch {
+      return;
+    }
+    const bps = BigInt(Math.round(percentage * 10000));
+    setAmountFromRaw((raw * bps) / 10000n, decimals); // integer division floors
   };
 
   const handleSet20Percent = () => setAmountPercentage(0.2);
   const handleSet50Percent = () => setAmountPercentage(0.5);
   const handleSetMax = () => {
     if (!fromTokenBalance) return;
-    const balanceNum = Number(fromTokenBalance);
-    if (isNaN(balanceNum) || balanceNum <= 0) return;
-
     const decimals = fromTokenMeta?.decimals ?? 18;
-    const maxDecimals = Math.min(decimals, 6);
-    const formatted = balanceNum.toFixed(maxDecimals);
-    setAmount(formatted.replace(/\.?0+$/, "")); // Remove trailing zeros
+    let raw: bigint;
+    try {
+      raw = parseUnits(fromTokenBalance as `${number}`, decimals);
+    } catch {
+      return;
+    }
+    // For native ETH, keep a small buffer so the swap can still pay gas; for ERC-20
+    // tokens MAX is the exact balance (the router pulls precisely this amount).
+    const lc = (fromToken || "").toLowerCase();
+    const isNativeIn = !fromToken || lc === "0x0000000000000000000000000000000000000000" || lc === "eth" || lc === "native";
+    if (isNativeIn) {
+      const gasBuffer = parseEther("0.0003");
+      raw = raw > gasBuffer ? raw - gasBuffer : 0n;
+    }
+    setAmountFromRaw(raw, decimals);
   };
 
   const handleReviewSwap = () => {
@@ -870,9 +916,10 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     } else if (modalChain) {
       for (const t of getTokensForChain(modalChain)) add(t);
     }
+    for (const t of popularList) add(t); // most-liquid verified tokens on the chain
     for (const t of importedTokens) add(t);
     return merged;
-  }, [modalChain, chains, selectionMode, importedTokens, heldList]);
+  }, [modalChain, chains, selectionMode, importedTokens, heldList, popularList]);
 
   // With a query: local matches (held + registry + imported) UNION the whole-chain index results.
   const filteredModalTokens = useMemo(() => {
@@ -1185,11 +1232,17 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                               />
                             </div>
                             <div className="text-left">
-                              <h2 className="font-family-ThaleahFat text-xl tracking-wider text-white uppercase sm:text-3xl sm:tracking-widest">
+                              <h2 className="font-family-ThaleahFat flex items-center gap-1.5 text-xl tracking-wider text-white uppercase sm:text-3xl sm:tracking-widest">
                                 {symbolLabel}
+                                {(token as any).verified && (
+                                  <span title="Verified — has real liquidity" className="text-sm text-[#4ADE80] sm:text-base">✓</span>
+                                )}
                               </h2>
                               <p className="font-family-ThaleahFat -mt-1 text-sm tracking-wider text-[#B0B0B0] uppercase sm:-mt-2 sm:text-lg sm:tracking-widest">
                                 {subtitleLabel}
+                                {searchQuery.trim() && (token as any).verified === false && (
+                                  <span className="ml-2 text-xs text-yellow-500/80 normal-case">· unverified</span>
+                                )}
                               </p>
                             </div>
                           </div>
@@ -1776,11 +1829,11 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                     <button
                       onClick={handleReviewSwap}
                       disabled={
-                        !quote || !canQuote || !amount || Number(amount) <= 0
+                        !quote || !canQuote || !amount || Number(amount) <= 0 || insufficientBalance
                       }
                       className="relative w-full cursor-pointer rounded py-4 text-base font-bold text-white transition-all sm:text-xl hover:scale-105 disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      <span> REVIEW SWAP </span>
+                      <span>{insufficientBalance ? ` INSUFFICIENT ${displaySymbolOf(fromTokenMeta)} ` : " REVIEW SWAP "}</span>
                       <Image
                         src="/dapp/connect-wallet.png"
                         alt="Review"

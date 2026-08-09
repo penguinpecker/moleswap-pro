@@ -22,6 +22,10 @@ export interface IndexedToken {
   displaySubtitle: string;
   isStable?: boolean;
   sourceChain: string;
+  /** Has meaningful pool liquidity (>= ~0.05 WETH). Junk/dead tokens are unverified. */
+  verified?: boolean;
+  /** Best-pool liquidity in WETH-equivalent, for ranking. */
+  liquidity?: number;
 }
 
 function rpcUrl() {
@@ -31,7 +35,7 @@ function client() {
   return createPublicClient({ chain: robinhoodChain, transport: http(rpcUrl()) });
 }
 
-function toEntry(row: { address: string; symbol: string; name: string; decimals: number; logo_url?: string | null; is_stable?: boolean }): IndexedToken {
+function toEntry(row: { address: string; symbol: string; name: string; decimals: number; logo_url?: string | null; is_stable?: boolean; verified?: boolean; liquidity?: number }): IndexedToken {
   const curated = getTokenByAddress(row.address);
   const logo = curated?.logoURI || row.logo_url || tokenFallbackIcon(row.address, row.symbol);
   return {
@@ -44,12 +48,17 @@ function toEntry(row: { address: string; symbol: string; name: string; decimals:
     displaySubtitle: row.name && row.name !== row.symbol ? row.name : "Robinhood Chain",
     isStable: row.is_stable,
     sourceChain: "Robinhood Chain",
+    verified: !!curated || !!row.verified,
+    liquidity: Number(row.liquidity ?? 0),
   };
 }
 
+const SELECT_COLS = "address,symbol,name,decimals,logo_url,is_stable,verified,liquidity";
+
 /**
- * Search the token index by symbol / name / address. Returns up to `limit` matches, stables and shorter
- * symbols first (so "USD" surfaces USDG before a random "MYUSDCOIN").
+ * Search the token index by symbol / name / address. Verified (liquid) tokens rank first, then by
+ * liquidity — so a search for "hoodrat" surfaces the ONE real HOODRAT above the dead duplicates, and
+ * "usd" surfaces USDG above junk. Every matching token is still returned so nothing is unfindable.
  */
 export async function searchIndex(query: string, limit = 40): Promise<IndexedToken[]> {
   const q = query.trim();
@@ -60,21 +69,46 @@ export async function searchIndex(query: string, limit = 40): Promise<IndexedTok
     if (!esc) return [];
     const { data } = await sb
       .from("mp_tokens")
-      .select("address,symbol,name,decimals,logo_url,is_stable,sort_rank")
+      .select(SELECT_COLS)
       .or(`symbol.ilike.%${esc}%,name.ilike.%${esc}%,address.ilike.%${esc}%`)
-      .order("sort_rank", { ascending: true })
+      .order("verified", { ascending: false })
+      .order("liquidity", { ascending: false })
       .limit(limit);
     const rows = (data as any[]) || [];
-    // Prefer exact-ish symbol matches at the top.
     const ql = esc.toLowerCase();
+    // Verified first, then exact/prefix symbol match, then liquidity.
     rows.sort((a, b) => {
+      if (!!a.verified !== !!b.verified) return a.verified ? -1 : 1;
       const ax = a.symbol?.toLowerCase() === ql ? 0 : a.symbol?.toLowerCase().startsWith(ql) ? 1 : 2;
       const bx = b.symbol?.toLowerCase() === ql ? 0 : b.symbol?.toLowerCase().startsWith(ql) ? 1 : 2;
-      return ax - bx || (a.symbol?.length ?? 99) - (b.symbol?.length ?? 99);
+      return ax - bx || (Number(b.liquidity ?? 0) - Number(a.liquidity ?? 0));
     });
     return rows.map(toEntry);
   } catch {
     return [];
+  }
+}
+
+/**
+ * The default picker list: the most liquid verified tokens on the chain (Uniswap/Jupiter-style
+ * "verified" list), most-liquid first. Cached for the session.
+ */
+let _popularCache: { at: number; rows: IndexedToken[] } | null = null;
+export async function popularTokens(limit = 30): Promise<IndexedToken[]> {
+  if (_popularCache && Date.now() - _popularCache.at < 300_000) return _popularCache.rows;
+  try {
+    const sb = createClient();
+    const { data } = await sb
+      .from("mp_tokens")
+      .select(SELECT_COLS)
+      .eq("verified", true)
+      .order("liquidity", { ascending: false })
+      .limit(limit);
+    const rows = ((data as any[]) || []).map(toEntry);
+    _popularCache = { at: Date.now(), rows };
+    return rows;
+  } catch {
+    return _popularCache?.rows ?? [];
   }
 }
 
