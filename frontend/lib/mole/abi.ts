@@ -47,7 +47,9 @@ export const molePositionsAbi = [
   {
     type: "function",
     name: "zapOpen",
-    stateMutability: "nonpayable",
+    // payable on-chain (accepts native ETH); the ZapParams tuple carries amountOutMin — the REAL swap
+    // slippage bound. Omitting it (as an earlier ABI did) changes the selector and every deposit reverts.
+    stateMutability: "payable",
     inputs: [
       {
         name: "z",
@@ -60,6 +62,7 @@ export const molePositionsAbi = [
           { name: "amountIn", type: "uint256" },
           { name: "swapAmount", type: "uint256" },
           { name: "minLiquidity", type: "uint128" },
+          { name: "amountOutMin", type: "uint256" },
         ],
       },
       { name: "deadline", type: "uint256" },
