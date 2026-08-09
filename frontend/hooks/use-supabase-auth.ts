@@ -84,6 +84,21 @@ export function useSupabaseAuth() {
     }
   }, [supabase])
 
+  const signInWithTwitter = useCallback(async (redirectTo?: string) => {
+    try {
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'https://www.moleswap.com'
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'twitter',
+        options: { redirectTo: redirectTo || `${origin}/auth/callback` },
+      })
+      if (error) console.error('Supabase Twitter auth error:', error)
+      return { data, error }
+    } catch (err) {
+      console.error('Unexpected error during Twitter auth:', err)
+      return { data: null, error: err as Error }
+    }
+  }, [supabase])
+
   const signOut = useCallback(async () => {
     const { error } = await supabase.auth.signOut()
     if (!error) {
@@ -94,10 +109,13 @@ export function useSupabaseAuth() {
   }, [supabase])
 
   return {
+    // `user` is an alias for walletUser so screens that read either name work.
+    user: walletUser,
     walletUser,
     session,
     loading,
     signInWithWeb3,
+    signInWithTwitter,
     signOut,
   }
 }

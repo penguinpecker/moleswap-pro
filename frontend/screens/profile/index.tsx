@@ -125,6 +125,25 @@ const ProfileCard = () => {
   const maxXP = 1000; // XP bar max for visual fill
   const xpPct = Math.min((displayXP / maxXP) * 100, 100);
   const displayAddress = address?.toUpperCase() || "NOT CONNECTED";
+  const [copied, setCopied] = useState(false);
+
+  const copyAddress = () => {
+    if (!address) return;
+    navigator.clipboard?.writeText(address);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const shareProfile = () => {
+    const text = `I'm ranked ${displayRank} on MoleSwap 🦫 — swap, provide liquidity, earn XP. https://moleswap.com`;
+    if (typeof navigator !== "undefined" && (navigator as any).share) {
+      (navigator as any).share({ title: "MoleSwap", text }).catch(() => {});
+    } else {
+      navigator.clipboard?.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
   const displayRank = rank?.current_rank ? `#${rank.current_rank}` : (profile?.current_rank ? `#${profile.current_rank}` : "—");
   const displayBestRank = rank?.best_rank ? `#${rank.best_rank}` : (profile?.best_rank ? `#${profile.best_rank}` : "—");
 
@@ -200,7 +219,12 @@ const ProfileCard = () => {
             <span className="text-peach-300 font-family-ThaleahFat text-sm break-all select-text text-shadow-black sm:text-xl">
               {displayAddress}
             </span>
-            <button className="hover:bg-accent shrink-0 cursor-pointer border-2 border-black p-1 sm:p-2">
+            <button
+              onClick={copyAddress}
+              disabled={!address}
+              title={copied ? "Copied!" : "Copy address"}
+              className="hover:bg-accent shrink-0 cursor-pointer border-2 border-black p-1 disabled:opacity-40 sm:p-2"
+            >
               <Copy className="h-3 w-3 text-black sm:h-4 sm:w-4" />
             </button>
           </div>
@@ -247,6 +271,8 @@ const ProfileCard = () => {
         <div className="flex w-full items-center gap-2 sm:gap-4">
           <button
             type="button"
+            onClick={shareProfile}
+            title="Share your profile"
             className="group relative flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg border-2 border-[#3A1F0E] bg-black/20 transition-all hover:scale-105 sm:h-10 sm:w-10"
           >
             <Image

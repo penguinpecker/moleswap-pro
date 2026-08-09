@@ -145,7 +145,7 @@ export default function MoleWhack({
   const resetGame = () => {
     setScore(0);
     setXp(0);
-    setGameTime(60);
+    setGameTime(30);
     setGameActive(true);
     setMoles((prev) => prev.map((m) => ({ ...m, visible: false, hit: false })));
   };

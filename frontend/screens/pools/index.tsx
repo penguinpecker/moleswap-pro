@@ -260,9 +260,27 @@ const PoolsContent = () => {
     if (!address) return;
     setPosLoading(true);
     try {
-      const { getUserPositions } = await import("@/lib/chain/amm");
-      const pos = await getUserPositions(address);
-      setPositions(pos);
+      // The only user LP venue on this deployment is the v4 ALM vault (WETH/USDG). Read the real ALM
+      // positions and map them into the shape this tab renders; the enrichment effect below then computes
+      // real token amounts from the pool's slot0. (getUserPositions in amm.ts is a fail-closed stub.)
+      const { getAlmPositions } = await import("@/lib/mole/vault");
+      const alm = await getAlmPositions(address);
+      const wethUsdg = AMM_POOLS[0];
+      const mapped = alm.map((p) => ({
+        tokenId: p.id,
+        token0: wethUsdg.token0,
+        token1: wethUsdg.token1,
+        fee: wethUsdg.fee,
+        liquidity: p.liquidity.toString(),
+        amount0: "0",
+        amount1: "0",
+        tickLower: p.tickLower,
+        tickUpper: p.tickUpper,
+        tokensOwed0: "0",
+        tokensOwed1: "0",
+        isAlm: true,
+      }));
+      setPositions(mapped as any);
     } catch (err) {
       console.error("Failed to load positions:", err);
     } finally {
@@ -770,15 +788,12 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
     if (!address || removing) return;
     setRemoving(pos.tokenId);
     setRemoveModal(null);
-    setTxMsg("Removing liquidity...");
+    setTxMsg("Exiting position...");
     try {
-      const { removeLiquidity } = await import("@/lib/chain/amm");
-      const result = await removeLiquidity({
-        chainClient, tokenId: pos.tokenId, liquidity: pos.liquidity,
-        recipient: address, burnAfter: true,
-        onStep: (_s: any, label: string) => setTxMsg(label),
-      });
-      setTxMsg(result.success ? "Liquidity removed!" : (result.error || "Failed"));
+      // ALM positions exit via the verified-safe withdrawAll(id) — reads liquidity inside the call.
+      const { almWithdraw } = await import("@/lib/mole/vault");
+      const result = await almWithdraw(pos.tokenId);
+      setTxMsg(result.success ? "Position exited!" : (result.error || "Failed"));
       setTimeout(() => { setTxMsg(null); onRefresh(); }, 3000);
     } catch (err: any) {
       setTxMsg(err?.message?.slice(0, 100) || "Failed");
@@ -993,20 +1008,37 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
                 ))}
               </div>
 
-              {/* Action buttons */}
+              {/* Action buttons. ALM positions auto-compound fees (no separate claim), so there is only
+                  a single EXIT action — it returns the full underlying WETH/USDG including earned fees. */}
               <div className="flex flex-col gap-2">
-                <button
-                  onClick={() => setCollectModal(pos)}
-                  disabled={collecting === pos.tokenId}
-                  className="font-family-ThaleahFat bg-peach-500 w-full cursor-pointer rounded-lg px-4 py-2.5 text-lg tracking-wider text-black shadow-[0px_-3px_0px_0px_#C97E00_inset] transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
-                >
-                  {collecting === pos.tokenId ? "COLLECTING..." : "COLLECT FEES"}
-                </button>
-                {hasLiq && (
-                  <button onClick={() => setRemoveModal(pos)} disabled={removing === pos.tokenId}
-                    className="font-family-ThaleahFat w-full cursor-pointer rounded-lg bg-red-600 px-4 py-2.5 text-lg tracking-wider text-white shadow-[0px_-3px_0px_0px_#991B1B_inset] transition-all hover:scale-[1.01] disabled:opacity-50">
-                    {removing === pos.tokenId ? "REMOVING..." : "REMOVE LIQUIDITY"}
-                  </button>
+                {(pos as any).isAlm ? (
+                  <>
+                    <p className="font-family-ThaleahFat text-center text-xs tracking-wider text-gray-400">
+                      Fees auto-compound into this position — exiting returns them with your liquidity.
+                    </p>
+                    {hasLiq && (
+                      <button onClick={() => setRemoveModal(pos)} disabled={removing === pos.tokenId}
+                        className="font-family-ThaleahFat w-full cursor-pointer rounded-lg bg-red-600 px-4 py-2.5 text-lg tracking-wider text-white shadow-[0px_-3px_0px_0px_#991B1B_inset] transition-all hover:scale-[1.01] disabled:opacity-50">
+                        {removing === pos.tokenId ? "EXITING..." : "EXIT POSITION"}
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => setCollectModal(pos)}
+                      disabled={collecting === pos.tokenId}
+                      className="font-family-ThaleahFat bg-peach-500 w-full cursor-pointer rounded-lg px-4 py-2.5 text-lg tracking-wider text-black shadow-[0px_-3px_0px_0px_#C97E00_inset] transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
+                    >
+                      {collecting === pos.tokenId ? "COLLECTING..." : "COLLECT FEES"}
+                    </button>
+                    {hasLiq && (
+                      <button onClick={() => setRemoveModal(pos)} disabled={removing === pos.tokenId}
+                        className="font-family-ThaleahFat w-full cursor-pointer rounded-lg bg-red-600 px-4 py-2.5 text-lg tracking-wider text-white shadow-[0px_-3px_0px_0px_#991B1B_inset] transition-all hover:scale-[1.01] disabled:opacity-50">
+                        {removing === pos.tokenId ? "REMOVING..." : "REMOVE LIQUIDITY"}
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             </div>

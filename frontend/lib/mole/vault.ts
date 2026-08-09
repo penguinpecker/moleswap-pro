@@ -34,6 +34,12 @@ import {
 
 const VAULT = MOLE_ADDRESSES.molePositions;
 const TICK_SPACING = 60;
+// Theoretical v3 full-range bounds. A position is flagged "full range" only if it spans essentially the
+// whole tick space; the vault's maxRangeWidth (60000) means real positions never do, so this is normally
+// false — but it MUST be defined: referencing it undefined threw inside getAlmPositions' per-position
+// try/catch and silently emptied every wallet's position list.
+const FULL_LOWER = -887272;
+const FULL_UPPER = 887272;
 // The vault refuses full-range; positions must sit in [minRangeWidth, maxRangeWidth] (live 120/60000).
 // Half-width of the deposit range in ticks (full width 30000 → comfortably inside the bounds).
 const RANGE_HALF_WIDTH = 15_000;
