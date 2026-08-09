@@ -56,21 +56,26 @@ function toEntry(row: { address: string; symbol: string; name: string; decimals:
 const SELECT_COLS = "address,symbol,name,decimals,logo_url,is_stable,verified,liquidity";
 
 /**
- * Search the token index by symbol / name / address. Verified (liquid) tokens rank first, then by
- * liquidity — so a search for "hoodrat" surfaces the ONE real HOODRAT above the dead duplicates, and
- * "usd" surfaces USDG above junk. Every matching token is still returned so nothing is unfindable.
+ * Name/symbol search over the Robinhood Chain VERIFIED token list — the tokens with real RH pool
+ * liquidity (this chain's equivalent of Uniswap's curated Token List, derived from RH's own pools
+ * because a new chain has no external list to import). Junk/dead tokens are excluded from name search;
+ * they remain reachable by pasting their contract address (a live on-chain import, no index needed).
+ *
+ * `includeUnverified` opens it up to the full index (used only if the caller wants a "show all" mode).
  */
-export async function searchIndex(query: string, limit = 40): Promise<IndexedToken[]> {
+export async function searchIndex(query: string, limit = 40, includeUnverified = false): Promise<IndexedToken[]> {
   const q = query.trim();
   if (q.length < 1) return [];
   try {
     const sb = createClient();
     const esc = q.replace(/[%,()*]/g, " ").trim();
     if (!esc) return [];
-    const { data } = await sb
+    let sel = sb
       .from("mp_tokens")
       .select(SELECT_COLS)
-      .or(`symbol.ilike.%${esc}%,name.ilike.%${esc}%,address.ilike.%${esc}%`)
+      .or(`symbol.ilike.%${esc}%,name.ilike.%${esc}%,address.ilike.%${esc}%`);
+    if (!includeUnverified) sel = sel.eq("verified", true);
+    const { data } = await sel
       .order("verified", { ascending: false })
       .order("liquidity", { ascending: false })
       .limit(limit);

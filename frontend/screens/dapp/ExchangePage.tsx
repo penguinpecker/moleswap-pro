@@ -1186,7 +1186,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                   <span className="font-family-ThaleahFat text-sm tracking-widest text-[#9a9a9a] uppercase">
                     {searchQuery.trim()
                       ? searchingIndex
-                        ? "Searching all tokens…"
+                        ? "Searching tokens…"
                         : `${filteredModalTokens.length} result${filteredModalTokens.length === 1 ? "" : "s"}`
                       : heldList.length > 0
                         ? "Your tokens"
@@ -1288,7 +1288,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                   ) : (
                     <p className="font-family-ThaleahFat text-center text-xl text-gray-400">
                       {importing || searchingIndex
-                        ? "Searching all tokens…"
+                        ? "Searching tokens…"
                         : isAddress(searchQuery.trim())
                           ? "No pool for this token yet"
                           : searchQuery.trim()
