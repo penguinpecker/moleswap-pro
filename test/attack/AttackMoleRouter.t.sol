@@ -37,7 +37,7 @@ contract AttackMoleRouter is Test, Deployers {
     function setUp() public {
         deployFreshManagerAndRouters();
         weth = new MockWETH();
-        router = new MoleRouter(manager, address(weth));
+        router = new MoleRouter(manager, address(weth), address(0), address(0));
         tokenA = new MockERC20("A", "A", 18);
         tokenB = new MockERC20("B", "B", 18);
     }

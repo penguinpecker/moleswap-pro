@@ -34,7 +34,7 @@ contract MoleRouterFork is Test {
 
     function setUp() public {
         if (block.chainid != 4663) vm.skip(true);
-        router = new MoleRouter(POOL_MANAGER, WETH);
+        router = new MoleRouter(POOL_MANAGER, WETH, address(0), address(0));
     }
 
     /* ------------------------------------------------------------------------------------------ helpers */

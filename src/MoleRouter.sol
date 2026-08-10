@@ -49,6 +49,25 @@ import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
 /// token approvals to, immutability is the STRONGER guarantee: an upgradeable approval target is exactly
 /// the standing-approval-turned-malicious risk stated above. So there is no admin, no upgrade path, and
 /// no privileged address. What you audit is what runs, forever.
+///
+/// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+/// THE AGGREGATOR FEE, AND WHY IT DOES NOT WEAKEN ANY OF THE ABOVE.
+///
+/// The fee NUMBER is mutable; everything with POWER is immutable. The router reads `feeBps` from a tiny
+/// external dial (MoleFeeDial) at swap time, so the fee can be tuned with one transaction there — but:
+///
+///   - the router clamps whatever the dial returns at the compiled-in `MAX_FEE_BPS` (1%). A fully
+///     compromised dial key moves a number inside [0, 1%] and can do nothing else;
+///   - the fee DESTINATION (`feeRecipient`) is an immutable here. The dial cannot redirect fees;
+///   - the dial is read with a gas-capped STATICCALL and ANY failure — revert, empty return, gas burn —
+///     resolves to fee = 0. A broken or hostile dial makes swaps free, never stuck;
+///   - `minAmountOut` is enforced on the POST-FEE amount the recipient actually receives, so a fee change
+///     landing between quote and execution cannot push a swap below the floor the user was promised;
+///   - the zero-residual invariant is unchanged: output = recipient's amount + fee, both pushed out in
+///     the same transaction, and the sweep still returns every other increase to the payer.
+///
+/// A plan's `minAmountOut` therefore prices in the fee off-chain (quote × (1 − fee) × (1 − slippage)),
+/// and what `swap` returns — and what `Swapped` reports as `amountOut` — is what the RECIPIENT received.
 contract MoleRouter is IUnlockCallback {
     /// @dev The v4 singleton. The router opens exactly one unlock per swap and does all venue work inside
     ///      it, so a route may freely mix v4 and v3 hops in a single atomic transaction.
@@ -64,6 +83,22 @@ contract MoleRouter is IUnlockCallback {
     ///      field. The hops themselves always name the real WETH address — the sentinel lives only on the
     ///      plan's outer tokenIn/tokenOut.
     address internal constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
+    /// @dev The fee dial — the ONLY mutable input to this contract, and only ever a number. address(0)
+    ///      deploys the router permanently feeless.
+    address public immutable feeDial;
+
+    /// @dev Where the fee goes. IMMUTABLE so a compromised dial key cannot redirect a wei; changing the
+    ///      treasury means deploying a new router, which is the intended cost for that action.
+    address public immutable feeRecipient;
+
+    /// @dev The hard ceiling on the fee, compiled in. The dial is clamped to this no matter what it
+    ///      returns — the trust statement is "the fee can never exceed 1%", enforced by immutable code.
+    uint256 public constant MAX_FEE_BPS = 100;
+    uint256 internal constant BPS_DENOM = 10_000;
+    /// @dev Gas ceiling for the dial staticcall: a plain storage read costs ~2.6k; anything that needs
+    ///      more than this is not a fee dial and resolves to fee = 0.
+    uint256 internal constant FEE_READ_GAS = 20_000;
 
     /// @dev A single hop: swap `tokenIn` for `tokenOut` on one pool. `venue` selects the calling
     ///      convention; the route is built off-chain and every field is untrusted.
@@ -136,18 +171,40 @@ contract MoleRouter is IUnlockCallback {
     error UnexpectedEther();
     error NativeTransferFailed();
 
+    error BadFeeConfig();
+
+    /// @dev `amountOut` is what the RECIPIENT received (post-fee); `fee` is what went to `feeRecipient`,
+    ///      in the output token (WETH for a native-out swap). amountOut + fee = the route's raw output.
     event Swapped(
         address indexed payer,
         address indexed recipient,
         address indexed tokenIn,
         address tokenOut,
         uint256 amountIn,
-        uint256 amountOut
+        uint256 amountOut,
+        uint256 fee
     );
 
-    constructor(IPoolManager _poolManager, address _weth) {
+    constructor(IPoolManager _poolManager, address _weth, address _feeDial, address _feeRecipient) {
         poolManager = _poolManager;
         weth = _weth;
+        // Every plausible fee-config mistake fails the deploy LOUDLY here, because the router is immutable
+        // and none of it is fixable afterwards:
+        if (_feeDial != address(0)) {
+            // A codeless dial (a typo, or the router deployed before the dial) makes the gas-capped
+            // staticcall return empty -> _feeBps silently resolves to 0 forever, so the router runs
+            // permanently feeless with nothing on-chain to reveal the mistake. Require real code.
+            if (_feeDial.code.length == 0) revert BadFeeConfig();
+            // The fee push must land somewhere that accounts for it. address(0) reverts every fee-bearing
+            // swap; the router itself strands the fee and breaks zero-residual; WETH or the PoolManager
+            // would receive a raw, unaccounted mid-unlock transfer that is simply lost. All rejected.
+            if (
+                _feeRecipient == address(0) || _feeRecipient == address(this) || _feeRecipient == _weth
+                    || _feeRecipient == address(_poolManager)
+            ) revert BadFeeConfig();
+        }
+        feeDial = _feeDial;
+        feeRecipient = _feeRecipient;
     }
 
     /// @notice Accept native ETH ONLY while a swap is in flight — which is exactly when WETH sends it back
@@ -167,8 +224,8 @@ contract MoleRouter is IUnlockCallback {
 
     /// @notice Execute `plan`, pulling the input from the caller via a prior ERC-20 approval to this
     ///         router — or, for a native-ETH input (`plan.tokenIn == NATIVE`), from the attached msg.value.
-    ///         Reverts unless the recipient nets at least `plan.minAmountOut`.
-    /// @return amountOut the output token amount delivered to `plan.recipient` (native ETH if
+    ///         Reverts unless the recipient nets at least `plan.minAmountOut` AFTER the aggregator fee.
+    /// @return amountOut the post-fee output delivered to `plan.recipient` (native ETH if
     ///         `plan.tokenOut == NATIVE`).
     function swap(SwapPlan calldata plan) external payable returns (uint256 amountOut) {
         return _swap(plan, msg.sender);
@@ -221,11 +278,14 @@ contract MoleRouter is IUnlockCallback {
         // router's balances BEFORE the input is pulled. v4 deltas are settled hop-by-hop, so an empty
         // (v3-only) route closes the unlock with zero deltas and succeeds.
         bytes memory result = poolManager.unlock(abi.encode(plan, payer));
-        amountOut = abi.decode(result, (uint256));
+        (uint256 userOut, uint256 fee) = abi.decode(result, (uint256, uint256));
+        amountOut = userOut;
 
+        // The promise is on what the RECIPIENT received, post-fee — so a quote that priced in the fee
+        // is honoured exactly, and no fee configuration can quietly eat into the quoted floor.
         if (amountOut < plan.minAmountOut) revert InsufficientOutput(amountOut, plan.minAmountOut);
 
-        emit Swapped(payer, plan.recipient, plan.tokenIn, plan.tokenOut, plan.amountIn, amountOut);
+        emit Swapped(payer, plan.recipient, plan.tokenIn, plan.tokenOut, plan.amountIn, amountOut, fee);
         _unlock();
     }
 
@@ -241,7 +301,8 @@ contract MoleRouter is IUnlockCallback {
         if (_lockValue() == 0) revert UnexpectedCallback();
 
         (SwapPlan memory plan, address payer) = abi.decode(data, (SwapPlan, address));
-        return abi.encode(_execute(plan, payer));
+        (uint256 userOut, uint256 fee) = _execute(plan, payer);
+        return abi.encode(userOut, fee);
     }
 
     /// @dev The whole swap, run inside the unlock. Split into `_acquireInput` / `_deliverOutput` / `_sweep`
@@ -250,7 +311,7 @@ contract MoleRouter is IUnlockCallback {
     ///      any later edit would tip it over. Keeping each frame small keeps the contract compilable as it
     ///      grows. `effIn`/`effOut` (the real ERC-20 behind a possible NATIVE sentinel) are the only
     ///      cross-cutting locals kept here; native-ness is re-derived cheaply inside the sub-calls.
-    function _execute(SwapPlan memory plan, address payer) internal returns (uint256 totalOut) {
+    function _execute(SwapPlan memory plan, address payer) internal returns (uint256 userOut, uint256 fee) {
         address effIn = plan.tokenIn == NATIVE ? weth : plan.tokenIn;
         address effOut = plan.tokenOut == NATIVE ? weth : plan.tokenOut;
 
@@ -267,11 +328,12 @@ contract MoleRouter is IUnlockCallback {
 
         _acquireInput(plan, payer, effIn);
 
+        uint256 totalOut;
         for (uint256 i = 0; i < plan.paths.length; ++i) {
             totalOut += _runPath(plan.paths[i], effIn, effOut);
         }
 
-        _deliverOutput(plan, effOut, totalOut);
+        (userOut, fee) = _deliverOutput(plan, effOut, totalOut);
 
         _sweep(tokens, startBal, payer, plan.tokenIn == NATIVE || plan.tokenOut == NATIVE);
     }
@@ -284,16 +346,44 @@ contract MoleRouter is IUnlockCallback {
     }
 
     /// @dev Deliver the tracked output — the per-hop total, NOT balanceOf, so an airdropped output token
-    ///      cannot inflate what we claim to have produced (it is swept instead). Native out: unwrap and
-    ///      forward the ETH; ERC-20 out: transfer directly.
-    function _deliverOutput(SwapPlan memory plan, address effOut, uint256 totalOut) internal {
-        if (totalOut == 0) return;
+    ///      cannot inflate what we claim to have produced (it is swept instead). The aggregator fee is
+    ///      skimmed here, from the OUTPUT, before delivery: the recipient gets totalOut − fee, and the fee
+    ///      goes to the immutable feeRecipient as the output ERC-20 — deliberately WETH (not unwrapped
+    ///      native) on a native-out swap, so the treasury handles one asset shape and the user's portion
+    ///      is the only thing unwrapped. Native out: unwrap and forward; ERC-20 out: transfer directly.
+    function _deliverOutput(SwapPlan memory plan, address effOut, uint256 totalOut)
+        internal
+        returns (uint256 userOut, uint256 fee)
+    {
+        if (totalOut == 0) return (0, 0);
+        uint256 rawFee = (totalOut * _feeBps()) / BPS_DENOM;
+        // The fee push FAILS OPEN, exactly like the dial read: if the output token refuses to pay the
+        // treasury (e.g. an issuer dynamically blacklists it — the one recipient failure a deploy-time
+        // guard cannot catch), the fee is FORGONE for this swap and folded back to the user, rather than
+        // reverting the whole swap. So "a fee misconfiguration can never block a swap" holds for the
+        // recipient leg too, and zero-residual is preserved: the fee goes to the treasury OR to the user,
+        // never stranded here.
+        fee = (rawFee != 0 && _tryPush(effOut, feeRecipient, rawFee)) ? rawFee : 0;
+        userOut = totalOut - fee;
+        if (userOut == 0) return (userOut, fee);
         if (plan.tokenOut == NATIVE) {
-            IWETH(weth).withdraw(totalOut);
-            _sendNative(plan.recipient, totalOut);
+            IWETH(weth).withdraw(userOut);
+            _sendNative(plan.recipient, userOut);
         } else {
-            _push(effOut, plan.recipient, totalOut);
+            _push(effOut, plan.recipient, userOut);
         }
+    }
+
+    /// @dev Read the fee from the dial, failing CLOSED TO ZERO: no dial, a reverting dial, a gas-burning
+    ///      dial, or a malformed return all mean "no fee" — a fee misconfiguration must never be able to
+    ///      block swaps. The clamp to MAX_FEE_BPS is the immutable half of the fee's trust story.
+    function _feeBps() internal view returns (uint256 bps) {
+        address dial = feeDial;
+        if (dial == address(0)) return 0;
+        (bool ok, bytes memory ret) = dial.staticcall{gas: FEE_READ_GAS}(abi.encodeWithSignature("feeBps()"));
+        if (!ok || ret.length < 32) return 0;
+        bps = abi.decode(ret, (uint256));
+        if (bps > MAX_FEE_BPS) bps = MAX_FEE_BPS;
     }
 
     /// @dev Restore every touched token to its pre-swap balance by returning the increase to the payer.
@@ -483,6 +573,15 @@ contract MoleRouter is IUnlockCallback {
         (bool ok, bytes memory ret) =
             token.call(abi.encodeWithSelector(IERC20Minimal.transfer.selector, to, amount));
         if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
+    }
+
+    /// @dev Non-reverting transfer, used ONLY for the aggregator-fee leg so a recipient the output token
+    ///      refuses to pay forgoes the fee instead of blocking the swap. Returns whether it succeeded; the
+    ///      caller folds a failed fee back into the user's output, so no value is ever stranded.
+    function _tryPush(address token, address to, uint256 amount) internal returns (bool) {
+        (bool ok, bytes memory ret) =
+            token.call(abi.encodeWithSelector(IERC20Minimal.transfer.selector, to, amount));
+        return ok && (ret.length == 0 || abi.decode(ret, (bool)));
     }
 
     function _balance(address token) internal view returns (uint256) {
