@@ -10,6 +10,7 @@ import { WETH, USDG } from "@/lib/mole/chain";
 import {
   getAlmPositions,
   getVaultBalances,
+  getPoolState,
   almDeposit,
   almDepositNative,
   almWithdraw,
@@ -32,40 +33,54 @@ function trimAmount(raw: string, maxFrac: number): string {
   return cut ? `${whole}.${cut}` : whole;
 }
 
-/** A pixel-art distribution bar (mirrors the pools LIQUIDITY DISTRIBUTION graph), with the vault's
- *  bounded ±15k-tick band highlighted around the current price. Purely illustrative of the strategy. */
-function StrategyBand() {
-  const bars = 27;
-  const center = Math.floor(bars / 2);
+/** USDG per WETH from a v4 tick (currency1/currency0, adjusted for 18/6 decimals). */
+function priceFromTick(tick: number): number {
+  return Math.pow(1.0001, tick) * 1e12;
+}
+
+/**
+ * REAL range chart: the live pool's current tick against the vault's actual operating band. If the wallet
+ * holds positions, the band is their real [tickLower, tickUpper]; otherwise it's the ±15k band the next
+ * deposit would open around spot. Every number here is read on-chain — no synthetic bars.
+ */
+function StrategyBand({ tick, positions }: { tick: number | null; positions: AlmPosition[] }) {
+  if (tick === null) {
+    return (
+      <div className="relative rounded px-3 py-4 text-center">
+        <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
+        <span className="font-family-ThaleahFat text-sm tracking-wider text-gray-400">Reading live pool state…</span>
+      </div>
+    );
+  }
+  const hasPos = positions.length > 0;
+  const lo = hasPos ? Math.min(...positions.map((p) => p.tickLower)) : tick - 15000;
+  const hi = hasPos ? Math.max(...positions.map((p) => p.tickUpper)) : tick + 15000;
+  const span = Math.max(1, hi - lo);
+  const clamp = (x: number) => Math.max(0, Math.min(100, x));
+  const markerPct = clamp(((tick - lo) / span) * 100);
+  const inRange = tick >= lo && tick <= hi;
+
   return (
     <div className="relative rounded px-3 py-3">
       <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
       <div className="mb-2 flex items-center justify-between">
-        <span className="font-family-ThaleahFat text-base tracking-wider text-gray-200">LIQUIDITY STRATEGY</span>
-        <span className="font-family-ThaleahFat text-sm text-[#6DBB3E]">● AUTO-RANGED ±15K TICKS</span>
+        <span className="font-family-ThaleahFat text-base tracking-wider text-gray-200">
+          {hasPos ? "YOUR RANGE" : "STRATEGY BAND"}
+        </span>
+        <span className={`font-family-ThaleahFat text-sm ${inRange ? "text-[#6DBB3E]" : "text-yellow-300"}`}>
+          {inRange ? "● IN RANGE — EARNING" : "◆ OUT OF RANGE"}
+        </span>
       </div>
-      <div className="flex h-16 items-end gap-[3px]">
-        {Array.from({ length: bars }).map((_, i) => {
-          const dist = Math.abs(i - center);
-          const h = Math.max(14, 100 - dist * dist * 1.1);
-          const inBand = dist <= 8;
-          const isCenter = i === center;
-          return (
-            <div
-              key={i}
-              className="flex-1 rounded-t-sm"
-              style={{
-                height: `${h}%`,
-                background: isCenter ? "#F4D03F" : inBand ? "#6DBB3E" : "#3f6b26",
-                opacity: inBand ? 1 : 0.55,
-              }}
-            />
-          );
-        })}
+      {/* Real range track with the live-price marker */}
+      <div className="relative h-10 w-full overflow-hidden rounded bg-black/30">
+        <div className="absolute inset-y-0 rounded bg-[#3f6b26]/50" style={{ left: "6%", right: "6%" }} />
+        <div className="absolute inset-y-1 rounded bg-[#6DBB3E]/60" style={{ left: "6%", right: "6%" }} />
+        <div className="absolute inset-y-0 w-[3px] bg-[#F4D03F]" style={{ left: `calc(6% + ${markerPct * 0.88}%)` }} />
       </div>
-      <div className="mt-1 flex justify-between">
-        <span className="font-family-ThaleahFat text-sm text-gray-400">↓ RE-CENTERS ON DRIFT</span>
-        <span className="font-family-ThaleahFat text-sm text-gray-400">FEES AUTO-COMPOUND ↑</span>
+      <div className="mt-1 flex justify-between text-xs">
+        <span className="font-family-ThaleahFat text-gray-400">${priceFromTick(lo).toFixed(0)}</span>
+        <span className="font-family-ThaleahFat text-yellow-200">SPOT ${priceFromTick(tick).toFixed(2)}/WETH · tick {tick}</span>
+        <span className="font-family-ThaleahFat text-gray-400">${priceFromTick(hi).toFixed(0)}</span>
       </div>
     </div>
   );
@@ -77,6 +92,7 @@ export default function VaultPage() {
   const [amount, setAmount] = useState("");
   const [positions, setPositions] = useState<AlmPosition[]>([]);
   const [balances, setBalances] = useState<VaultBalances>(ZERO_BAL);
+  const [poolTick, setPoolTick] = useState<number | null>(null);
   const [loadingPos, setLoadingPos] = useState(false);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -109,6 +125,15 @@ export default function VaultPage() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Live pool tick for the range chart — refreshed on a 15s poll so the marker tracks the real price.
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => getPoolState().then((s) => { if (!cancelled && s) setPoolTick(s.tick); });
+    load();
+    const t = setInterval(load, 15000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
 
   const amountWei = useMemo(() => {
     try {
@@ -217,7 +242,7 @@ export default function VaultPage() {
           {statBox("STATUS", "LIVE", "text-[#6DBB3E]")}
         </div>
 
-        <StrategyBand />
+        <StrategyBand tick={poolTick} positions={positions} />
 
         {/* Deposit card — styled like the pools ADD LIQUIDITY modal */}
         <div className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">

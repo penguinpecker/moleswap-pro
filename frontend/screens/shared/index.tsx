@@ -19,10 +19,26 @@ export const NavBar = () => {
     }`;
 
   const toggleMenu = () => setIsOpen(!isOpen);
+
+  // DEX destinations on the left, game/profile on the right.
+  const LEFT = [
+    { href: "/dapp", label: "SWAP" },
+    { href: "/pools", label: "POOLS" },
+    { href: "/vault", label: "VAULT" },
+    { href: "/dca", label: "DCA" },
+    { href: "/limit", label: "LIMIT" },
+  ];
+  const RIGHT = [
+    { href: "/quests", label: "QUESTS" },
+    { href: "/profile", label: "PROFILE" },
+    { href: "/leaderboard", label: "RANKS" },
+  ];
+  const ALL = [...LEFT, ...RIGHT, { href: "/queue", label: "QUEUE" }];
+
   return (
     <div className="relative flex w-full items-center justify-center">
       {/* Brown pixel bar */}
-      <div className="bg-ground font-family-ThaleahFat relative flex w-full items-center justify-center rounded-lg border-3 border-[#523525] px-4 py-2 text-base font-medium tracking-wider text-white shadow-[0px_-6px_0px_0px_#523525_inset,0px_7.5px_0px_0px_rgba(255,255,255,0.6)_inset] sm:text-lg md:px-12 lg:max-w-5xl lg:justify-between lg:py-3 lg:text-2xl">
+      <div className="bg-ground font-family-ThaleahFat relative flex w-full items-center justify-center rounded-lg border-3 border-[#523525] px-4 py-2 text-base font-medium tracking-wider text-white shadow-[0px_-6px_0px_0px_#523525_inset,0px_7.5px_0px_0px_rgba(255,255,255,0.6)_inset] sm:text-lg md:px-6 lg:max-w-6xl lg:justify-between lg:py-3 lg:text-lg xl:text-xl">
         {/* Mobile: logo left, hamburger right */}
         <div className="flex w-full items-center justify-between lg:hidden">
           <Image
@@ -43,85 +59,46 @@ export const NavBar = () => {
 
         {/* Desktop Menu - Hidden on mobile */}
         <div className="hidden w-full items-center justify-between lg:flex">
-          {/* Left menu */}
-          <div className="flex gap-4 lg:gap-8 xl:gap-12">
-            <Link href="/dapp" className={linkClass("/dapp")}>
-              DAPP
-            </Link>
-            <Link href="/quests" className={linkClass("/quests")}>
-              QUESTS
-            </Link>
-            <Link href="/pools" className={linkClass("/pools")}>
-              POOLS
-            </Link>
+          <div className="flex gap-3 lg:gap-5 xl:gap-7">
+            {LEFT.map((l) => (
+              <Link key={l.href} href={l.href} className={linkClass(l.href)}>
+                {l.label}
+              </Link>
+            ))}
           </div>
 
-          {/* Center logo */}
-          <Link href="/" className="-my-4 mx-2 shrink-0 lg:mx-4">
-            <Image
-              src="/moleswap-logo.png"
-              alt="MoleSwap"
-              width={64}
-              height={64}
-              className="h-16 w-16 rounded-full object-cover"
-            />
+          <Link href="/" className="-my-4 mx-2 shrink-0 lg:mx-3">
+            <Image src="/moleswap-logo.png" alt="MoleSwap" width={64} height={64} className="h-14 w-14 rounded-full object-cover" />
           </Link>
 
-          {/* Right menu */}
-          <div className="flex gap-4 lg:gap-8 xl:gap-12">
-            <Link href="/profile" className={linkClass("/profile")}>
-              PROFILE
-            </Link>
-            <Link href="/leaderboard" className={linkClass("/leaderboard")}>
-              LEADERBOARD
-            </Link>
+          <div className="flex gap-3 lg:gap-5 xl:gap-7">
+            {RIGHT.map((l) => (
+              <Link key={l.href} href={l.href} className={linkClass(l.href)}>
+                {l.label}
+              </Link>
+            ))}
           </div>
         </div>
       </div>
 
       {/* Mobile Dropdown Menu */}
       <div
-        className={`border-background bg-ground absolute top-full right-2 left-2 mt-2 overflow-hidden rounded-lg border-3 shadow-[4px_4px_0_#000] transition-all duration-300 ease-in-out lg:hidden ${isOpen
-          ? "max-h-96 opacity-100"
+        className={`border-background bg-ground absolute top-full right-2 left-2 z-[600] mt-2 overflow-y-auto rounded-lg border-3 shadow-[4px_4px_0_#000] transition-all duration-300 ease-in-out lg:hidden ${isOpen
+          ? "max-h-[70vh] opacity-100"
           : "pointer-events-none max-h-0 opacity-0"
           }`}
       >
-        <div className="font-family-ThaleahFat relative !z-[500] flex flex-col gap-1 p-4 text-white">
-          <Link
-            href="/dapp"
-            className={`${linkClass("/dapp")} rounded-lg px-3 py-2 text-center text-lg sm:text-2xl transition-all hover:bg-[#523525]`}
-            onClick={() => setIsOpen(false)}
-          >
-            DAPP
-          </Link>
-          <Link
-            href="/quests"
-            className={`${linkClass("/quests")} rounded-lg px-3 py-2 text-center text-lg sm:text-2xl transition-all hover:bg-[#523525]`}
-            onClick={() => setIsOpen(false)}
-          >
-            QUESTS
-          </Link>
-          <Link
-            href="/pools"
-            className={`${linkClass("/pools")} rounded-lg px-3 py-2 text-center text-lg sm:text-2xl transition-all hover:bg-[#523525]`}
-            onClick={() => setIsOpen(false)}
-          >
-            POOLS
-          </Link>
-          <Link
-            href="/profile"
-            className={`${linkClass("/profile")} rounded-lg px-3 py-2 text-center text-lg sm:text-2xl transition-all hover:bg-[#523525]`}
-            onClick={() => setIsOpen(false)}
-          >
-            PROFILE
-          </Link>
-          <Link
-            href="/leaderboard"
-            className={`${linkClass("/leaderboard")} rounded-lg px-3 py-2 text-center text-lg sm:text-2xl transition-all hover:bg-[#523525]`}
-            onClick={() => setIsOpen(false)}
-          >
-            LEADERBOARD
-          </Link>
+        <div className="font-family-ThaleahFat relative !z-[500] grid grid-cols-2 gap-1 p-4 text-white">
+          {ALL.map((l) => (
+            <Link
+              key={l.href}
+              href={l.href}
+              className={`${linkClass(l.href)} rounded-lg px-3 py-2 text-center text-lg transition-all hover:bg-[#523525]`}
+              onClick={() => setIsOpen(false)}
+            >
+              {l.label}
+            </Link>
+          ))}
         </div>
       </div>
     </div>

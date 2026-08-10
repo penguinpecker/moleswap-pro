@@ -193,6 +193,19 @@ async function buildZap(pub: ReturnType<typeof almPublicClient>, token: Address,
   };
 }
 
+/** Live pool state for the strategy chart: current tick + sqrtPrice, read from the v4 StateView. */
+export async function getPoolState(): Promise<{ tick: number; sqrtPriceX96: bigint } | null> {
+  try {
+    const pub = almPublicClient();
+    const slot0 = (await pub.readContract({
+      address: STATE_VIEW, abi: stateViewAbi, functionName: "getSlot0", args: [LIVE_POOL_ID as `0x${string}`],
+    })) as readonly [bigint, number, number, number];
+    return { sqrtPriceX96: slot0[0], tick: Number(slot0[1]) };
+  } catch {
+    return null;
+  }
+}
+
 export interface DepositResult { success: boolean; txHash?: string; error?: string; positionId?: string }
 
 const wethAbi = [
