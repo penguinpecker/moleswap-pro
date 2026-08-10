@@ -1,11 +1,13 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowLeft, Fuel } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, ArrowLeft, Fuel, RefreshCw } from "lucide-react";
+import { formatUnits, parseUnits } from "viem";
 import { DappStep } from ".";
 import Image from "next/image";
 import { getWalletClient } from "@/lib/wallet/walletClient";
 import type { TokenEntry, ChainEntry } from "@/lib/chain/tokenList";
 import { useWallet } from "@/lib/chain/provider";
+import { getSwapQuote } from "@/lib/chain/amm";
 import { diagnostics } from "@/lib/diagnostics";
 
 // Extract tx hash from a wallet/client response (may be an object)
@@ -85,6 +87,61 @@ export const SwapPage = ({
   }, [swapData.fromToken]);
 
   const [swapSteps, setSwapSteps] = useState<Array<{ label: string; status: "pending" | "signing" | "confirmed" | "error" }>>(initialSwapSteps);
+
+  // Keep the review quote LIVE. The card carries a snapshot from the exchange screen; here we re-quote
+  // every REQUOTE_MS and count down to the next refresh, so the number can never go stale under the user
+  // (and executeSwap re-quotes once more at signing time, so what they sign is always fresh).
+  const REQUOTE_MS = 8000;
+  const [liveOut, setLiveOut] = useState<string | null>(null);
+  const [secsToRefresh, setSecsToRefresh] = useState(REQUOTE_MS / 1000);
+  const requoteBusy = useRef(false);
+
+  useEffect(() => {
+    if (isExecuting || isCompleted) return; // freeze the quote once the swap is in flight
+    const decIn = swapData.fromTokenMeta?.decimals ?? 18;
+    const decOut = swapData.toTokenMeta?.decimals ?? 18;
+    let amountInWei: bigint;
+    try {
+      amountInWei = parseUnits(String(swapData.amount || "0"), decIn);
+    } catch {
+      return;
+    }
+    if (amountInWei <= 0n || !swapData.toToken) return;
+
+    let cancelled = false;
+    const requote = async () => {
+      if (requoteBusy.current) return;
+      requoteBusy.current = true;
+      try {
+        const q = await getSwapQuote({
+          tokenIn: swapData.fromToken || "",
+          tokenOut: swapData.toToken,
+          amountIn: amountInWei.toString(),
+        });
+        if (!cancelled && q?.amountOut) {
+          const human = Number(formatUnits(BigInt(q.amountOut), decOut));
+          setLiveOut(human.toLocaleString(undefined, { maximumFractionDigits: decOut > 6 ? 6 : 4 }));
+          setSecsToRefresh(REQUOTE_MS / 1000);
+        }
+      } catch {
+        /* keep the last good number */
+      } finally {
+        requoteBusy.current = false;
+      }
+    };
+
+    requote();
+    const poll = setInterval(requote, REQUOTE_MS);
+    const tick = setInterval(() => setSecsToRefresh((s) => (s > 0 ? s - 1 : 0)), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+      clearInterval(tick);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [swapData.fromToken, swapData.toToken, swapData.amount, isExecuting, isCompleted]);
+
+  const displayOut = liveOut ?? swapData.expectedOut ?? "0";
 
   // Compute input amount in wei for exact-amount approval when needed
   const amountWei = useMemo(() => {
@@ -578,7 +635,7 @@ export const SwapPage = ({
                 </div>
                 <div>
                   <div className="font-family-ThaleahFat text-3xl text-zinc-100">
-                    {swapData.expectedOut || "0"}
+                    {displayOut}
                   </div>
                   {/* The asset lands on Robinhood Chain, at the caller or the
                       custom recipient. */}
@@ -586,6 +643,13 @@ export const SwapPage = ({
                     {swapData.feesLabel || ""} •{" "}
                     {(swapData.toTokenMeta as any)?.symbol || displaySymbolOf(swapData.toTokenMeta, swapData.toToken)} on Robinhood Chain
                   </div>
+                  {/* Live-quote freshness + expiry countdown — the number above re-quotes automatically. */}
+                  {!isExecuting && !isCompleted && (
+                    <div className="mt-1 flex items-center gap-1 text-xs font-semibold text-[#6DBB3E]">
+                      <RefreshCw className="h-3 w-3 animate-spin" style={{ animationDuration: "3s" }} />
+                      LIVE · quote refreshes in {secsToRefresh}s
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

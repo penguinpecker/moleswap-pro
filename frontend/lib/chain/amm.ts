@@ -190,7 +190,12 @@ export async function getSwapQuote(params: {
 
     return {
       amountIn: params.amountIn,
-      amountOut: q.quote.amountOut.toString(),
+      // amountOut is the NET (post-fee) output — what the recipient receives — so a re-quote on the review
+      // screen matches the on-chain result. gross/fee kept for a breakdown if needed.
+      amountOut: q.quote.netAmountOut.toString(),
+      grossAmountOut: q.quote.amountOut.toString(),
+      minAmountOut: q.quote.minAmountOut.toString(),
+      feeBps: q.quote.feeBps,
       tokenIn: tokenMetaFor(params.tokenIn),
       tokenOut: tokenMetaFor(params.tokenOut),
       fee: params.fee || pool?.fee || 500,

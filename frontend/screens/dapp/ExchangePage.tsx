@@ -727,18 +727,55 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     }
   };
 
-  // Token logos: the TOKEN's own logo, else a deterministic per-token identicon.
+  // Token logos: DexScreener (best long-tail source) → the token's own registry logo → identicon.
   // Never the chain icon — that made every unknown token render as ETH.
   const fromLogo = useMemo(
-    () => fromTokenMeta?.logoURI || tokenFallbackIcon(fromToken, displaySymbolOf(fromTokenMeta)),
+    () =>
+      marketInfo.get((fromToken || "").toLowerCase())?.logo ||
+      fromTokenMeta?.logoURI ||
+      tokenFallbackIcon(fromToken, displaySymbolOf(fromTokenMeta)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fromTokenMeta?.logoURI, fromToken, fromTokenMeta?.symbol],
+    [marketInfo, fromTokenMeta?.logoURI, fromToken, fromTokenMeta?.symbol],
   );
   const toLogo = useMemo(
-    () => toTokenMeta?.logoURI || tokenFallbackIcon(toToken, displaySymbolOf(toTokenMeta)),
+    () =>
+      marketInfo.get((toToken || "").toLowerCase())?.logo ||
+      toTokenMeta?.logoURI ||
+      tokenFallbackIcon(toToken, displaySymbolOf(toTokenMeta)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toTokenMeta?.logoURI, toToken, toTokenMeta?.symbol],
+    [marketInfo, toTokenMeta?.logoURI, toToken, toTokenMeta?.symbol],
   );
+
+  // Fetch DexScreener market data (incl. the real logo) for the SELECTED from/to tokens, so the quote
+  // card, the SEND panel and the review screen show real logos — not just the picker rows. Also patches
+  // importedTokens' logoURI so the review screen (which reads the token meta) inherits it.
+  useEffect(() => {
+    const addrs = [fromToken, toToken]
+      .map((a) => (a || "").toLowerCase())
+      .filter((a) => a && a !== "0x0000000000000000000000000000000000000000" && a !== "eth" && a !== "native");
+    if (addrs.length === 0) return;
+    let cancelled = false;
+    fetchTokenInfo(addrs).then((m) => {
+      if (cancelled || m.size === 0) return;
+      setMarketInfo((prev) => {
+        const next = new Map(prev);
+        for (const [k, v] of m) next.set(k, v);
+        return next;
+      });
+      setImportedTokens((prev) =>
+        prev.map((t) => {
+          const info = m.get((t.address || "").toLowerCase());
+          // Only upgrade an identicon/placeholder logo, never a curated one.
+          const isPlaceholder = !t.logoURI || t.logoURI.startsWith("data:");
+          return info?.logo && isPlaceholder ? { ...t, logoURI: info.logo } : t;
+        }),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromToken, toToken]);
 
   const handleConnectWallet = async () => {
     try {
@@ -815,8 +852,10 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       amount: amount || "0",
       expectedOut: expectedOut || "0",
       minReceived: minReceived || "0",
-      fromTokenMeta,
-      toTokenMeta,
+      // Carry the RESOLVED logos (DexScreener-preferred) onto the metas so the review + tx screens show
+      // real token logos, not the identicon fallback.
+      fromTokenMeta: fromTokenMeta ? { ...fromTokenMeta, logoURI: fromLogo } : fromTokenMeta,
+      toTokenMeta: toTokenMeta ? { ...toTokenMeta, logoURI: toLogo } : toTokenMeta,
       fromChain,
       toChain,
       // Structured route rows (with per-hop token logos) for a clean depiction downstream.

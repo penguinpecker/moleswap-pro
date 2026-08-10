@@ -11,6 +11,7 @@ import { robinhoodChain, ROBINHOOD_RPC_URL } from "@/lib/mole/chain";
 import { createClient } from "@/lib/supabase/client";
 import { tokenFallbackIcon } from "@/lib/chain/tokenList";
 import { getTokenByAddress } from "@/lib/chain/contracts";
+import { fetchTokenInfo } from "@/lib/chain/tokenInfo";
 
 export interface IndexedToken {
   address: string;
@@ -175,6 +176,12 @@ export async function resolveTokenMetas(addresses: string[]): Promise<Map<string
     for (const r of (data as any[]) || []) byAddr.set(r.address.toLowerCase(), r);
   } catch { /* index unavailable — fall through to on-chain */ }
 
+  // DexScreener is the best logo source for long-tail RH tokens (it indexes chainId "robinhood").
+  let dex = new Map<string, { logo?: string }>();
+  try {
+    dex = (await fetchTokenInfo(need)) as any;
+  } catch { /* logos fall back to the identicon */ }
+
   const c = client();
   for (const a of need) {
     let r = byAddr.get(a);
@@ -194,7 +201,7 @@ export async function resolveTokenMetas(addresses: string[]): Promise<Map<string
       symbol: r.symbol || `${a.slice(0, 6)}…${a.slice(-4)}`,
       name: r.name || r.symbol || a,
       decimals: Number(r.decimals ?? 18),
-      logoURI: r.logo_url || tokenFallbackIcon(a, r.symbol),
+      logoURI: dex.get(a)?.logo || r.logo_url || tokenFallbackIcon(a, r.symbol),
     };
     _metaCache.set(a, m);
     out.set(a, m);
