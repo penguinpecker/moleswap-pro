@@ -1,0 +1,10 @@
+{
+  "name": "moleswap-keeper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MoleOrders keeper — triggers due/priced DCA + limit orders through MoleRouter. Non-custodial: it can only trigger orders whose output goes to the owner; it can never move funds elsewhere.",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node src/index.mjs" },
+  "dependencies": { "viem": "^2.31.7" }
+}
