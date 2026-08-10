@@ -16,7 +16,7 @@ import { createPublicClient, http, isAddress, parseUnits, formatUnits, parseEthe
 import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { createClient as createSupabaseBrowser } from "@/lib/supabase/client";
 import { tokenHasPool } from "@/lib/aggregator/discover";
-import { searchIndex, heldTokens, popularTokens, type IndexedToken, type HeldToken } from "@/lib/chain/tokenSearch";
+import { searchIndex, heldTokens, popularTokens, resolveTokenMetas, type IndexedToken, type HeldToken } from "@/lib/chain/tokenSearch";
 import { fetchTokenInfo, fmtUsd, shortAddr, type TokenMarketInfo } from "@/lib/chain/tokenInfo";
 import Settings from "../settings";
 import { diagnostics } from "@/lib/diagnostics";
@@ -207,21 +207,41 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         if (!user?.id) return;
         const history = await getUserSwapHistory(user.id, 50);
         if (!history || history.length === 0) return;
-        const mapped = history.map((s: any) => {
-          const fromInfo = getTokenByAddress(s.from_token);
-          const toInfo = getTokenByAddress(s.to_token);
-          return {
-            id: s.id,
-            fromSymbol: fromInfo?.symbol || s.from_token?.slice(0, 8) || "?",
-            toSymbol: toInfo?.symbol || s.to_token?.slice(0, 8) || "?",
-            fromAmount: s.from_amount || "0",
-            toAmount: s.to_amount || "0",
-            txHash: s.tx_hash || "",
-            timestamp: s.created_at,
-            fromLogo: fromInfo?.logoURI || tokenFallbackIcon(s.from_token, fromInfo?.symbol),
-            toLogo: toInfo?.logoURI || tokenFallbackIcon(s.to_token, toInfo?.symbol),
-          };
-        });
+
+        // Resolve real token names for every address in the history (registry -> mp_tokens index ->
+        // on-chain), so rows show HOODRAT/SUSHICAT etc. instead of a truncated address. NATIVE = ETH.
+        const NATIVE_LC = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        const addrs = Array.from(
+          new Set(
+            history
+              .flatMap((s: any) => [s.from_token, s.to_token])
+              .map((a: string) => (a || "").toLowerCase())
+              .filter((a: string) => a && a !== NATIVE_LC),
+          ),
+        );
+        const metas = await resolveTokenMetas(addrs);
+        const symOf = (a: string) => {
+          const lc = (a || "").toLowerCase();
+          if (!lc || lc === NATIVE_LC) return "ETH";
+          return metas.get(lc)?.symbol || getTokenByAddress(lc)?.symbol || `${lc.slice(0, 6)}…${lc.slice(-4)}`;
+        };
+        const logoOf = (a: string) => {
+          const lc = (a || "").toLowerCase();
+          const m = metas.get(lc) || (getTokenByAddress(lc) as any);
+          return m?.logoURI || tokenFallbackIcon(a, m?.symbol);
+        };
+
+        const mapped = history.map((s: any) => ({
+          id: s.id,
+          fromSymbol: symOf(s.from_token),
+          toSymbol: symOf(s.to_token),
+          fromAmount: s.from_amount || "0",
+          toAmount: s.to_amount || "0",
+          txHash: s.tx_hash || "",
+          timestamp: s.created_at,
+          fromLogo: logoOf(s.from_token),
+          toLogo: logoOf(s.to_token),
+        }));
         setSwapHistory(mapped);
       } catch (e) {
         console.warn("[MoleSwap] Failed to load swap history from DB:", e);

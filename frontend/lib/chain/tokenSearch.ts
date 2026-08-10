@@ -134,6 +134,74 @@ function humanize(raw: bigint, decimals: number): string {
 const symbolAbi = [{ type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] }] as const;
 const decimalsAbi = [{ type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] }] as const;
 
+export interface ResolvedTokenMeta {
+  address: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  logoURI: string;
+}
+
+const _metaCache = new Map<string, ResolvedTokenMeta>();
+
+/**
+ * Resolve display metadata (symbol/name/decimals/logo) for an arbitrary set of token addresses — the
+ * pinned registry first (WETH/USDG), then the mp_tokens index in one query, then a per-token on-chain
+ * read for anything still unknown. Cached per address. Used to show real token NAMES (not raw addresses)
+ * in places like swap history, where the token may be any of the ~258k on chain.
+ */
+export async function resolveTokenMetas(addresses: string[]): Promise<Map<string, ResolvedTokenMeta>> {
+  const out = new Map<string, ResolvedTokenMeta>();
+  const need: string[] = [];
+  for (const a0 of addresses) {
+    const a = (a0 || "").toLowerCase();
+    if (!a || !/^0x[0-9a-f]{40}$/.test(a)) continue;
+    if (out.has(a)) continue;
+    const cached = _metaCache.get(a);
+    if (cached) { out.set(a, cached); continue; }
+    const reg = getTokenByAddress(a);
+    if (reg) {
+      const m = { address: a, symbol: reg.symbol, name: reg.name || reg.symbol, decimals: reg.decimals, logoURI: reg.logoURI || tokenFallbackIcon(a, reg.symbol) };
+      _metaCache.set(a, m); out.set(a, m); continue;
+    }
+    need.push(a);
+  }
+  if (need.length === 0) return out;
+
+  const byAddr = new Map<string, any>();
+  try {
+    const sb = createClient();
+    const { data } = await sb.from("mp_tokens").select("address,symbol,name,decimals,logo_url").in("address", need);
+    for (const r of (data as any[]) || []) byAddr.set(r.address.toLowerCase(), r);
+  } catch { /* index unavailable — fall through to on-chain */ }
+
+  const c = client();
+  for (const a of need) {
+    let r = byAddr.get(a);
+    if (!r) {
+      try {
+        const [sym, dec] = await Promise.all([
+          c.readContract({ address: a as Address, abi: symbolAbi, functionName: "symbol" }).catch(() => null),
+          c.readContract({ address: a as Address, abi: decimalsAbi, functionName: "decimals" }).catch(() => 18),
+        ]);
+        r = { address: a, symbol: sym ? String(sym) : `${a.slice(0, 6)}…${a.slice(-4)}`, name: sym ? String(sym) : a, decimals: Number(dec) };
+      } catch {
+        r = { address: a, symbol: `${a.slice(0, 6)}…${a.slice(-4)}`, name: a, decimals: 18 };
+      }
+    }
+    const m: ResolvedTokenMeta = {
+      address: a,
+      symbol: r.symbol || `${a.slice(0, 6)}…${a.slice(-4)}`,
+      name: r.name || r.symbol || a,
+      decimals: Number(r.decimals ?? 18),
+      logoURI: r.logo_url || tokenFallbackIcon(a, r.symbol),
+    };
+    _metaCache.set(a, m);
+    out.set(a, m);
+  }
+  return out;
+}
+
 /**
  * The tokens the wallet actually holds on Robinhood Chain. With ~258k tokens on chain, a balanceOf sweep
  * is infeasible, so this uses Alchemy's `alchemy_getTokenBalances` (one call → every non-zero ERC-20
