@@ -19,12 +19,50 @@ import {
 const TOKENS = [WETH, USDG];
 const ZERO_BAL: VaultBalances = { weth: 0n, usdg: 0n, native: 0n };
 
-/** Trim a formatted amount to a readable number of places without rounding the value up. */
 function trimAmount(raw: string, maxFrac: number): string {
   if (!raw.includes(".")) return raw;
   const [whole, frac] = raw.split(".");
   const cut = frac.slice(0, maxFrac).replace(/0+$/, "");
   return cut ? `${whole}.${cut}` : whole;
+}
+
+/** A pixel-art distribution bar (mirrors the pools LIQUIDITY DISTRIBUTION graph), with the vault's
+ *  bounded ±15k-tick band highlighted around the current price. Purely illustrative of the strategy. */
+function StrategyBand() {
+  const bars = 27;
+  const center = Math.floor(bars / 2);
+  return (
+    <div className="relative rounded px-3 py-3">
+      <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
+      <div className="mb-2 flex items-center justify-between">
+        <span className="font-family-ThaleahFat text-base tracking-wider text-gray-200">LIQUIDITY STRATEGY</span>
+        <span className="font-family-ThaleahFat text-sm text-[#6DBB3E]">● AUTO-RANGED ±15K TICKS</span>
+      </div>
+      <div className="flex h-16 items-end gap-[3px]">
+        {Array.from({ length: bars }).map((_, i) => {
+          const dist = Math.abs(i - center);
+          const h = Math.max(14, 100 - dist * dist * 1.1);
+          const inBand = dist <= 8;
+          const isCenter = i === center;
+          return (
+            <div
+              key={i}
+              className="flex-1 rounded-t-sm"
+              style={{
+                height: `${h}%`,
+                background: isCenter ? "#F4D03F" : inBand ? "#6DBB3E" : "#3f6b26",
+                opacity: inBand ? 1 : 0.55,
+              }}
+            />
+          );
+        })}
+      </div>
+      <div className="mt-1 flex justify-between">
+        <span className="font-family-ThaleahFat text-sm text-gray-400">↓ RE-CENTERS ON DRIFT</span>
+        <span className="font-family-ThaleahFat text-sm text-gray-400">FEES AUTO-COMPOUND ↑</span>
+      </div>
+    </div>
+  );
 }
 
 export default function VaultPage() {
@@ -72,7 +110,6 @@ export default function VaultPage() {
   }, [amount, token.decimals]);
 
   const setFraction = (num: bigint, den: bigint) => {
-    // Floor to the token's decimals so a "MAX" can never exceed the on-chain balance.
     const wei = (tokenBalance * num) / den;
     setAmount(trimAmount(formatUnits(wei, token.decimals), token.decimals === 6 ? 6 : 8));
   };
@@ -116,6 +153,14 @@ export default function VaultPage() {
             ? `NOT ENOUGH ${token.symbol}`
             : `DEPOSIT ${token.symbol}`;
 
+  const statBox = (l: string, v: string, c: string) => (
+    <div className="relative rounded px-3 py-3 text-center">
+      <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
+      <div className="font-family-ThaleahFat text-sm tracking-wider text-gray-200 sm:text-base">{l}</div>
+      <div className={`font-family-ThaleahFat text-xl sm:text-2xl ${c}`}>{v}</div>
+    </div>
+  );
+
   return (
     <div className="relative flex min-h-screen w-full flex-col items-center gap-2 sm:gap-4">
       <BackgroundImage isLoading={false} />
@@ -124,42 +169,58 @@ export default function VaultPage() {
         <div className="flex-1">
           <NavBar />
         </div>
-        <div className="bg-peach-500 font-family-ThaleahFat shrink-0 rounded-lg border-3 border-[#523525] px-3 py-2 text-base font-medium tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] sm:py-3 sm:text-2xl">
+        <div className="bg-peach-500 font-family-ThaleahFat shrink-0 rounded-lg border-3 border-[#523525] px-3 py-2 text-base tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] sm:py-3 sm:text-2xl">
           <ConnectWalletButton />
         </div>
       </div>
 
-      <div className="relative z-20 mt-4 mb-[10%] flex w-full max-w-xl flex-1 flex-col items-center gap-4 px-3 sm:mt-10">
-        <h1 className="text-peach-300 text-shadow-header font-family-ThaleahFat text-3xl font-bold tracking-widest uppercase sm:text-5xl">
-          MOLESWAP ALM
-        </h1>
-        <p className="font-family-ThaleahFat text-center text-sm tracking-wider text-gray-200 sm:text-base">
-          AUTO-MANAGED WETH/USDG LIQUIDITY ON ROBINHOOD CHAIN — DEPOSIT ONE SIDE, THE VAULT DOES THE REST
-        </p>
+      {/* Title panel */}
+      <div className="relative z-20 mx-auto mt-2 w-full max-w-3xl px-3 sm:mt-4">
+        <div className="relative rounded-lg px-4 py-4 text-center">
+          <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full" />
+          <h1 className="text-peach-300 text-shadow-header font-family-ThaleahFat text-3xl font-bold tracking-widest uppercase sm:text-5xl">
+            TWAP VAULT
+          </h1>
+          <p className="font-family-ThaleahFat mt-1 text-sm tracking-wider text-gray-200">
+            AUTO-MANAGED WETH/USDG LIQUIDITY · SINGLE-SIDED DEPOSIT · TWAP-PRICED RE-CENTERING
+          </p>
+        </div>
+      </div>
 
-        {/* Deposit card */}
-        <div className="bg-ground w-full rounded-2xl border-3 border-[#523525] p-5 shadow-[6px_6px_0_#000]">
-          <div className="mb-3 flex items-baseline justify-between">
-            <span className="font-family-ThaleahFat text-peach-300 text-xl tracking-widest">DEPOSIT</span>
+      <div className="relative z-20 mb-[8%] flex w-full max-w-3xl flex-1 flex-col gap-3 px-3">
+        {/* Header + stats */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex -space-x-2">
+            <Image src={WETH.logoURI || "/tokens/weth.svg"} alt="WETH" width={34} height={34} className="rounded-full border-2 border-[#523525]" />
+            <Image src={USDG.logoURI || "/tokens/rh.svg"} alt="USDG" width={34} height={34} className="rounded-full border-2 border-[#523525]" />
+          </div>
+          <h2 className="font-family-ThaleahFat text-2xl tracking-wider text-white sm:text-3xl">WETH/USDG</h2>
+          <span className="font-family-ThaleahFat rounded-sm bg-[#3A1F0E] px-1.5 py-px text-sm text-[#C49A6C]">MOLEHOOK v4</span>
+          <span className="font-family-ThaleahFat rounded-sm bg-[#3A1F0E] px-1.5 py-px text-sm text-[#C49A6C]">DYNAMIC FEE</span>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {statBox("YOUR POSITIONS", String(positions.length), "text-peach-500")}
+          {statBox("STRATEGY", "AUTO", "text-[#6DBB3E]")}
+          {statBox("RE-CENTER", "±15K", "text-[#6DBB3E]")}
+          {statBox("STATUS", "LIVE", "text-[#6DBB3E]")}
+        </div>
+
+        <StrategyBand />
+
+        {/* Deposit card — styled like the pools ADD LIQUIDITY modal */}
+        <div className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">
+          <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/20 px-4 py-3">
+            <span className="font-family-ThaleahFat text-xl tracking-wider text-white">+ DEPOSIT</span>
             {isConnected && (
-              <span className="font-family-ThaleahFat text-xs tracking-wider text-gray-300">
-                Balance: {trimAmount(formatUnits(tokenBalance, token.decimals), 6)} {token.symbol}
+              <span className="font-family-ThaleahFat text-sm tracking-wider text-gray-300">
+                BAL: {trimAmount(formatUnits(tokenBalance, token.decimals), 6)} {token.symbol}
               </span>
             )}
           </div>
-          <div
-            className={`flex items-center gap-2 rounded-xl border-2 bg-[#2a1c12] px-4 py-3 ${
-              insufficient ? "border-red-600" : "border-[#523525]"
-            }`}
-          >
-            <input
-              className="font-family-ThaleahFat flex-1 bg-transparent text-2xl text-white outline-none"
-              placeholder="0.0"
-              inputMode="decimal"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
-            />
-            <div className="flex gap-1">
+          <div className="px-4 py-3">
+            {/* Token toggle */}
+            <div className="mb-3 flex gap-2">
               {TOKENS.map((t, i) => (
                 <button
                   key={t.symbol}
@@ -167,125 +228,134 @@ export default function VaultPage() {
                     setTokenIdx(i);
                     setAmount("");
                   }}
-                  className={`font-family-ThaleahFat rounded-lg border-2 px-3 py-1 text-lg tracking-wider transition-all ${
-                    tokenIdx === i
-                      ? "border-[#C97E00] bg-[#523525] text-yellow-200"
-                      : "border-[#523525] text-peach-300"
+                  className={`font-family-ThaleahFat flex-1 cursor-pointer rounded-lg border-2 px-3 py-2 text-lg tracking-wider transition-all ${
+                    tokenIdx === i ? "border-[#6DBB3E] bg-[#6DBB3E]/10 text-[#6DBB3E]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
                   }`}
                 >
                   {t.symbol}
                 </button>
               ))}
             </div>
-          </div>
 
-          {/* Quick-fill from balance */}
-          {isConnected && tokenBalance > 0n && (
-            <div className="mt-2 flex gap-2">
+            {/* Amount input */}
+            <div className={`relative mb-2 rounded px-3 py-2.5 ${insufficient ? "ring-2 ring-red-600" : ""}`}>
+              <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
+                  placeholder="0.0"
+                  inputMode="decimal"
+                  className="font-family-ThaleahFat w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none"
+                />
+                {isConnected &&
+                  tokenBalance > 0n &&
+                  [
+                    { l: "25%", n: 1n, d: 4n },
+                    { l: "50%", n: 1n, d: 2n },
+                    { l: "MAX", n: 1n, d: 1n },
+                  ].map((f) => (
+                    <button
+                      key={f.l}
+                      onClick={() => setFraction(f.n, f.d)}
+                      className="font-family-ThaleahFat text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm"
+                    >
+                      {f.l}
+                    </button>
+                  ))}
+              </div>
+              {insufficient && (
+                <div className="font-family-ThaleahFat mt-1 text-xs text-red-400">INSUFFICIENT {token.symbol} BALANCE</div>
+              )}
+            </div>
+
+            {/* Summary rows — mirrors the pools modal (PRICE / FEE / RANGE / SLIPPAGE / ON-CHAIN LIVE) */}
+            <div className="relative mb-3 rounded px-3 py-2">
+              <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
               {[
-                { label: "25%", num: 1n, den: 4n },
-                { label: "50%", num: 1n, den: 2n },
-                { label: "75%", num: 3n, den: 4n },
-                { label: "MAX", num: 1n, den: 1n },
-              ].map((f) => (
-                <button
-                  key={f.label}
-                  onClick={() => setFraction(f.num, f.den)}
-                  className="font-family-ThaleahFat flex-1 cursor-pointer rounded-lg border-2 border-[#523525] py-1 text-xs tracking-wider text-peach-300 transition-all hover:border-[#C97E00] hover:text-yellow-200"
-                >
-                  {f.label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <p className="font-family-ThaleahFat mt-3 text-xs tracking-wider text-gray-400">
-            Single-sided zap: deposit {token.symbol} and the vault swaps half and mints a bounded ±15k-tick
-            range around spot. The swap leg is slippage-bounded (amountOutMin, 1%) and every deposit is
-            simulated against the vault before it is sent.
-          </p>
-
-          {/* Zero-balance guidance — the vault can only pull WETH/USDG; native ETH just pays gas here. */}
-          {isConnected && onRH && zeroBalance && (
-            <div className="mt-3 rounded-xl border-2 border-[#5a4a2a] bg-[#2a2213] px-4 py-3">
-              <p className="font-family-ThaleahFat text-xs tracking-wider text-yellow-200">
-                You have 0 {token.symbol}. The vault holds a WETH/USDG position, so you need WETH or USDG
-                {balances.native > 0n ? " (your ETH here only pays gas)" : ""}.
-              </p>
-              <Link
-                href={`/dapp?to=${token.address}&toChainId=4663`}
-                className="font-family-ThaleahFat mt-2 inline-block cursor-pointer rounded-lg border-2 border-[#3f7d20] bg-[#4e9d2a] px-4 py-2 text-sm tracking-wider text-white transition-all hover:brightness-110"
-              >
-                GET {token.symbol} IN SWAP →
-              </Link>
-            </div>
-          )}
-
-          <button
-            onClick={onDeposit}
-            disabled={busy || (isConnected && onRH && (amountWei <= 0n || insufficient))}
-            className="font-family-ThaleahFat mt-4 w-full cursor-pointer rounded-xl border-3 border-[#3f7d20] bg-[#4e9d2a] px-4 py-3 text-xl font-bold tracking-wider text-white shadow-[0px_4px_0px_#2f6318] transition-all hover:brightness-110 active:translate-y-0.5 disabled:opacity-60"
-          >
-            {cta}
-          </button>
-          {status && (
-            <div className="font-family-ThaleahFat mt-3 text-center text-sm tracking-wider break-all text-peach-300">
-              {status}
-            </div>
-          )}
-        </div>
-
-        {/* Positions */}
-        <div className="bg-ground w-full rounded-2xl border-3 border-[#523525] p-5 shadow-[6px_6px_0_#000]">
-          <div className="mb-3 flex items-center justify-between">
-            <span className="font-family-ThaleahFat text-peach-300 text-xl tracking-widest">
-              YOUR POSITIONS
-            </span>
-            <button
-              onClick={refresh}
-              className="font-family-ThaleahFat text-peach-300 cursor-pointer text-sm tracking-wider hover:text-white"
-            >
-              ⟳ REFRESH
-            </button>
-          </div>
-          {!isConnected ? (
-            <p className="font-family-ThaleahFat py-4 text-center text-sm tracking-wider text-gray-400">
-              Connect a wallet to see your ALM positions.
-            </p>
-          ) : loadingPos ? (
-            <p className="font-family-ThaleahFat py-4 text-center text-sm tracking-wider text-gray-400">
-              Loading…
-            </p>
-          ) : positions.length === 0 ? (
-            <p className="font-family-ThaleahFat py-4 text-center text-sm tracking-wider text-gray-400">
-              No positions yet.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {positions.map((p) => (
-                <div
-                  key={p.id}
-                  className="flex items-center justify-between gap-3 rounded-xl border-2 border-[#523525] bg-[#2a1c12] px-4 py-3"
-                >
-                  <div className="font-family-ThaleahFat tracking-wider">
-                    <div className="text-peach-300 text-lg">
-                      #{p.id} · {p.fullRange ? "FULL RANGE" : `TICKS ${p.tickLower}…${p.tickUpper}`}
-                    </div>
-                    <div className="text-xs text-gray-400">
-                      liquidity {formatUnits(p.liquidity, 0)}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => onWithdraw(p.id)}
-                    disabled={busy}
-                    className="font-family-ThaleahFat cursor-pointer rounded-lg border-2 border-[#7a2f2f] bg-[#a13a3a] px-3 py-2 text-sm tracking-wider text-white transition-all hover:brightness-110 disabled:opacity-60"
-                  >
-                    EXIT
-                  </button>
+                ["STRATEGY", "SWAP HALF → BOUNDED RANGE", "text-peach-300"],
+                ["RANGE", "±15,000 TICKS (AUTO)", "text-[#6DBB3E]"],
+                ["SLIPPAGE", "1.0%", "text-gray-200"],
+                ["FEES", "AUTO-COMPOUND", "text-[#6DBB3E]"],
+                ["ON-CHAIN", "LIVE ✓", "text-[#6DBB3E]"],
+              ].map(([k, v, c]) => (
+                <div key={k} className="flex justify-between py-0.5">
+                  <span className="font-family-ThaleahFat text-base text-gray-200">{k}</span>
+                  <span className={`font-family-ThaleahFat text-base ${c}`}>{v}</span>
                 </div>
               ))}
             </div>
-          )}
+
+            {/* Zero-balance guidance */}
+            {isConnected && onRH && zeroBalance && (
+              <div className="mb-3 rounded-xl border-2 border-[#5a4a2a] bg-[#2a2213] px-4 py-3">
+                <p className="font-family-ThaleahFat text-xs tracking-wider text-yellow-200">
+                  You have 0 {token.symbol}. The vault holds a WETH/USDG position — you need WETH or USDG
+                  {balances.native > 0n ? " (your ETH only pays gas here)" : ""}.
+                </p>
+                <Link
+                  href={`/dapp?to=${token.address}&toChainId=4663`}
+                  className="font-family-ThaleahFat mt-2 inline-block cursor-pointer rounded-lg border-2 border-[#3f7d20] bg-[#4e9d2a] px-4 py-2 text-sm tracking-wider text-white transition-all hover:brightness-110"
+                >
+                  GET {token.symbol} IN SWAP →
+                </Link>
+              </div>
+            )}
+
+            <button
+              onClick={onDeposit}
+              disabled={busy || (isConnected && onRH && (amountWei <= 0n || insufficient))}
+              className="font-family-ThaleahFat w-full cursor-pointer rounded-lg bg-[#6DBB3E] px-6 py-3 text-xl tracking-wider text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset] transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
+            >
+              {cta}
+            </button>
+            {status && (
+              <div className="font-family-ThaleahFat mt-3 text-center text-sm tracking-wider break-all text-peach-300">{status}</div>
+            )}
+          </div>
+        </div>
+
+        {/* Positions */}
+        <div className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">
+          <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/20 px-4 py-3">
+            <span className="font-family-ThaleahFat text-xl tracking-wider text-white">YOUR POSITIONS</span>
+            <button onClick={refresh} className="font-family-ThaleahFat cursor-pointer text-sm tracking-wider text-peach-300 hover:text-white">
+              ⟳ REFRESH
+            </button>
+          </div>
+          <div className="px-4 py-3">
+            {!isConnected ? (
+              <p className="font-family-ThaleahFat py-4 text-center text-sm tracking-wider text-gray-400">Connect a wallet to see your positions.</p>
+            ) : loadingPos ? (
+              <p className="font-family-ThaleahFat py-4 text-center text-sm tracking-wider text-gray-400">Loading…</p>
+            ) : positions.length === 0 ? (
+              <p className="font-family-ThaleahFat py-4 text-center text-sm tracking-wider text-gray-400">No positions yet. Deposit above to start.</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {positions.map((p) => (
+                  <div key={p.id} className="relative flex items-center justify-between gap-3 rounded px-4 py-3">
+                    <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
+                    <div className="font-family-ThaleahFat tracking-wider">
+                      <div className="text-peach-300 text-lg">
+                        #{p.id} · {p.fullRange ? "FULL RANGE" : `TICKS ${p.tickLower}…${p.tickUpper}`}
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        liquidity {formatUnits(p.liquidity, 0)} · fees auto-compound into this position
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => onWithdraw(p.id)}
+                      disabled={busy}
+                      className="font-family-ThaleahFat cursor-pointer rounded-lg bg-red-600 px-3 py-2 text-sm tracking-wider text-white shadow-[0px_-3px_0px_0px_#991B1B_inset] transition-all hover:scale-[1.01] disabled:opacity-60"
+                    >
+                      EXIT
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
