@@ -184,11 +184,26 @@ export function bestSplitRoute(
 
   // Rank candidates on the FULL size first, then keep the top few. Ranking on a slice would favour
   // shallow pools that look good small and run dry immediately.
-  const ranked = all
+  const rankedAll = all
     .map((hops) => ({ hops, probe: quotePath(hops, amountIn) }))
     .filter((c) => c.probe.amountOut > 0n)
-    .sort((a, b) => (b.probe.amountOut > a.probe.amountOut ? 1 : -1))
-    .slice(0, maxPaths);
+    .sort((a, b) => (b.probe.amountOut > a.probe.amountOut ? 1 : -1));
+
+  // POOL-DISJOINT SELECTION — the correctness guard for splitting. The greedy allocator below prices each
+  // path in ISOLATION against pristine pool liquidity. If two split parts shared a pool, the allocator
+  // would count that pool's liquidity twice and quote an output neither part can realise on-chain (the
+  // second part to touch the shared pool sees state the first already moved) — the swap then reverts at
+  // minAmountOut. So we admit a path into the split set only if it shares no pool with an already-admitted,
+  // higher-ranked path. Each surviving pool is consumed by at most one part, which makes the independent
+  // per-path pricing EXACT rather than optimistic. Best-first order keeps the strongest path unconditionally.
+  const usedPools = new Set<string>();
+  const ranked: typeof rankedAll = [];
+  for (const c of rankedAll) {
+    if (c.hops.some((h) => usedPools.has(h.pool.address))) continue;
+    for (const h of c.hops) usedPools.add(h.pool.address);
+    ranked.push(c);
+    if (ranked.length >= maxPaths) break;
+  }
 
   if (ranked.length === 0) return undefined;
 

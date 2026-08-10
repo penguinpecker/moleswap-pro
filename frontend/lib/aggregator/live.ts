@@ -341,7 +341,7 @@ export class LivePairSession {
         amountIn: params.amountIn,
         recipient: params.recipient,
         nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
-        ttlSeconds: 300n,
+        ttlSeconds: 60n,
         slippageBps: params.slippageBps,
         feeBps: this.feeBps,
         weth: this.weth,

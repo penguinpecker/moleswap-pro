@@ -109,6 +109,7 @@ export async function discoverForPair(tokenIn: string, tokenOut: string, weth: s
     [outT, w],
     [inT, USDG],
     [outT, USDG],
+    [w, USDG], // the WETH<->USDG bridge edge — connects a WETH-side token to a USDG-side token (A->WETH->USDG->B)
   ]);
 }
 

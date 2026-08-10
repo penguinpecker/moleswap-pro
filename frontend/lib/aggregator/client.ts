@@ -130,16 +130,15 @@ export async function fetchRelevantPoolStates(
     (s): s is PoolState => s !== null && (s.liquidity > 0n || s.ticks.length > 0),
   );
 
-  // Add the live MoleSwap v4 (MoleHook) WETH/USDG pool as a venue whenever WETH or USDG is on the path —
-  // it competes on the direct pair and serves as a hub leg to USDG. Read via StateView.
-  const touchesV4 = inT === w || outT === w || inT === USDG_LC || outT === USDG_LC;
-  if (touchesV4) {
-    try {
-      const v4 = await fetchV4MolePool();
-      if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) v3States.push(v4);
-    } catch {
-      /* v4 read failed — quote on the V3 venues alone */
-    }
+  // Always add the live MoleSwap v4 (MoleHook) WETH/USDG pool. It is the deepest WETH<->USDG venue and,
+  // crucially, the WETH<->USDG BRIDGE edge: without it an arbitrary A->B where A routes via WETH and B via
+  // USDG (or vice-versa) has no connecting hop and is falsely reported "no route". One StateView read that
+  // only ever helps — so it is unconditional, not gated on WETH/USDG being an endpoint.
+  try {
+    const v4 = await fetchV4MolePool();
+    if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) v3States.push(v4);
+  } catch {
+    /* v4 read failed — quote on the V3 venues alone */
   }
 
   // Any OTHER whitelisted MoleHook pool created via the operator flow and registered in mp_pools routes
@@ -198,7 +197,7 @@ export interface SwapQuote {
  */
 export async function quoteSwap(pools: PoolRow[], req: SwapQuoteRequest): Promise<SwapQuote | null> {
   const now = req.nowSeconds ?? BigInt(Math.floor(Date.now() / 1000));
-  const ttl = req.ttlSeconds ?? 300n;
+  const ttl = req.ttlSeconds ?? 60n; // ~60s deadline; on a 0.1s-block chain 300s let stale intent fill
 
   const states = await fetchRelevantPoolStates(pools, req.tokenIn, req.tokenOut, req.weth);
   if (states.length === 0) return null;
