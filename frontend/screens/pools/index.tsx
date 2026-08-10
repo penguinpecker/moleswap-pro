@@ -122,10 +122,11 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
       const price = sqrtPriceToPrice(sqrtPriceX96, t0.decimals, t1.decimals);
       const tvl = calcTvl(reserve0, reserve1, price);
 
-      const feePct = pool.fee / 1e6;
-      const feeApy = hasLiquidity && tvl > 0 ? +(feePct * 0.075 * 365 * 100).toFixed(2) : 0;
-      const vol24h = tvl * 0.075;
-      const fees24h = vol24h * feePct;
+      // No fabricated volume/APY — the UI shows only real fields (TVL, fee tier, price, liquidity).
+      // Real 24h volume/APY needs a swap-event indexer (TODO); these stay 0 rather than invented.
+      const feeApy = 0;
+      const vol24h = 0;
+      const fees24h = 0;
 
       return {
         name: pool.name,
@@ -293,12 +294,16 @@ const PoolsContent = () => {
   const chains = useMemo(() => ["all", ...new Set(pools.map(p => p.token0.sourceChain))], [pools]);
   const filtered = pools.filter(p => chainFilter === "all" || p.token0.sourceChain === chainFilter);
   const sorted = [...filtered].sort((a, b) =>
-    sort === "tvl" ? b.tvl - a.tvl : sort === "apy" ? b.feeApy - a.feeApy : b.vol24h - a.vol24h
+    sort === "tvl" ? b.tvl - a.tvl : sort === "apy" ? a.fee - b.fee : b.price - a.price
   );
 
   const totalTvl = pools.reduce((s, p) => s + p.tvl, 0);
-  const totalVol = pools.reduce((s, p) => s + p.vol24h, 0);
-  const avgApy = pools.length > 0 ? pools.reduce((s, p) => s + p.feeApy, 0) / pools.length : 0;
+  // Real, cheap-to-read aggregates only (no fabricated volume/APY — those need a swap-event indexer).
+  const deepestTvl = pools.length > 0 ? Math.max(...pools.map((p) => p.tvl)) : 0;
+  const feeTiers = [...new Set(pools.map((p) => p.fee))].sort((a, b) => a - b);
+  const feeRange =
+    feeTiers.length === 0 ? "—" : feeTiers.length === 1 ? `${(feeTiers[0] / 10000).toFixed(2)}%`
+      : `${(feeTiers[0] / 10000).toFixed(2)}–${(feeTiers[feeTiers.length - 1] / 10000).toFixed(2)}%`;
 
   const tabClass = (t: string) =>
     `font-family-ThaleahFat text-shadow-black px-4 py-1 rounded-full text-base sm:text-2xl sm:px-6 transition-colors duration-150 cursor-pointer ${
@@ -353,9 +358,9 @@ const PoolsContent = () => {
               <div className="mb-4 grid grid-cols-2 gap-1.5 sm:mb-5 sm:grid-cols-4 sm:gap-3">
                 {[
                   { l: "TOTAL VALUE LOCKED", v: loading ? "..." : `$${fmt(totalTvl)}`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="2" y="7" width="12" height="7" fill="#8B5E3C"/><rect x="2" y="7" width="12" height="1" fill="#A0704A"/><rect x="2" y="13" width="12" height="1" fill="#5D3A1F"/><rect x="2" y="4" width="12" height="4" fill="#A0704A"/><rect x="2" y="4" width="12" height="1" fill="#C49A6C"/><rect x="3" y="5" width="10" height="1" fill="#B8896A"/><rect x="1" y="7" width="14" height="1" fill="#E8A849"/><rect x="1" y="4" width="14" height="1" fill="#E8A849"/><rect x="7" y="6" width="2" height="3" fill="#FFD47A"/><rect x="7" y="5" width="2" height="1" fill="#E8A849"/><rect x="4" y="3" width="2" height="2" fill="#FFD47A"/><rect x="5" y="3" width="1" height="1" fill="#FFF3B0"/><rect x="9" y="2" width="2" height="2" fill="#FFD47A"/><rect x="10" y="2" width="1" height="1" fill="#FFF3B0"/><rect x="7" y="2" width="2" height="2" fill="#E8A849"/><rect x="8" y="2" width="1" height="1" fill="#FFD47A"/></svg> },
-                  { l: "24H VOLUME (EST)", v: loading ? "..." : `$${fmt(totalVol)}`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="2" y="9" width="2" height="5" fill="#E8A849"/><rect x="2" y="9" width="2" height="1" fill="#FFD47A"/><rect x="5" y="5" width="2" height="9" fill="#FFD47A"/><rect x="5" y="5" width="2" height="1" fill="#FFF3B0"/><rect x="8" y="7" width="2" height="7" fill="#E8A849"/><rect x="8" y="7" width="2" height="1" fill="#FFD47A"/><rect x="11" y="3" width="2" height="11" fill="#FFD47A"/><rect x="11" y="3" width="2" height="1" fill="#FFF3B0"/><rect x="1" y="14" width="14" height="1" fill="#C49A6C"/><rect x="13" y="1" width="1" height="1" fill="#7FE87F"/><rect x="12" y="2" width="1" height="1" fill="#7FE87F"/><rect x="14" y="2" width="1" height="1" fill="#7FE87F"/></svg> },
+                  { l: "DEEPEST POOL", v: loading ? "..." : `$${fmt(deepestTvl)}`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="2" y="9" width="2" height="5" fill="#E8A849"/><rect x="2" y="9" width="2" height="1" fill="#FFD47A"/><rect x="5" y="5" width="2" height="9" fill="#FFD47A"/><rect x="5" y="5" width="2" height="1" fill="#FFF3B0"/><rect x="8" y="7" width="2" height="7" fill="#E8A849"/><rect x="8" y="7" width="2" height="1" fill="#FFD47A"/><rect x="11" y="3" width="2" height="11" fill="#FFD47A"/><rect x="11" y="3" width="2" height="1" fill="#FFF3B0"/><rect x="1" y="14" width="14" height="1" fill="#C49A6C"/><rect x="13" y="1" width="1" height="1" fill="#7FE87F"/><rect x="12" y="2" width="1" height="1" fill="#7FE87F"/><rect x="14" y="2" width="1" height="1" fill="#7FE87F"/></svg> },
                   { l: "ACTIVE POOLS", v: loading ? "..." : `${pools.filter(p => p.active).length}/${pools.length}`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="7" y="1" width="2" height="1" fill="#5BC0DE"/><rect x="6" y="2" width="4" height="1" fill="#5BC0DE"/><rect x="5" y="3" width="6" height="1" fill="#5BC0DE"/><rect x="4" y="4" width="8" height="1" fill="#5BC0DE"/><rect x="3" y="5" width="10" height="1" fill="#5BC0DE"/><rect x="3" y="6" width="10" height="1" fill="#4AADCC"/><rect x="3" y="7" width="10" height="1" fill="#4AADCC"/><rect x="3" y="8" width="10" height="1" fill="#3A9ABB"/><rect x="3" y="9" width="10" height="1" fill="#3A9ABB"/><rect x="4" y="10" width="8" height="1" fill="#2D87A8"/><rect x="5" y="11" width="6" height="1" fill="#2D87A8"/><rect x="6" y="12" width="4" height="1" fill="#2D87A8"/><rect x="5" y="4" width="2" height="1" fill="#9EEAFF"/><rect x="4" y="5" width="2" height="1" fill="#9EEAFF"/><rect x="4" y="6" width="1" height="2" fill="#7FD9F0"/></svg> },
-                  { l: "AVG FEE APY (EST)", v: loading ? "..." : `${avgApy.toFixed(1)}%`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="2" y="12" width="1" height="1" fill="#E8A849"/><rect x="3" y="11" width="1" height="1" fill="#E8A849"/><rect x="4" y="10" width="1" height="1" fill="#FFD47A"/><rect x="5" y="9" width="1" height="1" fill="#FFD47A"/><rect x="6" y="10" width="1" height="1" fill="#FFD47A"/><rect x="7" y="9" width="1" height="1" fill="#FFD47A"/><rect x="8" y="8" width="1" height="1" fill="#FFD47A"/><rect x="9" y="7" width="1" height="1" fill="#FFD47A"/><rect x="10" y="6" width="1" height="1" fill="#FFD47A"/><rect x="11" y="5" width="1" height="1" fill="#FFD47A"/><rect x="12" y="4" width="1" height="1" fill="#FFD47A"/><rect x="13" y="3" width="1" height="1" fill="#FFD47A"/><rect x="13" y="2" width="2" height="1" fill="#7FE87F"/><rect x="14" y="3" width="1" height="1" fill="#7FE87F"/><rect x="13" y="4" width="1" height="1" fill="#7FE87F"/><rect x="2" y="13" width="12" height="1" fill="#5D3A1F"/><rect x="3" y="12" width="11" height="1" fill="#5D3A1F"/><rect x="4" y="11" width="10" height="1" fill="#5D3A1F"/><rect x="5" y="10" width="9" height="1" fill="#4A2C15"/><rect x="7" y="9" width="7" height="1" fill="#4A2C15"/><rect x="9" y="8" width="5" height="1" fill="#4A2C15"/><rect x="1" y="14" width="14" height="1" fill="#C49A6C"/></svg> },
+                  { l: "FEE TIERS", v: loading ? "..." : feeRange, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="2" y="12" width="1" height="1" fill="#E8A849"/><rect x="3" y="11" width="1" height="1" fill="#E8A849"/><rect x="4" y="10" width="1" height="1" fill="#FFD47A"/><rect x="5" y="9" width="1" height="1" fill="#FFD47A"/><rect x="6" y="10" width="1" height="1" fill="#FFD47A"/><rect x="7" y="9" width="1" height="1" fill="#FFD47A"/><rect x="8" y="8" width="1" height="1" fill="#FFD47A"/><rect x="9" y="7" width="1" height="1" fill="#FFD47A"/><rect x="10" y="6" width="1" height="1" fill="#FFD47A"/><rect x="11" y="5" width="1" height="1" fill="#FFD47A"/><rect x="12" y="4" width="1" height="1" fill="#FFD47A"/><rect x="13" y="3" width="1" height="1" fill="#FFD47A"/><rect x="13" y="2" width="2" height="1" fill="#7FE87F"/><rect x="14" y="3" width="1" height="1" fill="#7FE87F"/><rect x="13" y="4" width="1" height="1" fill="#7FE87F"/><rect x="2" y="13" width="12" height="1" fill="#5D3A1F"/><rect x="3" y="12" width="11" height="1" fill="#5D3A1F"/><rect x="4" y="11" width="10" height="1" fill="#5D3A1F"/><rect x="5" y="10" width="9" height="1" fill="#4A2C15"/><rect x="7" y="9" width="7" height="1" fill="#4A2C15"/><rect x="9" y="8" width="5" height="1" fill="#4A2C15"/><rect x="1" y="14" width="14" height="1" fill="#C49A6C"/></svg> },
                 ].map((s, i) => (
                   <div key={i} className="relative overflow-hidden rounded px-3 py-3 text-center">
                     <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200}
@@ -389,7 +394,7 @@ const PoolsContent = () => {
               </div>
 
               <div className="mb-2 flex items-center justify-end gap-1">
-                {([["tvl", "TVL"], ["apy", "APY"], ["vol", "VOLUME"]] as const).map(([k, l]) => (
+                {([["tvl", "TVL"], ["apy", "FEE"], ["vol", "PRICE"]] as const).map(([k, l]) => (
                   <button
                     key={k}
                     onClick={() => setSort(k)}
@@ -408,7 +413,7 @@ const PoolsContent = () => {
               </div>
 
               <div className="hidden px-3 pb-2 sm:grid" style={{ gridTemplateColumns: "2.4fr .6fr .7fr .7fr .9fr" }}>
-                {["POOL", "TVL", "FEE APY", "24H VOL", ""].map((h, i) => (
+                {["POOL", "TVL", "FEE", "PRICE", ""].map((h, i) => (
                   <span key={i} className={`font-family-ThaleahFat text-xl tracking-wider text-gray-300 ${i > 0 ? "text-right" : ""}`}>
                     {h}
                   </span>
@@ -450,8 +455,8 @@ const PoolsContent = () => {
                         </div>
                       </div>
                       <div className="text-right"><span className="font-family-ThaleahFat truncate text-2xl text-white">${fmt(p.tvl)}</span></div>
-                      <div className="font-family-ThaleahFat text-right text-2xl text-[#6DBB3E]">{p.feeApy}%</div>
-                      <div className="font-family-ThaleahFat text-right text-2xl text-gray-300">${fmt(p.vol24h)}</div>
+                      <div className="font-family-ThaleahFat text-right text-2xl text-[#6DBB3E]">{(p.fee / 10000).toFixed(2)}%</div>
+                      <div className="font-family-ThaleahFat text-right text-2xl text-gray-300">{p.price > 0 ? `$${fmt(p.price)}` : "—"}</div>
                       <div className="flex justify-end gap-1.5">
                         <Link href="/vault" className="font-family-ThaleahFat cursor-pointer rounded bg-[#6DBB3E] px-3 py-1.5 text-lg text-white shadow-[0_-2px_0_#4A8B29_inset] transition-all hover:brightness-110">
                           + LIQUIDITY
@@ -467,7 +472,7 @@ const PoolsContent = () => {
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className="font-family-ThaleahFat text-xl text-[#6DBB3E]">{p.feeApy}% FEE APY</div>
+                        <div className="font-family-ThaleahFat text-xl text-[#6DBB3E]">{(p.fee / 10000).toFixed(2)}% FEE</div>
                         <div className="font-family-ThaleahFat text-xl text-gray-200">${fmt(p.tvl)}</div>
                       </div>
                     </div>
@@ -1199,8 +1204,8 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {[
           { l: "TVL", v: `$${fmt(pool.tvl)}`, c: "text-peach-500" },
-          { l: "24H VOLUME (EST)", v: `$${fmt(pool.vol24h)}`, c: "text-[#6DBB3E]" },
-          { l: "FEE APY (EST)", v: `${pool.feeApy}%`, c: "text-[#6DBB3E]" },
+          { l: "FEE TIER", v: `${(pool.fee / 10000).toFixed(2)}%`, c: "text-[#6DBB3E]" },
+          { l: "PRICE", v: pool.price > 0 ? `$${fmt(pool.price)}` : "—", c: "text-[#6DBB3E]" },
           { l: "LIQUIDITY", v: BigInt(pool.liquidity) > 0n ? "ACTIVE" : "EMPTY", c: BigInt(pool.liquidity) > 0n ? "text-[#6DBB3E]" : "text-red-400" },
         ].map((s, i) => (
           <div key={i} className="relative rounded px-3 py-3 text-center">
