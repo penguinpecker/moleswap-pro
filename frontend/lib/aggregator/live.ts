@@ -18,6 +18,7 @@ import { fetchV4MolePool } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
 import { FetchTransport } from "./transport";
 import { PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
+import { getAggFeeBps, cachedAggFeeBps } from "../mole/aggFee";
 
 const MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11";
 const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
@@ -133,6 +134,12 @@ export interface LiveQuote {
   priceImpactPct: number | null;
   /** tokenOut per tokenIn, decimals-adjusted (for "1 ETH = 1,918.4 USDG"). */
   execRate: number;
+  /** The aggregator fee the router skims from the output: bps + amount in the output token. amountOut is
+   *  already NET of this — it is what the recipient receives. */
+  feeBps: number;
+  feeAmount: bigint;
+  /** The raw route output BEFORE the fee, for a "you'd get X, fee Y" breakdown if desired. */
+  grossAmountOut: bigint;
   /** USD value helpers, derived from the deepest live WETH/USDG pool — no external price feed. */
   usdPerWeth: number | null;
   /** Modeled gas for the router call (calibrated against real receipts; display-grade). */
@@ -163,6 +170,7 @@ export class LivePairSession {
   private gasPriceWei: bigint | null = null;
   private refreshing = false;
   private gasPriceAge = 0;
+  private feeBps = cachedAggFeeBps();
   readonly tokenIn: string;
   readonly tokenOut: string;
   readonly weth: string;
@@ -206,6 +214,8 @@ export class LivePairSession {
       this.weth,
       new FetchTransport(this.rpc),
     );
+    // Read the live aggregator fee before the first quote so minAmountOut is built on the post-fee output.
+    this.feeBps = await getAggFeeBps(Date.now());
     await this.refreshGasPrice();
   }
 
@@ -233,6 +243,9 @@ export class LivePairSession {
   async refresh(): Promise<void> {
     if (this.refreshing || this.states.length === 0) return;
     this.refreshing = true;
+    // Keep the fee current without blocking the tick — getAggFeeBps caches 30s, so this is a no-op read
+    // most ticks and one cheap eth_call every 30s.
+    void getAggFeeBps(Date.now()).then((b) => { this.feeBps = b; }).catch(() => {});
     try {
       const v3 = this.states.filter((s) => s.venue !== "UniswapV4");
       const hasV4 = this.states.some((s) => s.venue === "UniswapV4");
@@ -330,6 +343,7 @@ export class LivePairSession {
         nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
         ttlSeconds: 300n,
         slippageBps: params.slippageBps,
+        feeBps: this.feeBps,
         weth: this.weth,
       });
     } catch {
@@ -377,7 +391,11 @@ export class LivePairSession {
 
     return {
       amountIn: q.amountIn,
-      amountOut: q.amountOut,
+      // amountOut shown to the user is NET of the aggregator fee — what the recipient actually receives.
+      amountOut: q.netAmountOut,
+      grossAmountOut: q.amountOut,
+      feeBps: q.feeBps,
+      feeAmount: q.feeAmount,
       minAmountOut: q.minAmountOut,
       slippageBps: params.slippageBps,
       routes,

@@ -2001,7 +2001,9 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                           )}
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-[#9a9a9a]">Aggregator fee</span>
-                            <span className="text-green-300">0%</span>
+                            <span className={quote.feeBps ? "text-yellow-100" : "text-green-300"}>
+                              {quote.feeBps ? `${(quote.feeBps / 100).toFixed(2)}%` : "0%"}
+                            </span>
                           </div>
                           {etaSeconds != null && (
                             <div className="flex items-center justify-between gap-2">

@@ -177,6 +177,8 @@ export interface SwapQuoteRequest {
   amountIn: bigint;
   recipient: string;
   slippageBps: number;
+  /** Aggregator fee the router skims from the output, in bps (read live from the fee dial). 0 = feeless. */
+  feeBps?: number;
   weth: string;
   /** Unix seconds; defaults to Date.now()/1000 at call time. */
   nowSeconds?: bigint;
@@ -211,6 +213,7 @@ export async function quoteSwap(pools: PoolRow[], req: SwapQuoteRequest): Promis
       nowSeconds: now,
       ttlSeconds: ttl,
       slippageBps: req.slippageBps,
+      feeBps: req.feeBps ?? 0,
       weth: req.weth,
     });
   } catch {

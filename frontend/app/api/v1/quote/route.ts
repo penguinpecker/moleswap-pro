@@ -5,6 +5,7 @@ import { CONTRACTS, getTokenByAddress } from "@/lib/chain/contracts";
 import { quoteSwap } from "@/lib/aggregator/client";
 import { NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { loadPoolRowsServer } from "@/lib/aggregator/serverPools";
+import { getAggFeeBps } from "@/lib/mole/aggFee";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -71,12 +72,14 @@ export async function GET(req: NextRequest) {
     const rows = await loadPoolRowsServer(Date.now());
     if (rows.length === 0) return apiError("Pool registry unavailable — try again shortly", 503);
 
+    const feeBps = await getAggFeeBps(Date.now());
     const q = await quoteSwap(rows, {
       tokenIn: toAgg(tokenIn),
       tokenOut: toAgg(tokenOut),
       amountIn: amountInBig,
       recipient: "0x0000000000000000000000000000000000000001", // quote-only; recipient does not affect price
       slippageBps,
+      feeBps,
       weth: CONTRACTS.WETH,
     });
     if (!q) return apiError("No liquidity route found for this pair", 404);
@@ -85,14 +88,17 @@ export async function GET(req: NextRequest) {
     const tokenOutInfo = getTokenByAddress(tokenOut);
     const decIn = tokenInInfo?.decimals ?? 18;
     const decOut = tokenOutInfo?.decimals ?? 18;
-    const humanOut = Number(q.quote.amountOut) / 10 ** decOut;
+    const humanOut = Number(q.quote.netAmountOut) / 10 ** decOut;
 
     return apiResponse({
       tokenIn,
       tokenOut,
       amountIn,
-      amountOut: q.quote.amountOut.toString(),
+      amountOut: q.quote.netAmountOut.toString(),
       amountOutFormatted: humanOut.toFixed(decOut > 6 ? 8 : 6),
+      grossAmountOut: q.quote.amountOut.toString(),
+      aggregatorFeeBps: q.quote.feeBps,
+      aggregatorFee: q.quote.feeAmount.toString(),
       minReceived: q.quote.minAmountOut.toString(),
       slippageBps,
       type: q.quote.routeDescriptions.length > 1 ? "split" : "direct",

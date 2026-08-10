@@ -71,6 +71,21 @@ export interface PlanOptions {
   readonly deadline: bigint;
   /** Tolerated shortfall from the quoted output, in basis points. 50 = 0.5%. */
   readonly slippageBps: number;
+  /**
+   * The aggregator fee the router will skim from the OUTPUT, in basis points (read live from the fee
+   * dial). minAmountOut MUST be computed on the post-fee amount, because the router enforces minAmountOut
+   * on what the recipient receives AFTER the skim — setting it off the raw output would revert every swap
+   * the moment the fee is nonzero. Defaults to 0 (feeless router) when omitted.
+   */
+  readonly feeBps?: number;
+}
+
+/** The output the recipient actually receives after the router's aggregator-fee skim (floors, like the contract). */
+export function applyAggFee(amountOut: bigint, feeBps: number): bigint {
+  if (!feeBps || feeBps <= 0) return amountOut;
+  const bps = feeBps > 100 ? 100 : feeBps; // mirror the router's MAX_FEE_BPS clamp
+  const fee = (amountOut * BigInt(bps)) / 10_000n;
+  return amountOut - fee;
 }
 
 function hopToPlan(hop: Route["hops"][number]): PlanHop {
@@ -133,7 +148,7 @@ export function planFromRoute(
     tokenIn,
     tokenOut,
     amountIn: route.amountIn,
-    minAmountOut: minOutFor(route.amountOut, opts.slippageBps),
+    minAmountOut: minOutFor(applyAggFee(route.amountOut, opts.feeBps ?? 0), opts.slippageBps),
     recipient: opts.recipient,
     deadline: opts.deadline,
     paths: [{ amountIn: route.amountIn, hops: route.hops.map(hopToPlan) }],
@@ -165,7 +180,7 @@ export function planFromSplit(
     tokenIn,
     tokenOut,
     amountIn: split.amountIn,
-    minAmountOut: minOutFor(split.amountOut, opts.slippageBps),
+    minAmountOut: minOutFor(applyAggFee(split.amountOut, opts.feeBps ?? 0), opts.slippageBps),
     recipient: opts.recipient,
     deadline: opts.deadline,
     paths,

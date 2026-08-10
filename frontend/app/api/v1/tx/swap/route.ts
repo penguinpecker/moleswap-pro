@@ -6,6 +6,7 @@ import { CONTRACTS, RH_CHAIN_ID, RH_RPC_URL, getTokenByAddress } from "@/lib/cha
 import { quoteSwap } from "@/lib/aggregator/client";
 import { moleRouterAbi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { loadPoolRowsServer } from "@/lib/aggregator/serverPools";
+import { getAggFeeBps } from "@/lib/mole/aggFee";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,6 +82,7 @@ export async function POST(req: NextRequest) {
       amountIn: amountInBig,
       recipient,
       slippageBps: bps,
+      feeBps: await getAggFeeBps(Date.now()),
       weth: CONTRACTS.WETH,
     });
     if (!q) return apiError("No liquidity route found for this pair", 404);
@@ -109,7 +111,8 @@ export async function POST(req: NextRequest) {
     return apiResponse({
       type: "swap",
       description: `Swap ${getTokenByAddress(tokenIn)?.symbol || tokenIn.slice(0, 8)} → ${getTokenByAddress(tokenOut)?.symbol || tokenOut.slice(0, 8)}`,
-      amountOut: q.quote.amountOut.toString(),
+      amountOut: q.quote.netAmountOut.toString(),
+      aggregatorFeeBps: q.quote.feeBps,
       minReceived: q.quote.minAmountOut.toString(),
       route: q.quote.routeDescriptions.join(" + "),
       slippageBps: bps,

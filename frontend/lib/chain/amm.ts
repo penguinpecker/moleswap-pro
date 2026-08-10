@@ -38,6 +38,7 @@ import { robinhoodChain } from "./wagmi-config";
 import { moleRouterAbi, erc20Abi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { quoteSwap } from "@/lib/aggregator/client";
 import type { PoolRow } from "@/lib/aggregator/client";
+import { getAggFeeBps } from "@/lib/mole/aggFee";
 import { createClient } from "@/lib/supabase/client";
 
 /* ─── Re-exports (unchanged import surface) ──────────────────────────────── */
@@ -177,6 +178,7 @@ export async function getSwapQuote(params: {
       amountIn,
       recipient: "0x000000000000000000000000000000000000dEaD",
       slippageBps: DEFAULT_SLIPPAGE_BPS,
+      feeBps: await getAggFeeBps(Date.now()),
       weth: WETH,
     });
     if (!q) return null;
@@ -347,15 +349,18 @@ export async function executeSwap(params: {
         ? params.outputRecipient
         : account;
 
-    // Fresh quote at execution time → exact plan + honest minimum-out floor.
+    // Fresh quote at execution time → exact plan + honest minimum-out floor. The fee is re-read live here
+    // too, so minAmountOut is built on the post-fee output at the instant of execution.
     onStep(0, "Swap", "pending");
     const rows = await loadPoolRows();
+    const feeBps = await getAggFeeBps(Date.now());
     const q = await quoteSwap(rows, {
       tokenIn: aggIn,
       tokenOut: aggOut,
       amountIn,
       recipient,
       slippageBps: DEFAULT_SLIPPAGE_BPS,
+      feeBps,
       weth: WETH,
     });
     if (!q) return { success: false, error: "No route for this pair" };

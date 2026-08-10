@@ -11,7 +11,7 @@
 
 import { PoolGraph, bestSplitRoute, describeRoute, type SplitRoute } from "./route";
 import type { PoolState } from "./venues/v3Pool";
-import { planFromSplit, type SwapPlan } from "./plan";
+import { planFromSplit, applyAggFee, type SwapPlan } from "./plan";
 
 /** The sentinel a plan uses for native ETH, matching MoleRouter's NATIVE constant exactly. A request may
  *  set tokenIn or tokenOut to this; routing then happens over WETH and the executor wraps/unwraps. */
@@ -28,6 +28,8 @@ export interface QuoteRequest {
   readonly ttlSeconds: bigint;
   /** Tolerated shortfall from the quoted output, in basis points. */
   readonly slippageBps: number;
+  /** Aggregator fee the router skims from the output, in bps (read live from the fee dial; 0 = feeless). */
+  readonly feeBps?: number;
   /** Search depth. Defaults are tuned to the live chain's WETH-star graph. */
   readonly maxHops?: number;
   readonly maxPaths?: number;
@@ -39,9 +41,15 @@ export interface QuoteRequest {
 
 export interface Quote {
   readonly amountIn: bigint;
-  /** The quoted output, exact against current pool state. */
+  /** The raw route output against current pool state, BEFORE the aggregator fee. */
   readonly amountOut: bigint;
-  /** The floor the transaction enforces on-chain. The user cannot receive less and have the tx succeed. */
+  /** What the recipient actually receives, AFTER the router skims the aggregator fee — the number to show
+   *  as "you receive". Equals amountOut when feeBps is 0. */
+  readonly netAmountOut: bigint;
+  /** The aggregator fee applied, in bps, and its amount in the output token. */
+  readonly feeBps: number;
+  readonly feeAmount: bigint;
+  /** The floor the transaction enforces on-chain (computed on netAmountOut). */
   readonly minAmountOut: bigint;
   /** How much of the trade nets against opposing pool liquidity vs. price impact — for display. */
   readonly split: SplitRoute;
@@ -89,15 +97,21 @@ export function getQuote(pools: readonly PoolState[], req: QuoteRequest): Quote 
 
   // Build the plan with the ORIGINAL (possibly NATIVE) tokenIn/tokenOut on the outer fields; the hops
   // already reference WETH because the route was computed over it.
+  const feeBps = req.feeBps ?? 0;
   const plan = planFromSplit(split, req.tokenIn, req.tokenOut, {
     recipient: req.recipient,
     deadline: req.nowSeconds + req.ttlSeconds,
     slippageBps: req.slippageBps,
+    feeBps,
   });
 
+  const netAmountOut = applyAggFee(split.amountOut, feeBps);
   return {
     amountIn: split.amountIn,
     amountOut: split.amountOut,
+    netAmountOut,
+    feeBps,
+    feeAmount: split.amountOut - netAmountOut,
     minAmountOut: plan.minAmountOut,
     split,
     routeDescriptions: split.parts.map((r) => describeRoute(r)),
