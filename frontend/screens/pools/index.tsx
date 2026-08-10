@@ -5,7 +5,6 @@ import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { NavBar, BackgroundImage } from "../shared";
-import { MoleEngine } from "./MoleEngine";
 import { RefreshCw, Plus, Minus, ArrowUpRight, ChevronDown, AlertTriangle, Loader2 } from "lucide-react";
 import { useWalletContext, useChainClient, WalletUI } from "@/lib/chain/provider";
 import { useWallet } from "@/lib/chain/provider";
@@ -321,11 +320,6 @@ const PoolsContent = () => {
           src="/quest/header-quest-bg.png" alt="Header" width={200} height={200}
           className="absolute inset-0 left-0 z-[-1] h-full w-full"
         />
-      </div>
-
-      {/* MoleSwap's internal machinery (v4 ALM vault + batch queue), shown as the pool's living engine. */}
-      <div className="relative z-10 px-2 sm:px-0">
-        <MoleEngine />
       </div>
 
       <div className="relative mb-6 h-full min-h-[500px]">

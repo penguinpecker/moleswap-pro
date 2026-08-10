@@ -11,12 +11,18 @@ import {
   getAlmPositions,
   getVaultBalances,
   almDeposit,
+  almDepositNative,
   almWithdraw,
   type AlmPosition,
   type VaultBalances,
 } from "@/lib/mole/vault";
 
-const TOKENS = [WETH, USDG];
+// Deposit options: native ETH (auto-wrapped to WETH — the pool's WETH leg is wrapped ETH), or USDG.
+const DEPOSIT_TOKENS = [
+  { symbol: "ETH", address: WETH.address, decimals: 18, native: true },
+  { symbol: USDG.symbol, address: USDG.address, decimals: USDG.decimals, native: false },
+];
+const GAS_BUFFER = 1_500_000_000_000_000n; // leave 0.0015 ETH for the wrap + approve + zap gas
 const ZERO_BAL: VaultBalances = { weth: 0n, usdg: 0n, native: 0n };
 
 function trimAmount(raw: string, maxFrac: number): string {
@@ -75,8 +81,11 @@ export default function VaultPage() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const token = TOKENS[tokenIdx];
-  const tokenBalance = tokenIdx === 0 ? balances.weth : balances.usdg;
+  const token = DEPOSIT_TOKENS[tokenIdx];
+  const isNative = token.native;
+  // For ETH show the native balance (minus a gas buffer so MAX still leaves gas for the wrap+zap).
+  const rawBalance = isNative ? balances.native : balances.usdg;
+  const tokenBalance = isNative ? (rawBalance > GAS_BUFFER ? rawBalance - GAS_BUFFER : 0n) : rawBalance;
 
   const refresh = useCallback(async () => {
     if (!address) {
@@ -121,7 +130,9 @@ export default function VaultPage() {
     if (!isConnected || !onRH || amountWei <= 0n || insufficient) return;
     setBusy(true);
     setStatus(`Depositing ${amount} ${token.symbol}…`);
-    const r = await almDeposit(token.address as `0x${string}`, amountWei);
+    const r = isNative
+      ? await almDepositNative(amountWei, setStatus)
+      : await almDeposit(token.address as `0x${string}`, amountWei);
     if (r.success) {
       setStatus(`Deposited — position #${r.positionId ?? "?"} (${r.txHash?.slice(0, 10)}…)`);
       setAmount("");
@@ -219,9 +230,9 @@ export default function VaultPage() {
             )}
           </div>
           <div className="px-4 py-3">
-            {/* Token toggle */}
+            {/* Token toggle — ETH (auto-wrapped to WETH) or USDG */}
             <div className="mb-3 flex gap-2">
-              {TOKENS.map((t, i) => (
+              {DEPOSIT_TOKENS.map((t, i) => (
                 <button
                   key={t.symbol}
                   onClick={() => {
@@ -236,6 +247,11 @@ export default function VaultPage() {
                 </button>
               ))}
             </div>
+            {isNative && (
+              <p className="font-family-ThaleahFat -mt-1 mb-2 text-xs tracking-wider text-gray-400">
+                Your ETH is wrapped to WETH automatically, then zapped into the pool.
+              </p>
+            )}
 
             {/* Amount input */}
             <div className={`relative mb-2 rounded px-3 py-2.5 ${insufficient ? "ring-2 ring-red-600" : ""}`}>
@@ -287,19 +303,21 @@ export default function VaultPage() {
               ))}
             </div>
 
-            {/* Zero-balance guidance */}
+            {/* Zero-balance guidance. ETH deposits directly (wrapped); USDG can be acquired in Swap. */}
             {isConnected && onRH && zeroBalance && (
               <div className="mb-3 rounded-xl border-2 border-[#5a4a2a] bg-[#2a2213] px-4 py-3">
                 <p className="font-family-ThaleahFat text-xs tracking-wider text-yellow-200">
-                  You have 0 {token.symbol}. The vault holds a WETH/USDG position — you need WETH or USDG
-                  {balances.native > 0n ? " (your ETH only pays gas here)" : ""}.
+                  You have 0 {token.symbol}
+                  {isNative ? " to deposit (after gas)." : ". Get some in Swap to add USDG-side liquidity."}
                 </p>
-                <Link
-                  href={`/dapp?to=${token.address}&toChainId=4663`}
-                  className="font-family-ThaleahFat mt-2 inline-block cursor-pointer rounded-lg border-2 border-[#3f7d20] bg-[#4e9d2a] px-4 py-2 text-sm tracking-wider text-white transition-all hover:brightness-110"
-                >
-                  GET {token.symbol} IN SWAP →
-                </Link>
+                {!isNative && (
+                  <Link
+                    href={`/dapp?to=${token.address}&toChainId=4663`}
+                    className="font-family-ThaleahFat mt-2 inline-block cursor-pointer rounded-lg border-2 border-[#3f7d20] bg-[#4e9d2a] px-4 py-2 text-sm tracking-wider text-white transition-all hover:brightness-110"
+                  >
+                    GET {token.symbol} IN SWAP →
+                  </Link>
+                )}
               </div>
             )}
 

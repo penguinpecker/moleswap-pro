@@ -195,9 +195,46 @@ async function buildZap(pub: ReturnType<typeof almPublicClient>, token: Address,
 
 export interface DepositResult { success: boolean; txHash?: string; error?: string; positionId?: string }
 
+const wethAbi = [
+  { type: "function", name: "deposit", stateMutability: "payable", inputs: [], outputs: [] },
+  { type: "function", name: "withdraw", stateMutability: "nonpayable", inputs: [{ name: "wad", type: "uint256" }], outputs: [] },
+] as const;
+
 function deadline(): bigint {
   // 20 minutes from a server-supplied-ish clock. Date.now is fine in the browser.
   return BigInt(Math.floor(Date.now() / 1000) + 1200);
+}
+
+/**
+ * Deposit NATIVE ETH: wrap it to WETH first (WETH.deposit is a proxy predeploy, verified live), then run
+ * the normal single-sided zap. The pool's WETH leg IS wrapped ETH, and there is no ETH/WETH pool because
+ * ETH↔WETH is a 1:1 wrap, not a trade — so this is the correct path for a user who holds only ETH.
+ * (The vault mints the position to msg.sender and has no `openFor`, so the wrap can't be folded into the
+ * same transaction as the zap — it's wrap → deposit, sequenced automatically.)
+ */
+export async function almDepositNative(amountIn: bigint, onStep?: (s: string) => void): Promise<DepositResult> {
+  try {
+    const eth = browserEth();
+    if (!eth) return { success: false, error: "No wallet found" };
+    await ensureChain(eth);
+    const wallet = createWalletClient({ chain: robinhoodChain, transport: custom(eth) });
+    const pub = almPublicClient();
+    const [account] = await wallet.getAddresses();
+    if (!account) return { success: false, error: "Wallet not connected" };
+    if (amountIn <= 0n) return { success: false, error: "Enter an amount" };
+
+    onStep?.("Wrapping ETH → WETH…");
+    const wrapHash = await wallet.writeContract({
+      address: WETH.address as Address, abi: wethAbi, functionName: "deposit", value: amountIn, account, chain: robinhoodChain,
+    });
+    const wr = await pub.waitForTransactionReceipt({ hash: wrapHash });
+    if (wr.status !== "success") return { success: false, txHash: wrapHash, error: "Wrap reverted" };
+
+    onStep?.("Depositing WETH…");
+    return await almDeposit(WETH.address as Address, amountIn);
+  } catch (err: any) {
+    return { success: false, error: err?.shortMessage || err?.message?.split("\n")[0] || "Deposit failed" };
+  }
 }
 
 /**
