@@ -1,5 +1,5 @@
 import type React from "react";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import Script from "next/script";
 import "./globals.css";
 import { ConditionalFooter } from "@/components/ConditionalFooter";
@@ -9,6 +9,15 @@ import { WalletProvider } from "@/lib/chain/provider";
 const GA_ID = process.env.NEXT_PUBLIC_GA_ID;
 
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://www.moleswap.com";
+
+// Without this, mobile browsers use a ~980px layout viewport and render the DESKTOP layout shrunk down
+// (with horizontal overflow) — which is exactly why the dapp looked broken on phones. width=device-width
+// makes every responsive breakpoint apply at the real device width.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#3E2410",
+};
 
 export const metadata: Metadata = {
   title: "MoleSwap - Dex Aggregator & AMM Protocol",
