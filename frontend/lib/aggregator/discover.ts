@@ -9,7 +9,14 @@
  * how to price. Empty pools are dropped later when their state reads back with zero liquidity.
  *
  * Only factories MoleRouter can actually execute (Uniswap-V3 + Pancake-V3 callbacks) are queried — Ramses
- * and Velodrome/CLFactory are excluded because the immutable router cannot call their swap callbacks.
+ * and Velodrome/CLFactory are excluded because the immutable router cannot call their swap callbacks, so a
+ * route through them would REVERT (quoting one would be dishonest). Widening to them requires a router
+ * redeploy with the extra callbacks, which changes the address users have approved.
+ *
+ * MEASURED 2026-08-11: the two excluded factories — RamsesV3Factory 0xE0c4ceb9…54A8 and CLFactory/Slipstream
+ * 0xEce6eCd6…E20B — have NO WETH/USDG pool at any fee tier / tick spacing (WETH/USDG is the hub pair of this
+ * WETH-star chain). So the exclusion currently costs users no routable liquidity; revisit only if that
+ * changes. The six factories below are the complete executable set (RH has 8 V3-style factories total).
  */
 import { createPublicClient, http, encodeFunctionData, decodeAbiParameters, type Address } from "viem";
 import { robinhoodChain } from "@/lib/mole/chain";

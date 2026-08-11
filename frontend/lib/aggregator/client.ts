@@ -8,14 +8,12 @@
  */
 
 import { getQuote, NATIVE, type Quote } from "./quote";
-import { fetchV3Pool } from "./indexer";
-import { v4PoolState } from "./venues/v4Pool";
 import type { PoolState } from "./venues/v3Pool";
-import { FetchTransport } from "./transport";
+import { fetchV3StatesMulticall } from "./multicall";
 import { fetchV4MolePool, fetchV4Pool } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
 import { encodePlan, type EncodedPlan } from "./router";
-import { PANCAKE_V3, LIVE_POOL_ID, MOLE_ADDRESSES } from "../mole/chain";
+import { LIVE_POOL_ID, MOLE_ADDRESSES } from "../mole/chain";
 
 const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
@@ -71,7 +69,7 @@ export async function fetchRelevantPoolStates(
   tokenIn: string,
   tokenOut: string,
   weth: string,
-  transport = new FetchTransport(),
+  rpcUrl?: string,
 ): Promise<PoolState[]> {
   const w = lc(weth);
   const inT = lc(tokenIn) === NATIVE_LC ? w : lc(tokenIn);
@@ -99,36 +97,33 @@ export async function fetchRelevantPoolStates(
   for (const p of [...relevant, ...discovered]) {
     if (p.address) byAddr.set(p.address.toLowerCase(), p);
   }
-  // Cap generously — Multicall discovery is bounded and the Alchemy RPC handles the fan-out — but keep a
+  // Cap generously — Multicall discovery is bounded and the RPC handles the fan-out — but keep a
   // ceiling so a pathological pair can't fetch hundreds of pool states.
   const capped = [...byAddr.values()].slice(0, 48);
 
-  const states: (PoolState | null)[] = [];
-  const CONCURRENCY = 8;
-  for (let i = 0; i < capped.length; i += CONCURRENCY) {
-    const chunk = capped.slice(i, i + CONCURRENCY);
-    const batch = await Promise.all(
-      chunk.map(async (p) => {
-        try {
-          // Any Uniswap-V3-style pool (Pancake or Uniswap V3 forks) is read the same way and executed
-          // by MoleRouter's shared V3 callback — the TickLens reads any V3 pool's ticks by address.
-          if ((p.venue === "pancake_v3" || p.venue === "uniswap_v3") && p.address) {
-            return await fetchV3Pool(transport, p.address, PANCAKE_V3.tickLens);
-          }
-          // v4 pools are read via StateView (handled separately); skip here.
-          return null;
-        } catch {
-          // Drop a pool that fails to read rather than failing the whole quote.
-          return null;
-        }
-      }),
-    );
-    states.push(...batch);
-  }
-
-  const v3States = states.filter(
-    (s): s is PoolState => s !== null && (s.liquidity > 0n || s.ticks.length > 0),
+  // Read every V3-style pool's live state in TWO aggregate3 round trips total (not one fetch per pool).
+  // Any Uniswap-V3-style pool (Pancake or Uniswap V3 forks) is read the same way and executed by
+  // MoleRouter's shared V3 callback. The immutables (tokens/fee/spacing) come from the registry/discovery
+  // rows, so only slot0 + liquidity + the tick window are read here. This is the SAME multicall the live
+  // session uses, so the route the card shows and the route that executes are built identically and fast.
+  const v3Rows = capped.filter(
+    (p) => (p.venue === "pancake_v3" || p.venue === "uniswap_v3") && p.address,
   );
+  let v3States: PoolState[] = [];
+  try {
+    v3States = await fetchV3StatesMulticall(
+      v3Rows.map((p) => ({
+        address: p.address as string,
+        token0: p.token0,
+        token1: p.token1,
+        fee: p.fee,
+        tickSpacing: p.tick_spacing,
+      })),
+      rpcUrl,
+    );
+  } catch {
+    /* multicall read failed — fall through to the v4 venues below rather than failing the whole quote */
+  }
 
   // Always add the live MoleSwap v4 (MoleHook) WETH/USDG pool. It is the deepest WETH<->USDG venue and,
   // crucially, the WETH<->USDG BRIDGE edge: without it an arbitrary A->B where A routes via WETH and B via

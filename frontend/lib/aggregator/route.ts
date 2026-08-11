@@ -175,7 +175,7 @@ export function bestSplitRoute(
 ): SplitRoute | undefined {
   const parts = opts.parts ?? 10;
   const maxHops = opts.maxHops ?? 3;
-  const maxPaths = opts.maxPaths ?? 8;
+  const maxPaths = opts.maxPaths ?? 12;
   if (parts <= 0) throw new Error("parts must be positive");
   if (amountIn <= 0n) throw new Error("amountIn must be positive");
 

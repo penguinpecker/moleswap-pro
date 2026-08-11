@@ -16,95 +16,14 @@ import type { PoolState, TickData } from "./venues/v3Pool";
 import { decodeSlot0, decodeUint, decodePopulatedTicks, INDEXER_SELECTORS, DEFAULT_WORD_RADIUS } from "./indexer";
 import { fetchV4MolePool } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
-import { FetchTransport } from "./transport";
 import { PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
 import { getAggFeeBps, cachedAggFeeBps } from "../mole/aggFee";
+// The aggregate3 machinery lives in ./multicall — one implementation, shared with the cold quote path.
+import { MULTICALL3, encAddress, encInt16, encodeAggregate3, decodeAggregate3, rpcCall, type RawCall } from "./multicall";
 
-const MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11";
 const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
-const AGGREGATE3_SELECTOR = "0x82ad56cb";
 
 const lc = (a: string) => a.toLowerCase();
-
-/* ------------------------------------------------------------------ raw aggregate3 encode/decode */
-
-function pad32(hexNo0x: string): string {
-  return hexNo0x.padStart(64, "0");
-}
-function encAddress(addr: string): string {
-  return pad32(addr.toLowerCase().replace(/^0x/, ""));
-}
-function encInt16(v: number): string {
-  return pad32(BigInt.asUintN(256, BigInt(v)).toString(16));
-}
-
-interface RawCall {
-  target: string;
-  callData: string; // 0x-prefixed
-}
-
-/** ABI-encode Multicall3.aggregate3((address,bool,bytes)[]) by hand — no ABI dependency. */
-function encodeAggregate3(calls: RawCall[]): string {
-  const head: string[] = [];
-  const tail: string[] = [];
-  // outer: one dynamic arg at offset 0x20; then array length
-  let dynOffset = calls.length * 32; // offsets area size within the array's data region
-  const bodies: string[] = [];
-  for (const c of calls) {
-    const data = c.callData.replace(/^0x/, "");
-    const dataLen = data.length / 2;
-    const padded = data.padEnd(Math.ceil(dataLen / 32) * 64, "0");
-    // tuple: target, allowFailure(true), offset-to-bytes(0x60), bytes-len, bytes
-    const body =
-      encAddress(c.target) +
-      pad32("1") +
-      pad32((0x60).toString(16)) +
-      pad32(dataLen.toString(16)) +
-      padded;
-    bodies.push(body);
-  }
-  for (const body of bodies) {
-    head.push(pad32(dynOffset.toString(16)));
-    dynOffset += body.length / 2;
-  }
-  return (
-    AGGREGATE3_SELECTOR +
-    pad32((0x20).toString(16)) +
-    pad32(calls.length.toString(16)) +
-    head.join("") +
-    bodies.join("")
-  );
-}
-
-/** Decode aggregate3's (bool success, bytes returnData)[] result. */
-function decodeAggregate3(hex: string): { success: boolean; data: string }[] {
-  const body = hex.replace(/^0x/, "");
-  const word = (i: number) => body.slice(i * 64, i * 64 + 64);
-  const uintAt = (i: number) => Number(BigInt("0x" + word(i)));
-  const arrayBase = uintAt(0) / 32; // usually 1
-  const len = uintAt(arrayBase);
-  const out: { success: boolean; data: string }[] = [];
-  for (let i = 0; i < len; i++) {
-    const tupleOffset = arrayBase + 1 + uintAt(arrayBase + 1 + i) / 32;
-    const success = BigInt("0x" + word(tupleOffset)) === 1n;
-    const bytesOffset = tupleOffset + uintAt(tupleOffset + 1) / 32;
-    const bytesLen = uintAt(bytesOffset);
-    const data = "0x" + body.slice((bytesOffset + 1) * 64, (bytesOffset + 1) * 64 + bytesLen * 2);
-    out.push({ success, data });
-  }
-  return out;
-}
-
-async function rpcCall(rpc: string, to: string, data: string): Promise<string> {
-  const res = await fetch(rpc, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to, data }, "latest"] }),
-  });
-  const j = await res.json();
-  if (j.error) throw new Error(j.error.message || "rpc error");
-  return j.result as string;
-}
 
 /* ----------------------------------------------------------------------------- UI-facing quote */
 
@@ -212,7 +131,7 @@ export class LivePairSession {
       this.tokenIn,
       this.tokenOut,
       this.weth,
-      new FetchTransport(this.rpc),
+      this.rpc,
     );
     // Read the live aggregator fee before the first quote so minAmountOut is built on the post-fee output.
     this.feeBps = await getAggFeeBps(Date.now());

@@ -90,7 +90,10 @@ export function getQuote(pools: readonly PoolState[], req: QuoteRequest): Quote 
   const split = bestSplitRoute(graph, routeIn, routeOut, req.amountIn, {
     parts: req.splitParts ?? 10,
     maxHops: req.maxHops ?? 3,
-    maxPaths: req.maxPaths ?? 8,
+    // 12 (was 8): with pool-disjoint split selection, more ranked candidates just give the selector more
+    // non-overlapping pools to draw from — the cost is parts x paths pure-arithmetic quotes (120 vs 80),
+    // microseconds. Covers tokens with many fee-tier pools without dropping a useful one at the margin.
+    maxPaths: req.maxPaths ?? 12,
   });
 
   if (!split || split.amountOut <= 0n) throw new NoRouteError(req.tokenIn, req.tokenOut);

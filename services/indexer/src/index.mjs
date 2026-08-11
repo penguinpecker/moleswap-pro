@@ -51,6 +51,19 @@ const FACTORIES = [
 const POOL_CREATED_TOPIC = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118";
 const SPACING = { 80: 1, 100: 1, 250: 5, 500: 10, 2500: 50, 3000: 60, 10000: 200 };
 
+/* ---- swap-volume config: real per-pool 24h volume/fees for the pools page ----
+ * We scan Swap events for a small set of tracked pools, bucket the USD notional by ~1h block windows,
+ * and store it in mp_pool_volume. The 24h view sums the last 24h. This is REAL on-chain volume, not a
+ * model. The tracked set is the pools the app displays (WETH/USDG tiers) — extend via VOLUME_POOLS. */
+const UNI_V3_SWAP = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
+const PANCAKE_V3_SWAP = "0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83";
+const BLOCKS_PER_BUCKET = Number(process.env.VOL_BLOCKS_PER_BUCKET) || 36000; // ~1h at RH's ~0.0999s/block
+const BLOCKS_24H = Number(process.env.VOL_BLOCKS_24H) || 864000; // measured 864,691 blocks / 24h
+const MAX_VOL_BLOCKS_PER_CYCLE = Number(process.env.MAX_VOL_BLOCKS_PER_CYCLE) || 900000; // backfill the full 24h in the first cycle (~173 getLogs for 3 pools, ~11s); tiny incremental reads after
+const VOLUME_POOLS = (process.env.VOLUME_POOLS ||
+  "0x88a8e96e7785d378825e8b5d7fc0e6f62487061e,0x4520f3f932ae530c58cc332b532951e5814e6cb8,0x0ff6bdd6ac5db3426c3c2c922f93a5749887e28d")
+  .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+
 if (!SUPABASE_URL || !ANON_KEY || !WRITE_SECRET) {
   console.error("SUPABASE_URL, SUPABASE_ANON_KEY and INDEXER_SECRET are required");
   process.exit(1);
@@ -330,10 +343,115 @@ async function refresh() {
     if (error) throw new Error(`advance: ${error.message}`);
   }
 
+  // 4. REAL swap volume for the tracked pools — non-fatal (its own cursor + idempotent apply). A volume
+  //    failure must not error the whole cycle and trip the health check that guards the fund-critical parts.
+  let volStr = "vol skip";
+  try {
+    const v = await refreshVolume(safeHead);
+    if (v.to >= v.from) {
+      await supabase.rpc("mp_volume_prune", { p_secret: WRITE_SECRET }); // best-effort; bounds the table
+      volStr = `vol ${v.from}-${v.to} +${v.swaps} swaps`;
+    }
+  } catch (e) {
+    volStr = `vol ERR ${e instanceof Error ? e.message : String(e)}`;
+    console.error("volume refresh failed:", volStr);
+  }
+
   const { count } = await supabase.from("mp_tokens").select("*", { count: "exact", head: true }).eq("verified", true);
   const now = Date.now();
   status = { lastRun: new Date(now).toISOString(), lastRunMs: now, cursor: Math.max(cursor, to >= from ? to : cursor), latest, newPools: newPoolCount, newTokens: newTokenCount, refreshed, verified: count ?? status.verified, error: null };
-  console.log(`[${status.lastRun}] blocks ${from}-${to}/${safeHead} · +${newPoolCount} pools · +${newTokenCount} tokens · refreshed ${refreshed} · verified ${status.verified}`);
+  console.log(`[${status.lastRun}] blocks ${from}-${to}/${safeHead} · +${newPoolCount} pools · +${newTokenCount} tokens · refreshed ${refreshed} · verified ${status.verified} · ${volStr}`);
+}
+
+/* ------------------------------------------------------------------------------------- swap volume */
+const hexnum = (n) => "0x" + n.toString(16);
+function i256(word) {
+  const v = BigInt("0x" + word);
+  return v >= (1n << 255n) ? v - (1n << 256n) : v;
+}
+const tsCache = new Map();
+async function blockTs(n) {
+  if (tsCache.has(n)) return tsCache.get(n);
+  const b = await rpc("eth_getBlockByNumber", [hexnum(n), false]);
+  const ts = b && b.timestamp ? parseInt(b.timestamp, 16) : Math.floor(Date.now() / 1000);
+  tsCache.set(n, ts);
+  return ts;
+}
+
+/**
+ * REAL 24h volume: scan Swap events for the tracked pools from a persisted cursor forward, convert each
+ * swap's hub-token notional to USD (USDG side = exact USD; WETH side = WETH x price), bucket by ~1h block
+ * window, and upsert additively. The upsert also advances the cursor atomically and is idempotent, so a
+ * retried range never double-counts. Non-fatal: a failure here logs and leaves fund-safety untouched —
+ * volume is a display metric, the on-chain minAmountOut is the only guarantee.
+ */
+async function refreshVolume(safeHead) {
+  if (VOLUME_POOLS.length === 0) return { from: 0, to: 0, swaps: 0 };
+
+  // Resolve immutables (token0/token1/fee) for the tracked pools from the registry we already maintain.
+  const { data: poolRows, error: pErr } = await supabase
+    .from("mp_pools").select("address,token0,token1,fee").in("id", VOLUME_POOLS);
+  if (pErr) throw new Error(`vol pools: ${pErr.message}`);
+  const metaByAddr = new Map();
+  for (const r of poolRows || []) {
+    const t0 = lc(r.token0), t1 = lc(r.token1);
+    let hub = null, hubIsToken0 = false;
+    if (t0 === USDG || t1 === USDG) { hub = "usdg"; hubIsToken0 = t0 === USDG; }
+    else if (t0 === WETH || t1 === WETH) { hub = "weth"; hubIsToken0 = t0 === WETH; }
+    if (hub) metaByAddr.set(lc(r.address), { hub, hubIsToken0, fee: Number(r.fee) });
+  }
+  const addrs = [...metaByAddr.keys()];
+  if (addrs.length === 0) return { from: 0, to: 0, swaps: 0 };
+
+  const curRaw = await supabase.rpc("mp_volume_cursor", { p_secret: WRITE_SECRET });
+  if (curRaw.error) throw new Error(`vol cursor: ${curRaw.error.message}`);
+  const cur = Number(curRaw.data ?? 0);
+  const from = cur > 0 ? cur + 1 : Math.max(0, safeHead - BLOCKS_24H); // first run: only look back 24h
+  const to = Math.min(safeHead, from + MAX_VOL_BLOCKS_PER_CYCLE - 1);
+  if (to < from) return { from, to, swaps: 0 };
+
+  const byBucket = new Map(); // `${pool}|${bucket}` -> {pool,bucket,volume_usd,fees_usd,swaps}
+  let swapCount = 0;
+  for (let lo = from; lo <= to; lo += GETLOGS_CHUNK) {
+    const hi = Math.min(to, lo + GETLOGS_CHUNK - 1);
+    const logs = await rpc("eth_getLogs", [
+      { address: addrs, topics: [[UNI_V3_SWAP, PANCAKE_V3_SWAP]], fromBlock: hexnum(lo), toBlock: hexnum(hi) },
+    ]); // throws on persistent failure → cursor not advanced, range re-read next cycle (idempotent)
+    if (!Array.isArray(logs)) continue;
+    for (const l of logs) {
+      const meta = metaByAddr.get(lc(l.address));
+      if (!meta || !l.data || l.data.length < 2 + 128) continue;
+      const body = l.data.replace(/^0x/, "");
+      const amount0 = i256(body.slice(0, 64));
+      const amount1 = i256(body.slice(64, 128));
+      const amt = meta.hubIsToken0 ? amount0 : amount1;
+      const abs = amt < 0n ? -amt : amt;
+      const volUsd = meta.hub === "usdg"
+        ? Number(abs) / 1e6
+        : (Number(abs) / 1e18) * PRICE_USDG_PER_ETH;
+      if (!(volUsd > 0)) continue;
+      const feeUsd = (volUsd * meta.fee) / 1e6;
+      const blockNum = parseInt(l.blockNumber, 16);
+      const bucket = Math.floor(blockNum / BLOCKS_PER_BUCKET);
+      const key = `${lc(l.address)}|${bucket}`;
+      const b = byBucket.get(key) || { pool: lc(l.address), bucket, volume_usd: 0, fees_usd: 0, swaps: 0 };
+      b.volume_usd += volUsd; b.fees_usd += feeUsd; b.swaps += 1;
+      byBucket.set(key, b);
+      swapCount++;
+    }
+  }
+
+  const rows = [];
+  for (const b of byBucket.values()) {
+    const startBlock = Math.min(b.bucket * BLOCKS_PER_BUCKET, safeHead);
+    rows.push({ ...b, bucket_ts: await blockTs(startBlock) });
+  }
+  // Atomic idempotent apply + cursor advance (safe even with empty rows: it just advances the cursor).
+  const up = await supabase.rpc("mp_upsert_volume", {
+    p_secret: WRITE_SECRET, p_rows: rows, p_from_block: from, p_to_block: to,
+  });
+  if (up.error) throw new Error(`upsert_volume: ${up.error.message}`);
+  return { from, to, swaps: swapCount };
 }
 
 async function loop() {
