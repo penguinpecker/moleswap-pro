@@ -343,24 +343,10 @@ async function refresh() {
     if (error) throw new Error(`advance: ${error.message}`);
   }
 
-  // 4. REAL swap volume for the tracked pools — non-fatal (its own cursor + idempotent apply). A volume
-  //    failure must not error the whole cycle and trip the health check that guards the fund-critical parts.
-  let volStr = "vol skip";
-  try {
-    const v = await refreshVolume(safeHead);
-    if (v.to >= v.from) {
-      await supabase.rpc("mp_volume_prune", { p_secret: WRITE_SECRET }); // best-effort; bounds the table
-      volStr = `vol ${v.from}-${v.to} +${v.swaps} swaps`;
-    }
-  } catch (e) {
-    volStr = `vol ERR ${e instanceof Error ? e.message : String(e)}`;
-    console.error("volume refresh failed:", volStr);
-  }
-
   const { count } = await supabase.from("mp_tokens").select("*", { count: "exact", head: true }).eq("verified", true);
   const now = Date.now();
   status = { lastRun: new Date(now).toISOString(), lastRunMs: now, cursor: Math.max(cursor, to >= from ? to : cursor), latest, newPools: newPoolCount, newTokens: newTokenCount, refreshed, verified: count ?? status.verified, error: null };
-  console.log(`[${status.lastRun}] blocks ${from}-${to}/${safeHead} · +${newPoolCount} pools · +${newTokenCount} tokens · refreshed ${refreshed} · verified ${status.verified} · ${volStr}`);
+  console.log(`[${status.lastRun}] blocks ${from}-${to}/${safeHead} · +${newPoolCount} pools · +${newTokenCount} tokens · refreshed ${refreshed} · verified ${status.verified}`);
 }
 
 /* ------------------------------------------------------------------------------------- swap volume */
@@ -385,8 +371,10 @@ async function blockTs(n) {
  * retried range never double-counts. Non-fatal: a failure here logs and leaves fund-safety untouched —
  * volume is a display metric, the on-chain minAmountOut is the only guarantee.
  */
-async function refreshVolume(safeHead) {
+async function refreshVolume() {
   if (VOLUME_POOLS.length === 0) return { from: 0, to: 0, swaps: 0 };
+  const latest = parseInt(await rpc("eth_blockNumber", []), 16);
+  const safeHead = latest - CONFIRMATIONS;
 
   // Resolve immutables (token0/token1/fee) for the tracked pools from the registry we already maintain.
   const { data: poolRows, error: pErr } = await supabase
@@ -462,6 +450,19 @@ async function loop() {
     status.error = e instanceof Error ? e.message : String(e);
     console.error("refresh failed:", status.error);
   }
+
+  // Volume runs INDEPENDENTLY of discovery/liquidity: it has its own cursor + idempotent apply, so a
+  // heavier token-refresh step timing out must not starve the pools page of real volume. Non-fatal.
+  try {
+    const v = await refreshVolume();
+    if (v.to >= v.from) {
+      await supabase.rpc("mp_volume_prune", { p_secret: WRITE_SECRET }); // best-effort; bounds the table
+      console.log(`[vol] ${v.from}-${v.to} +${v.swaps} swaps`);
+    }
+  } catch (e) {
+    console.error("volume refresh failed:", e instanceof Error ? e.message : String(e));
+  }
+
   setTimeout(loop, Math.max(1000, REFRESH_MS - (Date.now() - started)));
 }
 
