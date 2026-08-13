@@ -22,19 +22,23 @@ export async function progressQuestsForAction(
 ): Promise<{
   progressed: { questId: string; title: string; newProgress: number; completed: boolean; xpReward: number }[];
 }> {
-  if (!supabase) return { progressed: [] };
-
   try {
-    const { data, error } = await supabase.rpc("progress_quest", {
-      p_user_id: userId,
-      p_action_type: actionType,
-      p_action_data: actionData,
+    // Goes through our own server route, which holds the write secret and calls
+    // `progress_quest_gated`. Calling `progress_quest` straight from the browser is
+    // no longer possible (revoked from anon) — it awarded XP for ANY user id.
+    const res = await fetch("/api/game/progress-quest", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, actionType, actionData }),
     });
 
-    if (error) {
-      console.error("Quest progression error:", error);
+    if (!res.ok) {
+      console.error("Quest progression error:", res.status);
       return { progressed: [] };
     }
+
+    const json = await res.json();
+    const data = json?.progressed;
 
     return {
       progressed: (data || []).map((r: any) => ({
