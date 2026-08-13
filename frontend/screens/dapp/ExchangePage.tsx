@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowUpDown, Clock, Fuel, Search, Settings as SettingsIcon } from "lucide-react";
 import { DappStep } from ".";
 import { getChains, getTokensForChain, tokenFallbackIcon, type ChainEntry } from "@/lib/chain/tokenList";
@@ -1476,7 +1476,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                       const showOwnedHead = isHeld && idx === 0;
                       const showRestHead = !isHeld && (idx === 0 ? false : prevHeld);
                       return (
-                        <React.Fragment key={`${token.address}-${idx}`}>
+                        <Fragment key={`${token.address}-${idx}`}>
                         {showOwnedHead && <div className="tk-group">Your tokens</div>}
                         {showRestHead && <div className="tk-group">All tokens</div>}
                         <button
@@ -1528,7 +1528,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                             )}
                           </div>
                         </button>
-                        </React.Fragment>
+                        </Fragment>
                       );
                     })
                   ) : (
