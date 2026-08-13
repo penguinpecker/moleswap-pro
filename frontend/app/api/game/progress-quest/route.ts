@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { withRateLimit } from "@/lib/api/helpers";
 
 /**
  * Quest progression, server side.
@@ -14,10 +15,21 @@ import { createClient } from "@supabase/supabase-js";
  * in mp_private.indexer_config — the same pattern the mp_* indexer RPCs use. The
  * secret lives only in this server process; the browser never sees it.
  *
- * NOTE (deliberate, and worth stating plainly): this removes ARBITRARY-VALUE and
- * off-site forgery, but it is not wallet-ownership proof. Identity here is still a
- * user id supplied by the caller, so a determined actor can still progress their own
- * quests. Closing that needs a signed-nonce session, which is a separate change.
+ * NOTE (deliberate, and worth stating plainly): this removes ARBITRARY-VALUE forgery,
+ * but it is NOT wallet-ownership proof. Identity here is still a user id supplied by the
+ * caller, and the roster of user ids is publicly readable, so an unauthenticated caller
+ * can still drive quest progression for ANY account — capped at each quest's own
+ * xp_reward, and once per one-time quest. Closing that needs a signed-nonce wallet
+ * session; it is a product change (it adds a signature prompt) and is still open.
+ *
+ * Two controls narrow that residual, both added 2026-08-13 after the adversarial re-test:
+ *  1. `progress_quest_gated` refuses any action_type belonging to a quest whose
+ *     verification_type is not 'auto'. That check is in the DB, not here, so it cannot be
+ *     bypassed — it is what stops actionType='twitter_follow' from paying out 500 XP with
+ *     no social action. It is data-driven, so new manual/proof quests are covered for free.
+ *     Deliberately NOT duplicated as a hardcoded allowlist here: the DB rule is stricter and
+ *     self-maintaining, whereas a literal list would silently break the next 'auto' quest.
+ *  2. The write rate limit below, matching the sibling /api/quests/verify-social route.
  */
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -29,6 +41,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ACTION_RE = /^[a-z0-9_]{1,40}$/;
 
 export async function POST(req: NextRequest) {
+  const blocked = withRateLimit(req, "write");
+  if (blocked) return blocked;
+
   if (!SUPABASE_URL || !SUPABASE_ANON) {
     return NextResponse.json({ error: "supabase not configured" }, { status: 503 });
   }
@@ -75,7 +90,13 @@ export async function POST(req: NextRequest) {
   });
 
   if (error) {
-    // Never echo the DB error to the client — it can carry schema detail.
+    // 23514 is the guard inside progress_quest_gated rejecting an action_type that belongs
+    // to a quest requiring real verification. That is a caller error, not a server fault,
+    // and saying so leaks nothing the public `quests` table does not already show.
+    if (error.code === "23514") {
+      return NextResponse.json({ error: "action requires verification" }, { status: 403 });
+    }
+    // Never echo any other DB error to the client — it can carry schema detail.
     console.error("progress_quest_gated failed:", error.message);
     return NextResponse.json({ error: "quest progression failed" }, { status: 502 });
   }
