@@ -240,10 +240,6 @@ export default function DiamondMiner() {
       <NavBar />
       <main>
         <header className="hero">
-          <span className="badge">
-            <span className="dot" />
-            Mini-game · work in progress
-          </span>
           <h1>Diamond Miner.</h1>
           <p className="sub">
             The mole&apos;s next dig. The cave is carved — the game inside is

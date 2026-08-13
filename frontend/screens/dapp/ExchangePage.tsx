@@ -111,10 +111,6 @@ const TokenIcon = ({
 /** Shared hero — the Burrow header above both the exchange and picker views. */
 const ExchangeHero = () => (
   <header className="hero">
-    <span className="badge">
-      <span className="dot" />
-      Aggregated across every venue on Robinhood Chain
-    </span>
     <h1>
       Swap at the
       <br />

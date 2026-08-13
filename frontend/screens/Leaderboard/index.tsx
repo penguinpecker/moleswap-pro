@@ -111,7 +111,6 @@ export const QuestCardComponent = () => {
 
       {/* Hero */}
       <header className="hero">
-        <span className="badge"><span className="dot" />Season 2 · ranked by XP</span>
         <h1>Leaderboard.</h1>
         <p className="sub">
           The deepest diggers on Robinhood Chain. Swap, provide liquidity and finish

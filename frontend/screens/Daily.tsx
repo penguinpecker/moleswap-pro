@@ -143,7 +143,6 @@ export const QuestCardComponent = () => {
 
       {/* Hero */}
       <header className="hero">
-        <span className="badge"><span className="dot" />Daily rewards · Season 2</span>
         <h1>Daily wheel.</h1>
         <p className="sub">
           Spin once a day for bonus XP — +50 to +500 a pop, with the odd

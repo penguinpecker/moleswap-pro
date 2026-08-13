@@ -341,10 +341,6 @@ export default function ConnectTwitterPage() {
       <main>
         {/* Hero */}
         <header className="hero">
-          <span className="badge">
-            <span className="dot" />
-            Onboarding
-          </span>
 
           {/* Step indicator */}
           {currentStep !== "tasks" && (

@@ -7,10 +7,6 @@ export default function AboutPage() {
       <NavBar />
 
       <header className="hero">
-        <span className="badge">
-          <span className="dot" />
-          DEX aggregator &amp; AMM · Robinhood Chain
-        </span>
         <h1>About MoleSwap.</h1>
         <p className="sub">
           DEX aggregator &amp; AMM on Robinhood Chain — swap tokens, earn XP,

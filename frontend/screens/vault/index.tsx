@@ -209,7 +209,6 @@ export default function VaultPage() {
 
       <main>
         <header className="hero">
-          <span className="badge"><span className="dot" />MoleHook v4 · dynamic fee</span>
           <h1>TWAP Vault.</h1>
           <p className="sub">
             Auto-managed WETH/USDG liquidity · single-sided deposit · TWAP-priced re-centering.

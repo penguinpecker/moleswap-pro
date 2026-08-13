@@ -2,7 +2,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { LogOut, Copy, Check, ChevronDown, Wallet } from "lucide-react";
 import { useWallet } from "@/lib/chain/provider";
-import { ChainSelectorButton } from "./ChainSelectorButton";
 
 export function ConnectWalletButton() {
   const { address, isConnected, isConnecting, onRH, switchToRH, connectWith, wallets, disconnect } =
@@ -122,12 +121,8 @@ export function ConnectWalletButton() {
   // --- CONNECTED ---
   return (
     <div className="wal-wrap">
-      {/* Chain network status pill */}
-      <ChainSelectorButton />
-
-      <span className="wal-div" />
-
-      {/* Wallet address + dropdown */}
+      {/* Wallet address + dropdown. The wrong-network case is handled above by the
+          "Switch to Robinhood" state, so no separate chain pill is needed here. */}
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => setShowMenu(!showMenu)}

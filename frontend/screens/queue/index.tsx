@@ -130,10 +130,6 @@ export default function QueuePage() {
       <main>
         <div className="narrow">
           <header className="hero">
-            <span className="badge">
-              <span className="dot" />
-              MoleQueue{schedule ? ` · ${Math.round(schedule.epochDuration / 60)}-minute epochs` : ""}
-            </span>
             <h1>Batch queue.</h1>
             <p className="sub">
               Submit an intent, not a swap. At the cutoff, opposing orders cross at the TWAP — no slippage,

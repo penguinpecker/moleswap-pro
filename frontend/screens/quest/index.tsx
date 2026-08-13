@@ -298,7 +298,6 @@ export const QuestCardComponent = () => {
 
       {/* Hero */}
       <header className="hero">
-        <span className="badge"><span className="dot" />Season 2 · quest board</span>
         <h1>Quests.</h1>
         <p className="sub">
           Social shout-outs, dapp milestones and arcade rounds — every quest pays XP

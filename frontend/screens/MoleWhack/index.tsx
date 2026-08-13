@@ -421,10 +421,6 @@ export default function MoleWhack({
       <NavBar />
       <main>
         <header className="hero">
-          <span className="badge">
-            <span className="dot" />
-            Mini-game · free play
-          </span>
           <h1>Whack-a-Mole.</h1>
           <p className="sub">30 seconds. Seven holes. 50 XP a mole.</p>
           <MoleMascot />

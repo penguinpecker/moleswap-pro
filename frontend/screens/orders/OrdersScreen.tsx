@@ -134,10 +134,6 @@ export default function OrdersScreen({ mode }: { mode: Mode }) {
 
       <main>
         <header className="hero">
-          <span className="badge">
-            <span className="dot" />
-            MoleOrders · keeper-executed
-          </span>
           <h1>{isDca ? "DCA." : "Limit orders."}</h1>
           <p className="sub">
             {isDca

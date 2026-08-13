@@ -107,7 +107,6 @@ const ProfilePage = () => {
 
         {/* Hero */}
         <header className="hero">
-          <span className="badge"><span className="dot" />Your digger card</span>
           <h1>Profile.</h1>
           <p className="sub">
             Your standing underground — XP, wallet address and where you rank

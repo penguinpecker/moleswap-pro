@@ -102,10 +102,6 @@ export default function CreatePoolPage() {
 
       <main>
         <header className="hero">
-          <span className="badge">
-            <span className="dot" />
-            Operator console · MoleHook v4
-          </span>
           <h1>Create pool.</h1>
           <p className="sub">Operator only — mint a new MoleHook v4 pool and admit it to the vault.</p>
           <MoleMascot />

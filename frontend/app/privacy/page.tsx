@@ -7,10 +7,6 @@ export default function PrivacyPage() {
       <NavBar />
 
       <header className="hero">
-        <span className="badge">
-          <span className="dot" />
-          Legal · MoleSwap
-        </span>
         <h1>Privacy Policy.</h1>
         <p className="sub dateline">Last updated: 2/27/2026</p>
         <MoleMascot />

@@ -7,10 +7,6 @@ export default function TermsPage() {
       <NavBar />
 
       <header className="hero">
-        <span className="badge">
-          <span className="dot" />
-          Legal · MoleSwap
-        </span>
         <h1>Terms of Use.</h1>
         <p className="sub dateline">Last updated: 2/27/2026</p>
         <MoleMascot />

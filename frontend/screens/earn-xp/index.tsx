@@ -108,10 +108,6 @@ export default function EarnXpPage() {
       <main>
         {/* Hero */}
         <header className="hero">
-          <span className="badge">
-            <span className="dot" />
-            XP program
-          </span>
           <h1>Earn XP.</h1>
           {user && (
             <p className="sub">

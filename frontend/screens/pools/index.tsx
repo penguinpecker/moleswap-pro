@@ -444,10 +444,6 @@ const PoolsContent = () => {
       <style>{POOLS_CSS}</style>
 
       <header className="hero">
-        <span className="badge">
-          <span className="dot" />
-          {loading ? "…" : pools.length} pools live · MoleHook v4
-        </span>
         <h1>Liquidity pools.</h1>
         <p className="sub">Robinhood Chain — aggregated across every venue.</p>
         <MoleMascot />

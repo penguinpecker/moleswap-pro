@@ -92,10 +92,6 @@ export default function WaitlistPage() {
       <main>
         {/* Hero */}
         <header className="hero">
-          <span className="badge">
-            <span className="dot" />
-            Invite only
-          </span>
           <h1>Enter waitlist code.</h1>
           <MoleMascot />
         </header>

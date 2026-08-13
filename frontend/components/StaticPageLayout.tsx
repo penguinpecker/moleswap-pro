@@ -18,10 +18,6 @@ export default function StaticPageLayout({
 
       {/* Hero */}
       <header className="hero">
-        <span className="badge">
-          <span className="dot" />
-          MoleSwap
-        </span>
         <h1>{title}</h1>
         <MoleMascot />
       </header>
