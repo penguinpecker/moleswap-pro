@@ -1,105 +1,133 @@
 "use client";
-import { Button } from "@/components/ui/button";
-import Image from "next/image";
 import Link from "next/link";
 import React, { useEffect, useState } from "react";
-import { NavBar } from "../shared";
-import { Copy, X, MessageCircle, Share2 } from "lucide-react";
+import { NavBar, BackgroundImage, MoleMascot } from "../shared";
+import { Check, Copy, Share2, Wallet } from "lucide-react";
 import { FaXTwitter } from "react-icons/fa6";
 import { useWallet } from "@/lib/chain/provider";
 import { getOrCreateUser, getUserRank } from "@/lib/supabase/api";
+
+/* page-scoped Burrow styles — lifted from the profile.html prototype */
+const PAGE_CSS = `
+.pf-wrap { max-width: 560px; margin: 6px auto 0; position: relative; isolation: isolate; }
+.pf-peek {
+  position: absolute; left: -34px; top: 22%; width: 74px; height: 74px; z-index: -1;
+  animation: peeksway 6s ease-in-out infinite;
+}
+.pf-peek .mole { display: block; position: static; width: 100%; height: 100%; }
+@keyframes peeksway {
+  0%, 100% { transform: rotate(-24deg) translateY(0); }
+  50%      { transform: rotate(-21deg) translateY(-6px); }
+}
+@media (max-width: 720px) { .pf-peek { display: none; } }
+.pf-card { padding: 24px; animation: cardin .45s ease backwards; }
+@keyframes cardin { from { opacity: 0; transform: translateY(12px); } }
+.pf-head { display: flex; gap: 16px; align-items: stretch; }
+.pf-avatar {
+  width: 96px; height: 96px; flex: none; border-radius: var(--r-md);
+  background: linear-gradient(180deg, #fff, var(--cream-2));
+  border: 3px solid rgba(44,26,12,.22); box-shadow: var(--sh-in);
+  display: grid; place-items: center; overflow: hidden;
+}
+.pf-avatar .mole { display: block; position: static; width: 86%; height: 86%; }
+@media (max-width: 460px) { .pf-avatar { width: 76px; height: 76px; } }
+.pf-id { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 10px; }
+.pf-name {
+  padding: 9px 12px; border-radius: 10px;
+  background: linear-gradient(180deg, #5b3119, #4a2712); color: #ffe6c4;
+  border: 1px solid rgba(20,9,1,.55);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 2px 0 rgba(42,24,10,.25);
+  font-family: var(--font-num); font-size: 14px; font-weight: 700; letter-spacing: .02em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pf-xpbar {
+  position: relative; height: 26px; border-radius: 99px; overflow: hidden;
+  background: var(--cream-2); border: 1px solid rgba(44,26,12,.18);
+  box-shadow: inset 0 2px 4px rgba(44,26,12,.14);
+}
+.pf-xpbar i {
+  display: block; height: 100%; width: 5%; border-radius: 99px;
+  background: linear-gradient(180deg, #ffcd7d, var(--amber));
+  box-shadow: inset 0 2px 0 rgba(255,255,255,.55);
+  transition: width 500ms ease;
+}
+.pf-xpbar .xl {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-family: var(--font-num); font-size: 12px; font-weight: 800; color: var(--ink);
+  text-shadow: 0 1px 0 rgba(255,255,255,.5); letter-spacing: .02em;
+}
+.pf-wallet {
+  margin-top: 18px; border-radius: var(--r-md); padding: 14px 15px;
+  background: rgba(205,95,42,.10); border: 1px solid rgba(205,95,42,.28);
+}
+.pw-top {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3);
+}
+.pw-top svg { color: var(--clay); flex: none; }
+.pw-body { display: flex; align-items: center; gap: 12px; margin-top: 9px; }
+.pw-addr {
+  flex: 1; min-width: 0; font-family: var(--font-num); font-size: 12.5px; font-weight: 700;
+  letter-spacing: .01em; word-break: break-all; user-select: all;
+}
+.pw-copy {
+  flex: none; width: 40px; height: 40px; border-radius: 12px; cursor: pointer;
+  display: grid; place-items: center;
+  background: var(--p-chip); border: 1px solid var(--p-card-line); color: var(--p-card-ink-2);
+  box-shadow: var(--p-card-sh);
+}
+.pw-copy:disabled { opacity: .4; cursor: default; }
+.pw-copy:not(:disabled):active { transform: scale(.93); }
+.pf-ranklbl { margin-top: 20px; font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+.pf-plaques { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 9px; }
+.plq {
+  padding: 14px 15px; border-radius: var(--r-md); text-align: center;
+  background: rgba(255,255,255,.62); border: 1px solid rgba(44,26,12,.09);
+  box-shadow: inset 0 -2px 0 rgba(44,26,12,.05);
+}
+.plq .k { font-size: 10.5px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+.plq .v { margin-top: 7px; font-family: var(--font-num); font-size: 1.35rem; font-weight: 700; letter-spacing: -.02em; }
+.pf-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; }
+.pf-sq {
+  width: 42px; height: 42px; border-radius: 12px; cursor: pointer;
+  display: grid; place-items: center;
+  background: var(--p-chip); border: 1px solid var(--p-card-line); color: var(--p-card-ink-2);
+  box-shadow: var(--p-card-sh); text-decoration: none; font-size: 16px; font-weight: 800;
+}
+.pf-sq:active { transform: scale(.93); }
+`;
+
 const ProfilePage = () => {
   return (
-    <div className="relative flex min-h-screen w-full flex-col items-center gap-2 sm:gap-4">
+    <>
       <BackgroundImage />
+      <NavBar />
+      <div className="w-full">
+        <style>{PAGE_CSS}</style>
 
-      <div className="absolute top-0 left-1/2 z-20 flex h-14 w-full -translate-x-1/2 transform items-center justify-center gap-4 overflow-visible sm:h-40 sm:gap-16">
-        {/* Left Cloud */}
-        <Image
-          src="/profile/Chain.png"
-          alt="Cloud Left"
-          width={44}
-          height={44}
-          className="animate-cloud-left h-full max-h-20 sm:max-h-28 md:max-h-full"
-        />
+        {/* Hero */}
+        <header className="hero">
+          <span className="badge"><span className="dot" />Your digger card</span>
+          <h1>Profile.</h1>
+          <p className="sub">
+            Your standing underground — XP, wallet address and where you rank
+            among the diggers.
+          </p>
+          <MoleMascot />
+        </header>
 
-        {/* Right Cloud */}
-        <Image
-          src="/profile/Chain.png"
-          alt="Cloud Right"
-          width={44}
-          height={44}
-          className="animate-cloud-left h-full max-h-28 sm:max-h-full"
-        />
-
-        {/* Profile board stays static */}
-        <Image
-          src="/profile/profile-board.png"
-          alt="Profile Board"
-          width={44}
-          height={44}
-          className="animate-cloud-left absolute -bottom-1/2 left-1/2 w-[50%] -translate-x-1/2 transform sm:w-fit"
-        />
+        <section className="pf-wrap">
+          <span className="pf-peek" aria-hidden="true">
+            <MoleMascot />
+          </span>
+          <ProfileCard />
+        </section>
       </div>
-
-      <div className="relative z-50 mx-auto mt-2 block w-full px-2 sm:mt-4 sm:px-4">
-        <NavBar />
-      </div>
-      <div className="relative z-20 mt-2 mb-4 w-full px-3 sm:mx-auto sm:mt-32 sm:mb-16 sm:w-auto sm:px-0">
-        <ProfileCard />
-      </div>
-    </div>
+    </>
   );
 };
 
 export default ProfilePage;
-
-const BackgroundImage = () => {
-  return (
-    <>
-      <div className="fixed inset-0 flex h-[40vh] flex-col">
-        <div className="h-[25%] bg-[#39BBE3]"></div>
-        <div className="h-[25%] bg-[#6ED2F0]"></div>
-        <div className="h-[25%] bg-[#AEE5F5]"></div>
-        <div className="h-[25%] bg-[#E9F9FE]"></div>
-      </div>
-      <div className="fixed inset-0 z-10 max-md:hidden">
-        {/* clouds right top  */}
-        <Image
-          src="/profile/c2.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="animate-float-left absolute top-5 right-25 w-[120px] object-cover"
-        />
-        {/* clouds Center  */}
-        <Image
-          src="/profile/c3.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="animate-float-right absolute top-[10%] left-[20%] w-[120px] object-cover"
-        />
-      </div>
-      {/*   GRASS  */}
-      <Image
-        src="/profile/grass-others.png"
-        alt="Profile"
-        width={200}
-        height={200}
-        className="fixed bottom-[48vh] z-10 h-full max-h-[20vh] w-full object-cover sm:bottom-[44vh] sm:max-h-[35vh]"
-      />
-      {/*   BRICK */}
-      <Image
-        src="/profile/profile-brick.png"
-        alt="Profile"
-        width={200}
-        height={200}
-        className="fixed bottom-0 h-full max-h-[60vh] w-full object-cover sm:max-h-[57vh]"
-      />
-    </>
-  );
-};
 
 const ProfileCard = () => {
   const { address, isConnected } = useWallet();
@@ -148,156 +176,84 @@ const ProfileCard = () => {
   const displayBestRank = rank?.best_rank ? `#${rank.best_rank}` : (profile?.best_rank ? `#${profile.best_rank}` : "—");
 
   return (
-    <div className="relative flex w-full flex-col items-center p-2 pt-4 sm:w-[500px] sm:p-12 sm:pt-28">
-      <Image
-        src="/profile/frame-bg.svg"
-        alt="Frame"
-        width={88}
-        height={88}
-        className="absolute inset-0 z-0 h-full w-full"
-      />
-      <Image
-        src="/profile/mole-left-tillted.svg"
-        alt="Frame"
-        width={160}
-        height={160}
-        className="absolute top-[25%] -left-[20%] z-[-1] max-sm:hidden"
-      />
-      <div className="relative z-10 w-full p-1.5 sm:p-4">
-        {/* Player Profile Header */}
-        <div className="mb-2 flex items-center sm:mb-4">
-          {/* Avatar */}
-          <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-lg border-2 border-white sm:h-24 sm:w-24 sm:border-4">
-            <Image
-              src="/profile/avatar.png"
-              alt="Avatar"
-              width={64}
-              height={64}
-              className="h-12 w-12 sm:h-20 sm:w-20"
-            />
-          </div>
-
-          {/* Name and XP Panel */}
-          <div className="flex flex-1 flex-col rounded-lg border-r-2 border-[#5D2C28]">
-            {/* Player Name */}
-            <div className="font-family-ThaleahFat w-[80%] border-t-2 border-r-2 border-[#140901] bg-[#5D2C28] pl-2 text-xs font-normal text-white sm:pl-4 sm:text-2xl">
-              {displayName}
-            </div>
-
-            {/* XP Bar */}
-            <div className="relative flex h-4 w-full items-center overflow-hidden rounded-r-md border border-[#D9A982] bg-[#FFD595] sm:h-6">
-              {/* XP Bar Fill */}
-              <div className="relative h-full bg-[#C99C33] transition-all duration-500" style={{ width: `${Math.max(xpPct, 5)}%` }}>
-                {/* Highlight on top */}
-                <div className="absolute top-0 h-0.5 w-full bg-[#FFE9B2] sm:h-1"></div>
-              </div>
-              {/* XP Text */}
-              <span className="font-family-ThaleahFat absolute pl-1 text-[10px] font-normal text-white sm:pl-4 sm:text-xl">
-                XP - {displayXP}
-              </span>
-            </div>
-          </div>
-        </div>
-        {/* Wallet Address Section */}
-        <div className="bg-wallet-address-profile-bg mb-2 w-full rounded border-4 border-black p-2 sm:mb-4 sm:p-4">
-          {/* Wallet Icon and Title */}
-          <div className="mb-1 flex items-center gap-1 sm:mb-2 sm:gap-2">
-            <Image
-              src="/profile/Wallet.png"
-              alt="Wallet"
-              width={24}
-              height={24}
-              className="h-4 w-4 sm:h-8 sm:w-8"
-            />
-            <span className="font-family-ThaleahFat text-peach-300 text-xs font-normal sm:text-2xl">
-              WALLET ADDRESS
-            </span>
-          </div>
-
-          {/* Address with Copy Button */}
-          <div className="mb-1 flex flex-wrap items-center justify-between gap-1 sm:mb-2 sm:gap-2">
-            <span className="text-peach-300 font-family-ThaleahFat text-sm break-all select-text text-shadow-black sm:text-xl">
-              {displayAddress}
-            </span>
-            <button
-              onClick={copyAddress}
-              disabled={!address}
-              title={copied ? "Copied!" : "Copy address"}
-              className="hover:bg-accent shrink-0 cursor-pointer border-2 border-black p-1 disabled:opacity-40 sm:p-2"
-            >
-              <Copy className="h-3 w-3 text-black sm:h-4 sm:w-4" />
-            </button>
-          </div>
-        </div>
-        {/* Leaderboard Rank */}
-        <div className="mb-2 w-full p-1.5 text-center sm:p-3">
-          <div className="text-peach-300 font-family-ThaleahFat mb-1 text-left text-base sm:text-3xl">
-            LEADERBOARD RANK:
-          </div>
-          <div className="relative grid w-full grid-cols-2 gap-2 rounded-lg sm:gap-4">
-            <div className="relative w-full p-2 sm:p-4">
-              <Image
-                src="/profile/wooden-board.png"
-                alt="Rank"
-                width={44}
-                height={44}
-                className="absolute inset-0 z-10 h-full w-full"
-              />
-              <div className="text-peach-300 relative z-20 text-xs font-semibold sm:text-base">
-                CURRENT RANK
-              </div>
-              <div className="text-peach-300 font-family-ThaleahFat relative z-20 -mt-1 w-full text-center text-base font-thin text-shadow-black sm:-mt-2 sm:text-2xl">
-                {displayRank}
-              </div>
-            </div>
-            <div className="relative w-full p-2 sm:p-4">
-              <Image
-                src="/profile/wooden-board.png"
-                alt="Rank"
-                width={44}
-                height={44}
-                className="absolute inset-0 z-10 h-full w-full"
-              />
-              <div className="text-peach-300 relative z-20 text-xs font-semibold sm:text-base">
-                ALL TIME BEST
-              </div>
-              <div className="text-peach-300 font-family-ThaleahFat relative z-20 -mt-1 w-full text-center text-base font-thin text-shadow-black sm:-mt-2 sm:text-2xl">
-                {displayBestRank}
-              </div>
-            </div>
-          </div>
+    <div className="p-card pf-card">
+      {/* Player Profile Header */}
+      <div className="pf-head">
+        {/* Avatar */}
+        <div className="pf-avatar" aria-hidden="true">
+          <MoleMascot />
         </div>
 
-        <div className="flex w-full items-center gap-2 sm:gap-4">
+        {/* Name and XP Panel */}
+        <div className="pf-id">
+          {/* Player Name */}
+          <div className="pf-name">{displayName}</div>
+
+          {/* XP Bar */}
+          <div className="pf-xpbar" aria-label="XP progress">
+            {/* XP Bar Fill */}
+            <i style={{ width: `${Math.max(xpPct, 5)}%` }} />
+            {/* XP Text */}
+            <span className="xl">XP - {displayXP}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Wallet Address Section */}
+      <div className="pf-wallet">
+        {/* Wallet Icon and Title */}
+        <div className="pw-top">
+          <Wallet size={14} />
+          <span>Wallet address</span>
+        </div>
+
+        {/* Address with Copy Button */}
+        <div className="pw-body">
+          <div className="pw-addr">{displayAddress}</div>
           <button
-            type="button"
-            onClick={shareProfile}
-            title="Share your profile"
-            className="group relative flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg border-2 border-[#3A1F0E] bg-black/20 transition-all hover:scale-105 sm:h-10 sm:w-10"
+            className="pw-copy"
+            onClick={copyAddress}
+            disabled={!address}
+            title={copied ? "Copied!" : "Copy address"}
+            aria-label="Copy address"
           >
-            <Image
-              src="/profile/footer-image.svg"
-              alt="Share"
-              fill
-              className="absolute inset-0 object-contain"
-            />
-            <Share2 className="text-peach-300 group-hover:text-peach-400 relative z-10 h-4 w-4 transition-colors sm:h-6 sm:w-6" />
+            {copied ? <Check size={15} /> : <Copy size={15} />}
           </button>
-          <Link
-            href="https://x.com/moleswapcom"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="group relative ml-auto flex h-9 w-9 items-center justify-center rounded-lg border-2 border-[#3A1F0E] bg-black/20 transition-all hover:scale-105 sm:h-10 sm:w-10"
-          >
-            <Image
-              src="/profile/footer-image.svg"
-              alt="Twitter"
-              fill
-              className="absolute inset-0 object-contain"
-            />
-            <FaXTwitter className="text-peach-300 group-hover:text-peach-400 relative z-10 h-4 w-4 transition-colors sm:h-6 sm:w-6" />
-          </Link>
         </div>
+      </div>
+
+      {/* Leaderboard Rank */}
+      <div className="pf-ranklbl">Leaderboard rank:</div>
+      <div className="pf-plaques">
+        <div className="plq">
+          <div className="k">Current rank</div>
+          <div className="v">{displayRank}</div>
+        </div>
+        <div className="plq">
+          <div className="k">All time best</div>
+          <div className="v">{displayBestRank}</div>
+        </div>
+      </div>
+
+      <div className="pf-foot">
+        <button
+          type="button"
+          className="pf-sq"
+          onClick={shareProfile}
+          title="Share your profile"
+          aria-label="Share your profile"
+        >
+          <Share2 size={16} />
+        </button>
+        <Link
+          className="pf-sq"
+          href="https://x.com/moleswapcom"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="MoleSwap on X"
+        >
+          <FaXTwitter />
+        </Link>
       </div>
     </div>
   );

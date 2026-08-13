@@ -1,8 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowUpDown, Clock, Fuel, Search, X } from "lucide-react";
+import { ArrowLeft, ArrowUpDown, Clock, Fuel, Search, Settings as SettingsIcon } from "lucide-react";
 import { DappStep } from ".";
-import Image from "next/image";
 import { getChains, getTokensForChain, tokenFallbackIcon, type ChainEntry } from "@/lib/chain/tokenList";
 import { useWallet } from "@/lib/chain/provider";
 import { getTokenByAddress, POOLS, CONTRACTS, getPoolDisplayInfo, TOKENS } from "@/lib/chain/contracts";
@@ -20,6 +19,7 @@ import { searchIndex, heldTokens, popularTokens, resolveTokenMetas, type Indexed
 import { fetchTokenInfo, fmtUsd, shortAddr, type TokenMarketInfo } from "@/lib/chain/tokenInfo";
 import Settings from "../settings";
 import { diagnostics } from "@/lib/diagnostics";
+import { MoleMascot } from "../shared";
 
 // Minimal ERC-20 metadata surface for importing an arbitrary token by address.
 const ERC20_META_ABI = [
@@ -52,6 +52,157 @@ function displaySubtitleOf(t: any): string {
   if (!t) return "";
   return t.displaySubtitle || t.name || "";
 }
+
+// ---------- Burrow render helpers (presentation only) ----------
+
+/** Deterministic Burrow coin colour for tokens without a hosted logo. */
+const COIN_PALETTE = ["#b5601f", "#2f7d4f", "#2384c8", "#cd5f2a", "#7a4d29", "#8a5c33", "#b13ac5", "#627eea"];
+function coinColor(seed?: string | null): string {
+  const s = (seed || "?").toLowerCase();
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return COIN_PALETTE[h % COIN_PALETTE.length];
+}
+
+/**
+ * Token icon: keep the REAL logo (DexScreener / registry logoURI / local asset)
+ * when one exists; fall back to the Burrow coin chip instead of the identicon
+ * data-URI (which is exactly what tokenFallbackIcon produces).
+ */
+const TokenIcon = ({
+  logo,
+  symbol,
+  address,
+  size = 32,
+}: {
+  logo?: string | null;
+  symbol?: string;
+  address?: string;
+  size?: number;
+}) => {
+  const real = logo && !logo.startsWith("data:");
+  if (real) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={logo}
+        alt={symbol || "token"}
+        width={size}
+        height={size}
+        style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flex: "none", background: "#fff" }}
+      />
+    );
+  }
+  return (
+    <span
+      className="coin"
+      style={{
+        width: size,
+        height: size,
+        fontSize: Math.max(9, Math.round(size * 0.33)),
+        background: coinColor(address || symbol),
+      }}
+    >
+      {(symbol || "?").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "?"}
+    </span>
+  );
+};
+
+/** Shared hero — the Burrow header above both the exchange and picker views. */
+const ExchangeHero = () => (
+  <header className="hero">
+    <span className="badge">
+      <span className="dot" />
+      Aggregated across every venue on Robinhood Chain
+    </span>
+    <h1>
+      Swap at the
+      <br />
+      <span className="under">best price on chain.</span>
+    </h1>
+    <p className="sub">
+      One quote, every live pool. The router splits your order across venues and re-prices it every block.
+    </p>
+    <MoleMascot />
+  </header>
+);
+
+/** Page-scoped Burrow styles — carried from the prototype's exchange page. */
+const ExchangeStyles = () => (
+  <style jsx global>{`
+    .card-tools { display: flex; gap: 8px; }
+    .tool-btn {
+      width: 34px; height: 34px; border-radius: 11px; cursor: pointer; display: grid; place-items: center;
+      background: var(--p-chip); border: 1px solid var(--p-card-line); color: var(--p-card-ink-2);
+      box-shadow: var(--p-card-sh);
+    }
+    .tool-btn:active { transform: scale(.94); }
+    .sel-card {
+      display: flex; align-items: center; gap: 14px; width: 100%; text-align: left;
+      padding: 15px 17px; border-radius: var(--r-lg); cursor: pointer; font: inherit;
+      background: var(--p-field); border: 1px solid var(--p-card-line); color: var(--p-card-ink);
+      transition: transform 150ms ease;
+    }
+    .sel-card:hover { transform: scale(1.012); }
+    .sel-card .sc-ic { flex: none; display: inline-flex; }
+    .sel-card .sc-lbl { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--p-card-ink-3); }
+    .sel-card .sc-main { display: block; margin-top: 5px; font-size: 16.5px; font-weight: 800; letter-spacing: -.014em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sel-card .sc-body { flex: 1; min-width: 0; }
+    .wal-chip { font-family: var(--font-num); font-size: 11px; font-weight: 700; color: var(--clay); text-transform: none; letter-spacing: 0; }
+    .recip-btn { background: none; border: 0; padding: 0; cursor: pointer; font-family: var(--font-num); font-size: 11px; font-weight: 700; color: var(--clay); text-transform: none; letter-spacing: 0; }
+    .recip-btn:hover { text-decoration: underline; }
+    .recip-in {
+      width: 150px; font-family: var(--font-num); font-size: 11px; font-weight: 700; color: var(--clay);
+      background: rgba(255,255,255,.8); border: 1px solid var(--clay); border-radius: 8px; padding: 3px 7px; outline: none;
+      text-transform: none; letter-spacing: 0;
+    }
+    .arrive { margin: -4px 0 0 4px; font-size: 12px; font-weight: 700; color: #2277b8; }
+    .bal-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 9px; font-size: 12px; }
+    .bal-row .b1 { color: var(--p-card-ink-3); font-weight: 600; font-family: var(--font-num); }
+    .bal-row .chips { display: flex; gap: 6px; }
+    .bal-row .chips button {
+      border: 1px solid var(--p-card-line); background: var(--p-chip); color: var(--p-card-ink-2);
+      font: inherit; font-size: 10.5px; font-weight: 700; padding: 3px 8px; border-radius: 8px; cursor: pointer;
+    }
+    .bal-row .chips button:hover { background: rgba(240,160,60,.15); }
+    .warn-thin { margin-top: 12px; padding: 12px 14px; border-radius: var(--r-md); font-size: 12.5px; font-weight: 600;
+      background: rgba(240,160,60,.15); border: 1px solid rgba(240,160,60,.4); color: #8a5a14; text-align: center; }
+    .warn-red { margin-top: 12px; padding: 11px 13px; border-radius: var(--r-md); font-size: 12px;
+      background: rgba(184,55,31,.1); border: 1px solid rgba(184,55,31,.3); color: var(--rust); }
+    .quote-head { display: flex; align-items: center; gap: 12px; }
+    .quote-head .qh-amt { font-family: var(--font-num); font-size: 1.55rem; font-weight: 700; letter-spacing: -.03em; overflow-wrap: anywhere; }
+    .quote-head .qh-sub { font-size: 12px; color: var(--p-card-ink-3); margin-top: 3px; }
+    .qh-live { color: #1e6b40; font-weight: 700; }
+    .rate-line { margin-top: 10px; font-family: var(--font-num); font-size: 12px; color: var(--p-card-ink-3); font-weight: 600; min-height: 1em; }
+    .route-h { margin: 14px 0 4px; font-size: 10.5px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--p-card-ink-3); }
+    .route-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; font-size: 12.5px; flex-wrap: wrap; }
+    .route-row .pct { font-family: var(--font-num); font-weight: 800; width: 38px; flex: none; color: var(--clay); }
+    .route-row .path { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-weight: 700; min-width: 0; }
+    .route-row .path .sep { color: var(--ink-3); }
+    .route-row .ven { margin-left: auto; font-size: 11.5px; color: var(--p-card-ink-3); text-align: right; }
+    .noq { padding: 18px 16px; border-radius: var(--r-md); background: rgba(44,26,12,.06); color: var(--p-card-ink-3); font-size: 13.5px; }
+    .pick-head { display: flex; align-items: center; gap: 12px; }
+    .pick-head h3 { flex: 1; }
+    .ctx-row { display: flex; justify-content: space-between; margin: 12px 2px 4px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--p-card-ink-3); }
+    .tk-list { max-height: 430px; overflow: auto; margin-top: 4px; }
+    .tk-row.sel { background: rgba(240,160,60,.16); }
+    .tk-stats { display: flex; gap: 10px; font-size: 10.5px; color: var(--p-card-ink-3); margin-top: 3px; font-family: var(--font-num); flex-wrap: wrap; }
+    .tk-stats .up { color: var(--moss); } .tk-stats .dn { color: var(--rust); }
+    .dexlink { display: inline-block; font-size: 11px; font-weight: 800; color: #2277b8; cursor: pointer; background: none; border: 0; padding: 0; font-family: inherit; }
+    .dexlink:hover { text-decoration: underline; }
+    .vtick { color: #1e9e50; font-weight: 800; cursor: default; }
+    .hist-row { padding: 13px 14px; border-radius: var(--r-md); background: rgba(255,255,255,.6);
+      border: 1px solid rgba(44,26,12,.08); margin-bottom: 8px; }
+    .hist-row .h1 { font-family: var(--font-num); font-size: 15.5px; font-weight: 700; letter-spacing: -.02em; display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+    .hist-row .h1 .fs { color: var(--clay); font-size: 12.5px; }
+    .hist-row .h1 .ts { color: #1e6b40; font-size: 12.5px; }
+    .hist-row .h2 { display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 11.5px; color: var(--p-card-ink-3); flex-wrap: wrap; }
+    .hist-row .h2 a { color: var(--clay); font-family: var(--font-num); }
+    .p-card .search input::placeholder { color: var(--ink-3); }
+    .p-btn:disabled { opacity: .5; cursor: default; }
+    .p-btn:disabled:active { transform: none; }
+  `}</style>
+);
 
 export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   const router = useRouter();
@@ -1212,74 +1363,41 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setSearchQuery("");
     setSearchQueryNetwork("");
   };
-  // ----- Selection UI (modal) -----
+  // ----- Selection UI (token + network picker) -----
   if (selectionMode !== "none") {
     return (
-      <div className="relative flex w-full flex-col justify-center gap-2 sm:flex-row sm:gap-4">
-        {/* Token Panel */}
-        <div className="flex w-full max-w-3xl flex-1 flex-col px-2 sm:p-6">
-          <div className="relative z-10 mx-auto flex w-[90%] items-center justify-center rounded-lg px-3 py-2 text-center sm:w-[85%] sm:px-6 sm:py-4">
-            <button
-              onClick={handleBackToExchange}
-              className="border-ground-button-border bg-ground-button absolute left-6 cursor-pointer justify-center rounded border-2 p-1 text-yellow-100 hover:scale-105"
-            >
-              <ArrowLeft className="h-6 w-6" />
-            </button>
-            <h1 className="text-peach-300 font-family-ThaleahFat text-shadow-header text-xl font-bold tracking-widest uppercase sm:text-3xl lg:text-5xl">
-              {selectionMode === "from" ? "FROM" : "TO"} TOKEN
-            </h1>
-            <Image
-              src="/quest/header-quest-bg.png"
-              alt="Header"
-              width={200}
-              height={200}
-              className="absolute inset-0 left-0 z-[-1] h-full w-full"
-            />
-          </div>
+      <>
+        <main className="w-full">
+          <ExchangeHero />
 
-          <div className="relative mb-6 block h-full">
-            <Image
-              src="/quest/Quest-BG.png"
-              alt="BG"
-              width={200}
-              height={200}
-              className="absolute inset-0 z-0 h-full w-full object-fill"
-            />
+          <section className="p-grid p-side">
+            {/* Token panel */}
+            <div className="p-card">
+              <div className="pick-head">
+                <button className="tool-btn" onClick={handleBackToExchange} aria-label="Back">
+                  <ArrowLeft size={16} />
+                </button>
+                <h3>{selectionMode === "from" ? "From" : "To"} token</h3>
+              </div>
 
-            {/* Search Tokens */}
-            <div className="relative z-10 mx-auto mt-12 mb-4 w-[85%]">
-              <div className="relative flex items-center gap-3 px-6 py-4">
-                <Search className="h-6 w-6 text-[#B0B0B0]" />
+              <label
+                className="search"
+                style={{ marginTop: 14, background: "rgba(44,26,12,.07)", borderColor: "rgba(44,26,12,.12)" }}
+              >
+                <Search size={15} style={{ color: "var(--ink-3)" }} />
                 <input
                   type="text"
-                  placeholder="SEARCH BY TOKEN OR SYMBOL"
+                  placeholder="Search by token or symbol"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="font-family-ThaleahFat flex-1 bg-transparent text-lg tracking-widest text-white uppercase placeholder:text-[#8B8B8B] focus:outline-none"
+                  style={{ color: "var(--ink)" }}
                 />
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="BG"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-            </div>
+              </label>
 
-            {/* Token List for Selected Network */}
-            <div className="relative z-10 mx-auto mb-4 w-full p-2 sm:w-[90%] sm:p-4">
-              {/* <Image
-                src="/dapp/exchange-token-bg.png"
-                alt="BG"
-                width={200}
-                height={200}
-                className="absolute inset-0 left-0 z-[-1] h-full w-full"
-              /> */}
               {/* Context label above the list */}
               {selectedNetwork && (
-                <div className="mb-2 flex items-center justify-between px-4">
-                  <span className="font-family-ThaleahFat text-sm tracking-widest text-[#9a9a9a] uppercase">
+                <div className="ctx-row">
+                  <span>
                     {searchQuery.trim()
                       ? searchingIndex
                         ? "Searching tokens…"
@@ -1288,14 +1406,11 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                         ? "Your tokens"
                         : "Popular tokens"}
                   </span>
-                  {!searchQuery.trim() && loadingHeld && (
-                    <span className="font-family-ThaleahFat text-xs tracking-wider text-[#8B8B8B] uppercase">
-                      Loading balances…
-                    </span>
-                  )}
+                  {!searchQuery.trim() && loadingHeld && <span>Loading balances…</span>}
                 </div>
               )}
-              <div className="hide-scrollbar relative flex max-h-[450px] flex-col gap-3 overflow-y-auto">
+
+              <div className="tk-list">
                 {selectedNetwork ? (
                   filteredModalTokens.length > 0 ? (
                     filteredModalTokens.map((token, idx) => {
@@ -1310,95 +1425,71 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                       const subtitleLabel = selectionMode === "to" && toDisp
                         ? toDisp.subtitle
                         : displaySubtitleOf(token);
+                      const mi = marketInfo.get(token.address?.toLowerCase() || "");
+                      const rowLogo = mi?.logo || token.logoURI || tokenFallbackIcon(token.address, symbolLabel);
+                      const heldBal = (token as any).balance as string | undefined;
+                      const fetched = tokenBalances[`${selectedNetwork}-${token.address}`];
+                      const shownBal = heldBal ?? (fetched != null ? String(fetched) : undefined);
+                      const isNative = token.address?.toLowerCase() === "0x0000000000000000000000000000000000000000";
+                      const isSelected =
+                        selectionMode === "from"
+                          ? String(fromToken) === String(token.address)
+                          : String(toToken) === String(token.address);
                       return (
-                      <button
-                        key={`${token.address}-${idx}`}
-                        onClick={() => handleSelectToken(token)}
-                        className={`relative cursor-pointer px-6 py-4 text-left`}
-                      >
-                        {(() => {
-                          const mi = marketInfo.get(token.address?.toLowerCase() || "");
-                          const rowLogo = mi?.logo || token.logoURI || tokenFallbackIcon(token.address, symbolLabel);
-                          const heldBal = (token as any).balance as string | undefined;
-                          const fetched = tokenBalances[`${selectedNetwork}-${token.address}`];
-                          const shownBal = heldBal ?? (fetched != null ? String(fetched) : undefined);
-                          const isNative = token.address?.toLowerCase() === "0x0000000000000000000000000000000000000000";
-                          return (
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="flex min-w-0 items-center justify-start gap-3">
-                            <div className="border-ground-button-border h-12 w-12 shrink-0 overflow-hidden rounded-lg sm:h-14 sm:w-14">
-                              {/* market logo can be any external CDN — plain img avoids next/image domain config */}
-                              <img src={rowLogo} alt={token.symbol || "token"} width={56} height={56} className="h-full w-full object-cover" />
-                            </div>
-                            <div className="min-w-0 text-left">
-                              <h2 className="font-family-ThaleahFat flex items-center gap-1.5 text-lg tracking-wider text-white uppercase sm:text-2xl sm:tracking-widest">
-                                {symbolLabel}
-                                {(token as any).verified && (
-                                  <span title="Verified — has real liquidity" className="text-xs text-[#4ADE80] sm:text-sm">✓</span>
-                                )}
-                              </h2>
-                              <p className="font-family-ThaleahFat -mt-0.5 truncate text-xs tracking-wider text-[#B0B0B0] uppercase sm:text-base sm:tracking-widest">
-                                {subtitleLabel}
-                                {searchQuery.trim() && (token as any).verified === false && (
-                                  <span className="ml-2 text-xs text-yellow-500/80 normal-case">· unverified</span>
-                                )}
-                              </p>
-                              {/* live market stats + address */}
-                              {!isNative && (
-                                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] normal-case sm:text-xs">
-                                  {mi?.marketCap != null && <span className="text-[#9a9a9a]">MC {fmtUsd(mi.marketCap)}</span>}
-                                  {mi?.liquidityUsd != null && <span className="text-[#9a9a9a]">Liq {fmtUsd(mi.liquidityUsd)}</span>}
-                                  {mi?.priceChange24 != null && (
-                                    <span className={mi.priceChange24 >= 0 ? "text-green-400" : "text-red-400"}>
-                                      {mi.priceChange24 >= 0 ? "+" : ""}{mi.priceChange24.toFixed(1)}%
-                                    </span>
-                                  )}
-                                  <span className="font-mono text-[#6f6f6f]">{shortAddr(token.address)}</span>
-                                </div>
+                        <button
+                          key={`${token.address}-${idx}`}
+                          onClick={() => handleSelectToken(token)}
+                          className={`tk-row ${isSelected ? "sel" : ""}`}
+                        >
+                          <TokenIcon logo={rowLogo} symbol={symbolLabel} address={token.address} size={36} />
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div className="tk-nm">
+                              {symbolLabel}{" "}
+                              {(token as any).verified && (
+                                <span className="vtick" title="Verified — has real liquidity">✓</span>
+                              )}
+                              {searchQuery.trim() && (token as any).verified === false && (
+                                <span style={{ fontSize: "10.5px", color: "#b8860b", fontWeight: 600 }}> · unverified</span>
                               )}
                             </div>
+                            <div className="tk-sub">{subtitleLabel}</div>
+                            {/* live market stats + address */}
+                            {!isNative && (
+                              <div className="tk-stats">
+                                {mi?.marketCap != null && <span>MC {fmtUsd(mi.marketCap)}</span>}
+                                {mi?.liquidityUsd != null && <span>Liq {fmtUsd(mi.liquidityUsd)}</span>}
+                                {mi?.priceChange24 != null && (
+                                  <span className={mi.priceChange24 >= 0 ? "up" : "dn"}>
+                                    {mi.priceChange24 >= 0 ? "+" : ""}
+                                    {mi.priceChange24.toFixed(1)}%
+                                  </span>
+                                )}
+                                <span>{shortAddr(token.address)}</span>
+                              </div>
+                            )}
                           </div>
-                          <div className="flex shrink-0 flex-col items-end gap-1">
+                          <div className="tk-bal">
                             {mi?.dexUrl && (
                               <span
                                 role="link"
                                 title="View on DexScreener"
+                                className="dexlink"
                                 onClick={(e) => { e.stopPropagation(); window.open(mi.dexUrl!, "_blank", "noopener,noreferrer"); }}
-                                className="cursor-pointer text-xs font-bold tracking-wider text-[#7DD3FC] hover:underline"
                               >
                                 DEX ↗
                               </span>
                             )}
                             {walletAddress && shownBal && (
-                              <span className="font-family-ThaleahFat text-base text-yellow-100 sm:text-lg">
+                              <small>
                                 {Number(shownBal || 0).toLocaleString(undefined, { maximumFractionDigits: 6, minimumFractionDigits: 0 })}
-                              </span>
+                              </small>
                             )}
                           </div>
-                        </div>
-                          );
-                        })()}
-
-                        <Image
-                          src={`${
-                            selectionMode === "from"
-                              ? String(fromToken) === String(token.address)
-                                ? "/dapp/selected-network-bg.png"
-                                : "/quest/header-quest-bg.png"
-                              : String(toToken) === String(token.address)
-                                ? "/dapp/selected-network-bg.png"
-                                : "/quest/header-quest-bg.png"
-                          }`}
-                          alt="BG"
-                          width={200}
-                          height={200}
-                          className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                        />
-                      </button>
+                        </button>
                       );
                     })
                   ) : (
-                    <p className="font-family-ThaleahFat text-center text-xl text-gray-400">
+                    <div className="p-empty">
                       {importing || searchingIndex
                         ? "Searching tokens…"
                         : isAddress(searchQuery.trim())
@@ -1406,138 +1497,63 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                           : searchQuery.trim()
                             ? "No token found — paste a contract address to import it"
                             : "No token found"}
-                    </p>
+                    </div>
                   )
                 ) : (
-                  <p className="font-family-ThaleahFat text-center text-xl text-gray-400">
-                    Select a network first
-                  </p>
+                  <div className="p-empty">Select a network first</div>
                 )}
               </div>
             </div>
-          </div>
-        </div>
 
-        {/* Network Panel */}
-        <div className="flex w-full flex-col px-2 sm:max-w-xl sm:flex-1 sm:p-6">
-          <div className="relative z-10 mx-auto w-[85%] rounded-lg px-6 py-4 text-center">
-            <h1 className="text-peach-300 font-family-ThaleahFat text-shadow-header text-xl font-bold tracking-widest uppercase sm:text-3xl lg:text-5xl">
-              NETWORK
-            </h1>
-            <Image
-              src="/quest/header-quest-bg.png"
-              alt="Header"
-              width={200}
-              height={200}
-              className="absolute inset-0 left-0 z-[-1] h-full w-full"
-            />
-          </div>
+            {/* Network panel */}
+            <div className="p-card">
+              <h3>Network</h3>
 
-          <div className="relative mb-6 block h-full">
-            <Image
-              src="/quest/Quest-BG.png"
-              alt="BG"
-              width={200}
-              height={200}
-              className="absolute inset-0 z-[-1] h-full w-full object-fill"
-            />
-
-            {/* Search Networks */}
-            <div className="relative z-10 mx-auto mt-12 mb-4 w-[85%]">
-              <div className="relative flex items-center gap-3 px-6 py-4">
-                <Search className="h-6 w-6 text-[#B0B0B0]" />
+              <label
+                className="search"
+                style={{ marginTop: 14, background: "rgba(44,26,12,.07)", borderColor: "rgba(44,26,12,.12)" }}
+              >
+                <Search size={15} style={{ color: "var(--ink-3)" }} />
                 <input
                   type="text"
-                  placeholder="SEARCH BY NETWORK"
+                  placeholder="Search by network"
                   value={searchQueryNetwork}
                   onChange={(e) => setSearchQueryNetwork(e.target.value)}
-                  className="font-family-ThaleahFat flex-1 bg-transparent text-lg tracking-widest text-white uppercase placeholder:text-[#8B8B8B] focus:outline-none"
+                  style={{ color: "var(--ink)" }}
                 />
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="BG"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-            </div>
+              </label>
 
-            {/* Network List (with real logos) */}
-            <div className="relative z-10 mx-auto mb-4 w-full p-4 sm:w-[90%]">
-              {/* <Image
-                src="/dapp/exchange-token-bg.png"
-                alt="BG"
-                width={200}
-                height={200}
-                className="absolute inset-0 left-0 z-[-1] h-full w-full"
-              /> */}
-              <div className="hide-scrollbar relative z-20 flex max-h-[450px] w-full flex-col gap-3 overflow-x-visible overflow-y-auto">
+              <div style={{ marginTop: 12 }}>
                 {loadingChains ? (
-                  <div className="relative flex h-screen w-full items-center justify-center">
-                    <Image
-                      src="/quest/Quest-BG.png"
-                      alt="Background"
-                      fill
-                      className="absolute inset-0 z-[-1] h-full w-full object-fill"
-                    />
-                    <div className="z-10 flex flex-col items-center gap-4">
-                      <div className="h-10 w-10 animate-spin rounded-full border-4 border-yellow-100 border-t-transparent"></div>
-                      <p className="font-family-ThaleahFat text-peach-300 text-xs tracking-wider uppercase sm:text-base sm:tracking-widest">
-                        Loading Chains...
-                      </p>
-                    </div>
+                  <div className="p-empty">
+                    <span className="spin" aria-hidden="true">⟳</span> Loading chains...
                   </div>
                 ) : filteredNetworks.length > 0 ? (
                   filteredNetworks.map((network) => (
                     <button
                       key={network.name}
                       onClick={() => handleSelectNetwork(network.name)}
-                      className={`relative cursor-pointer px-6 py-4 text-left`}
+                      className={`tk-row ${selectedNetwork === network.name ? "sel" : ""}`}
                     >
-                      <div className="flex items-center justify-start gap-4 transition-all hover:scale-[1.02]">
-                        <div className="border-ground-button-border h-12 w-12">
-                          <Image
-                            src={
-                              network.iconUrl ||
-                              network.logoUrl ||
-                              "/placeholder-logo.png"
-                            }
-                            alt={network.displayName || network.name || "chain"}
-                            width={48}
-                            height={48}
-                            className="h-full w-full object-cover"
-                          />
-                        </div>
-                        <div className="text-left">
-                          <h2 className="font-family-ThaleahFat text-sm tracking-wider text-white uppercase sm:text-2xl sm:tracking-widest">
-                            {network.displayName || network.name}
-                          </h2>
-                        </div>
-                      </div>
-                      <Image
-                        src={
-                          selectedNetwork === network.name
-                            ? "/dapp/selected-network-bg.png"
-                            : "/quest/header-quest-bg.png"
-                        }
-                        alt="BG"
-                        width={200}
-                        height={200}
-                        className="absolute inset-0 left-0 z-[-1] h-full w-full"
+                      <TokenIcon
+                        logo={network.iconUrl || network.logoUrl || "/placeholder-logo.png"}
+                        symbol={network.displayName || network.name}
+                        size={34}
                       />
+                      <div style={{ minWidth: 0 }}>
+                        <div className="tk-nm">{network.displayName || network.name}</div>
+                      </div>
                     </button>
                   ))
                 ) : (
-                  <p className="font-family-ThaleahFat text-center text-xl text-gray-400">
-                    No network found
-                  </p>
+                  <div className="p-empty">No network found</div>
                 )}
               </div>
             </div>
-          </div>
-        </div>
-      </div>
+          </section>
+        </main>
+        <ExchangeStyles />
+      </>
     );
   }
 
@@ -1547,210 +1563,90 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       {showSettings ? (
         <Settings setShowSettings={setShowSettings} />
       ) : (
-        <div className="relative flex w-full flex-col justify-center gap-2 sm:flex-row sm:gap-4">
-          <div className="flex w-full max-w-3xl flex-1 flex-col px-2 sm:p-6">
-            {/* Header */}
-            <div className="relative z-10 mx-auto flex w-[90%] items-center justify-center rounded-lg px-3 py-2 text-center sm:w-[85%] sm:px-6 sm:py-4">
-              <h1 className="text-peach-300 font-family-ThaleahFat text-shadow-header text-xl font-bold tracking-widest uppercase sm:text-3xl lg:text-5xl">
-                EXCHANGE
-              </h1>
+        <>
+          <main className="w-full">
+            <ExchangeHero />
 
-              <div className="absolute right-6 flex items-center gap-1.5">
-                <button
-                  onClick={() => {
-                    setShowHistory(prev => !prev);
-                  }}
-                  className="border-ground-button-border bg-ground-button cursor-pointer justify-center rounded border-2 p-1 text-yellow-100 transition-all hover:scale-105"
-                >
-                  <Clock className="h-6 w-6" />
-                </button>
-                <button
-                  onClick={() => setShowSettings(true)}
-                  className="border-ground-button-border bg-ground-button cursor-pointer justify-center rounded border-2 p-1 text-yellow-100 transition-all hover:scale-105"
-                >
-                  <Image
-                    src="/dapp/settings-icons.png"
-                    alt="Settings"
-                    width={200}
-                    height={200}
-                    className="h-6 w-6"
-                  />
-                </button>
-              </div>
-
-              <Image
-                src="/quest/header-quest-bg.png"
-                alt="Header BG"
-                width={200}
-                height={200}
-                className="absolute inset-0 left-0 z-[-1] h-full w-full"
-              />
-            </div>
-
-            {/* Swap History Modal */}
-            {showHistory && (
-              <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60" onClick={() => setShowHistory(false)}>
-                <div className="relative mx-4 w-full max-w-xl" onClick={(e) => e.stopPropagation()}>
-                  <Image src="/quest/Quest-BG.png" alt="BG" width={400} height={400} className="absolute inset-0 z-[-1] h-full w-full rounded-xl object-fill" />
-                  <div className="p-6 sm:p-8">
-                    <div className="mb-5 flex items-center justify-between">
-                      <h3 className="font-family-ThaleahFat text-peach-300 text-4xl tracking-wider">SWAP HISTORY</h3>
-                      <button onClick={() => setShowHistory(false)} className="border-ground-button-border bg-ground-button cursor-pointer rounded border-2 p-2 text-yellow-100 hover:scale-105"><X className="h-6 w-6" /></button>
-                    </div>
-                    <div className="custom-scrollbar max-h-[450px] overflow-y-auto">
-                      {swapHistory.length === 0 ? (
-                        <div className="py-12 text-center">
-                          <p className="font-family-ThaleahFat text-3xl text-gray-500">NO SWAPS YET</p>
-                          <p className="font-family-ThaleahFat mt-2 text-lg text-gray-600">COMPLETED SWAPS WILL APPEAR HERE</p>
-                        </div>
-                      ) : (
-                        swapHistory.map((swap: any) => {
-                          const txHash = typeof swap.txHash === "object"
-                            ? (swap.txHash?.hash || swap.txHash?.txHash || "")
-                            : (swap.txHash || "");
-                          return (
-                            <div key={swap.id} className="relative mb-3 rounded-lg px-5 py-4">
-                              <Image src="/quest/header-quest-bg.png" alt="BG" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded-lg" />
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="font-family-ThaleahFat text-3xl text-white">{swap.fromAmount}</span>
-                                <span className="font-family-ThaleahFat text-peach-500 text-xl">{swap.fromSymbol}</span>
-                                <span className="text-xl text-gray-500">→</span>
-                                <span className="font-family-ThaleahFat text-3xl text-white">{swap.toAmount?.length > 10 ? swap.toAmount.slice(0, 10) + "..." : swap.toAmount}</span>
-                                <span className="font-family-ThaleahFat text-xl text-[#6DBB3E]">{swap.toSymbol}</span>
-                              </div>
-                              <div className="mt-2 flex items-center justify-between">
-                                <span className="font-family-ThaleahFat text-base text-gray-500">
-                                  {swap.timestamp ? new Date(swap.timestamp).toLocaleString() : ""}
-                                </span>
-                                {txHash && (
-                                  <a
-                                    href={`https://robinhoodchain.blockscout.com/tx/${txHash}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="font-family-ThaleahFat text-peach-300 flex items-center gap-1 text-base underline"
-                                  >
-                                    {txHash.slice(0, 10)}...{txHash.slice(-6)} ↗
-                                  </a>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })
-                      )}
+            <section className="p-grid p-side">
+              <div>
+                <div className="p-card">
+                  {/* Header */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <h3>Exchange</h3>
+                    <div className="card-tools">
+                      <button
+                        className="tool-btn"
+                        title="Swap history"
+                        aria-label="Swap history"
+                        onClick={() => {
+                          setShowHistory(prev => !prev);
+                        }}
+                      >
+                        <Clock size={16} />
+                      </button>
+                      <button
+                        className="tool-btn"
+                        title="Settings"
+                        aria-label="Settings"
+                        onClick={() => setShowSettings(true)}
+                      >
+                        <SettingsIcon size={16} />
+                      </button>
                     </div>
                   </div>
-                </div>
-              </div>
-            )}
-            {/* Body */}
-            <div className="relative mb-6 block h-full">
-              <Image
-                src="/quest/Quest-BG.png"
-                alt="BG"
-                width={200}
-                height={200}
-                className="absolute inset-0 z-0 h-full w-full object-fill"
-              />
 
-              {/* Exchange Form */}
-              <div className="relative z-50 mx-auto mt-4 mb-4 grid w-full grid-cols-1 gap-3 p-2 sm:mt-12 sm:mb-6 sm:gap-4 sm:p-4 sm:w-[85%]">
-                {/* From */}
-                <button
-                  onClick={() => openSelect("from")}
-                  className="relative z-10 mx-auto w-full cursor-pointer rounded-lg px-3 py-2 text-left transition-all hover:scale-[1.02] sm:px-6 sm:py-4 sm:text-center sm:w-[90%]"
-                >
-                  <div className="flex items-center justify-start gap-4">
-                    <div className="border-ground-button-border h-8 w-8 overflow-hidden rounded-lg border-2 bg-black/50 sm:h-12 sm:w-12">
-                      <Image
-                        src={fromLogo}
-                        alt="From"
-                        width={48}
-                        height={48}
-                        className="h-full w-full object-cover"
-                      />
-                    </div>
-                    <div className="flex-1 min-w-0 overflow-hidden text-left">
-                      <div className="flex items-center justify-between gap-2">
-                        <h2 className="font-family-ThaleahFat text-sm tracking-wider text-[#B0B0B0] uppercase sm:text-2xl sm:tracking-widest">
-                          From
-                        </h2>
+                  {/* From */}
+                  <button onClick={() => openSelect("from")} className="sel-card" style={{ marginTop: 14 }}>
+                    <span className="sc-ic">
+                      <TokenIcon logo={fromLogo} symbol={displaySymbolOf(fromTokenMeta)} address={fromToken} size={34} />
+                    </span>
+                    <span className="sc-body">
+                      <span className="sc-lbl">
+                        <span>From</span>
                         {walletAddress && (
-                          <p className="font-family-ThaleahFat text-peach-300 text-xs tracking-wider uppercase sm:text-base sm:tracking-widest">
-                            {formatWalletAddress(walletAddress)}
-                          </p>
+                          <span className="wal-chip">{formatWalletAddress(walletAddress)}</span>
                         )}
-                      </div>
-                      <p className="font-family-ThaleahFat text-sm font-bold tracking-wider text-[#EEEEEE] uppercase sm:text-xl lg:text-3xl truncate">
+                      </span>
+                      <span className="sc-main">
                         {fromChain?.displayName ||
                           fromChain?.name ||
                           "Select Network"}{" "}
                         / {displaySymbolOf(fromTokenMeta) || "Select Token"}
-                      </p>
-                    </div>
-                  </div>
-                  <Image
-                    src="/quest/header-quest-bg.png"
-                    alt="BG"
-                    width={200}
-                    height={200}
-                    className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                  />
-                </button>
-
-                {/* Swap Icon */}
-                <div className="relative z-20 flex justify-center">
-                  <button
-                    onClick={() => {
-                      const tempToken = fromToken;
-                      const tempChain = fromChainId;
-                      setFromToken(toToken);
-                      setFromChainId(toChainId);
-                      setToToken(tempToken);
-                      setToChainId(tempChain);
-                    }}
-                    className="absolute inset-0 left-[50%] flex h-14 w-14 translate-x-[-50%] translate-y-[-50%] cursor-pointer items-center justify-center p-2 transition-all hover:scale-105"
-                  >
-                    <ArrowUpDown className="text-peach-300 h-6 w-6" />
-                    <Image
-                      src="/dapp/swap-button.png"
-                      alt="Swap"
-                      width={200}
-                      height={200}
-                      className="absolute inset-0 z-[-1] h-full w-full object-fill"
-                    />
+                      </span>
+                    </span>
                   </button>
-                </div>
 
-                {/* To */}
-                <div
-                  onClick={() => openSelect("to")}
-                  role="button"
-                  tabIndex={0}
-                  className="relative z-10 mx-auto w-full cursor-pointer rounded-lg px-3 py-2 text-left transition-all hover:scale-[1.02] sm:px-6 sm:py-4 sm:text-center sm:w-[90%]"
-                >
-                  <div className="flex items-center justify-start gap-4">
-                    <div className="border-ground-button-border h-8 w-8 overflow-hidden rounded-lg border-2 bg-black/50 sm:h-12 sm:w-12">
-                      <Image
-                        src={toLogo}
-                        alt="To"
-                        width={48}
-                        height={48}
-                        className="h-full w-full object-cover"
-                      />
-                    </div>
-                    <div className="flex-1 min-w-0 overflow-hidden text-left">
-                      <div className="flex items-center justify-between gap-2">
-                        <h2 className="font-family-ThaleahFat text-sm tracking-wider text-[#B0B0B0] uppercase sm:text-2xl sm:tracking-widest">
-                          To
-                        </h2>
+                  {/* Flip */}
+                  <div className="p-flip">
+                    <button
+                      aria-label="Swap direction"
+                      onClick={() => {
+                        const tempToken = fromToken;
+                        const tempChain = fromChainId;
+                        setFromToken(toToken);
+                        setFromChainId(toChainId);
+                        setToToken(tempToken);
+                        setToChainId(tempChain);
+                      }}
+                    >
+                      <ArrowUpDown size={17} />
+                    </button>
+                  </div>
+
+                  {/* To */}
+                  <div onClick={() => openSelect("to")} role="button" tabIndex={0} className="sel-card">
+                    <span className="sc-ic">
+                      <TokenIcon logo={toLogo} symbol={displaySymbolOf(toTokenMeta)} address={toToken} size={34} />
+                    </span>
+                    <span className="sc-body">
+                      <span className="sc-lbl">
+                        <span>To</span>
                         {walletAddress && (
-                          <div
-                            className="flex items-center gap-2"
-                            onClick={(e) => e.stopPropagation()}
-                          >
+                          <span onClick={(e) => e.stopPropagation()}>
                             {isEditingRecipient ? (
                               <input
                                 type="text"
+                                className="recip-in"
                                 value={recipientAddress || ""}
                                 onChange={(e) =>
                                   handleRecipientAddressChange(e.target.value)
@@ -1760,374 +1656,319 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                                 onClick={(e) => e.stopPropagation()}
                                 onFocus={(e) => e.stopPropagation()}
                                 placeholder="0x..."
-                                className="font-family-ThaleahFat border-peach-300 text-peach-300 focus:ring-peach-300 w-36 rounded border bg-black/50 px-2 py-1 text-sm tracking-wider sm:w-48 sm:text-xl sm:tracking-widest uppercase focus:ring-1 focus:outline-none sm:w-64"
                                 autoFocus
                               />
                             ) : (
                               <button
                                 type="button"
+                                className="recip-btn"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setIsEditingRecipient(true);
                                 }}
-                                className="font-family-ThaleahFat text-peach-300 cursor-pointer text-sm tracking-wider uppercase sm:text-xl sm:tracking-widest hover:underline"
                               >
                                 {formatWalletAddress(
                                   recipientAddress || walletAddress,
                                 )}
                               </button>
                             )}
-                          </div>
+                          </span>
                         )}
-                      </div>
-                      <p className="font-family-ThaleahFat text-sm font-bold tracking-wider text-[#EEEEEE] uppercase sm:text-xl lg:text-3xl truncate">
+                      </span>
+                      <span className="sc-main">
                         {toToken ? "Robinhood Chain" : "Select Network"}{" "}
                         / {(toTokenMeta as any)?.symbol ||
                           displaySymbolOf(toTokenMeta) ||
                           "Select Token"}
-                      </p>
-                    </div>
+                      </span>
+                    </span>
                   </div>
-                  <Image
-                    src="/quest/header-quest-bg.png"
-                    alt="BG"
-                    width={200}
-                    height={200}
-                    className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                  />
-                </div>
 
-                {/* Bridge-out preview — when the output is deliverable to the
-                    user's origin-chain wallet as the real asset, surface this
-                    upfront so they know the swap completes with a destination
-                    settlement on their home chain. No extra clicks from the
-                    user — they just see the promise of where funds will land. */}
-                {/* Confirms the exact asset the user receives on Robinhood Chain. */}
-                {toTokenMeta && (
-                  <div className="relative z-10 mx-auto -mt-2 w-full px-6 sm:w-[90%]">
-                    <p className="font-family-ThaleahFat text-xs tracking-wider uppercase text-[#7DD3FC] sm:text-sm">
+                  {/* Confirms the exact asset the user receives on Robinhood Chain. */}
+                  {toTokenMeta && (
+                    <div className="arrive">
                       ✓ Arrives as {(toTokenMeta as any)?.symbol || displaySymbolOf(toTokenMeta)} on Robinhood Chain
                       {recipientAddress && walletAddress && recipientAddress.toLowerCase() !== walletAddress.toLowerCase() && (
                         <> → {recipientAddress.slice(0, 6)}…{recipientAddress.slice(-4)}</>
                       )}
-                    </p>
-                  </div>
-                )}
-
-                {/* Amount */}
-                <div className="relative z-10 mx-auto w-full rounded-lg px-6 py-4 text-center sm:w-[90%]">
-                  <div className="flex items-center justify-start gap-4">
-                    <div className="border-ground-button-border bg-ground-button h-8 w-8 rounded-lg border-2 p-2 sm:h-12 sm:w-12 sm:p-4"></div>
-                    <div className="w-full text-left">
-                      <h2 className="font-family-ThaleahFat text-sm tracking-wider text-[#B0B0B0] uppercase sm:text-2xl sm:tracking-widest">
-                        Send
-                      </h2>
-                      <div className="font-family-ThaleahFat flex w-full items-center justify-between gap-2 text-base tracking-wider sm:text-2xl sm:tracking-widest uppercase">
-                        <input
-                          value={amount}
-                          onChange={(e) =>
-                            setAmount(e.target.value.replace(/[^0-9.]/g, ""))
-                          }
-                          placeholder="0.0"
-                          className="w-full bg-transparent text-white outline-none placeholder:text-[#aaa]"
-                          inputMode="decimal"
-                        />
-                        <span className="text-peach-300">
-                          {displaySymbolOf(fromTokenMeta)}
-                        </span>
-                      </div>
-                      {/* Balance Display inside Send card */}
-                      {walletAddress && fromToken && fromChainId && (
-                        <div className="mt-2 flex items-center justify-between gap-2">
-                          <div className="flex-1">
-                            {balanceLoading ? (
-                              <p className="font-family-ThaleahFat text-base tracking-widest text-yellow-100/85 uppercase sm:text-lg">
-                                Loading balance...
-                              </p>
-                            ) : fromTokenBalance ? (
-                              <p className="font-family-ThaleahFat text-base tracking-widest text-yellow-100 uppercase sm:text-lg">
-                                Balance:{" "}
-                                {Number(fromTokenBalance).toLocaleString(
-                                  undefined,
-                                  {
-                                    maximumFractionDigits: 6,
-                                    minimumFractionDigits: 0,
-                                  },
-                                )}{" "}
-                                {displaySymbolOf(fromTokenMeta)}
-                                {balanceUsdValue && (
-                                  <span className="text-yellow-200">
-                                    {" "}
-                                    (${Number(balanceUsdValue).toFixed(2)})
-                                  </span>
-                                )}
-                              </p>
-                            ) : (
-                              <p className="font-family-ThaleahFat text-base tracking-widest text-yellow-100 uppercase sm:text-lg">
-                                Unable to load balance
-                              </p>
-                            )}
-                          </div>
-                          {/* Helper buttons */}
-                          {fromTokenBalance && !balanceLoading && (
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={handleSet20Percent}
-                                className="font-family-ThaleahFat border-ground-button-border bg-ground-button hover:bg-opacity-80 cursor-pointer rounded border p-1 text-base tracking-widest text-yellow-100 uppercase transition-all hover:scale-105"
-                              >
-                                20%
-                              </button>
-                              <button
-                                type="button"
-                                onClick={handleSet50Percent}
-                                className="font-family-ThaleahFat border-ground-button-border bg-ground-button hover:bg-opacity-80 cursor-pointer rounded border p-1 text-base tracking-widest text-yellow-100 uppercase transition-all hover:scale-105"
-                              >
-                                50%
-                              </button>
-                              <button
-                                type="button"
-                                onClick={handleSetMax}
-                                className="font-family-ThaleahFat border-ground-button-border bg-ground-button hover:bg-opacity-80 cursor-pointer rounded border p-1 text-base tracking-widest text-yellow-100 uppercase transition-all hover:scale-105"
-                              >
-                                MAX
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </div>
-                  </div>
-                  <Image
-                    src="/quest/header-quest-bg.png"
-                    alt="BG"
-                    width={200}
-                    height={200}
-                    className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                  />
-                </div>
+                  )}
 
-                {/* Action Button (kept) */}
-                {!walletAddress ? (
-                  <button
-                    onClick={handleConnectWallet}
-                    className="relative w-full cursor-pointer rounded py-4 text-base font-bold text-white transition-all sm:text-xl hover:scale-105"
-                  >
-                    <span>CONNECT WALLET</span>
-                    <Image
-                      src="/dapp/connect-wallet.png"
-                      alt="Connect"
-                      width={200}
-                      height={200}
-                      className="absolute inset-0 z-[-1] h-full w-full object-fill"
-                    />
-                  </button>
-                ) : (
-                  <>
-                    {thinPoolWarning && (
-                      <div className="relative mb-3 rounded-lg px-4 py-3 text-center">
-                        <p className="font-family-ThaleahFat text-sm tracking-wider text-yellow-200 uppercase sm:text-base">
-                          ⚠️ {thinPoolWarning}
-                        </p>
-                        <Image
-                          src="/quest/header-quest-bg.png"
-                          alt="Warning BG"
-                          width={200}
-                          height={200}
-                          className="absolute inset-0 left-0 z-[-1] h-full w-full opacity-80"
-                        />
+                  {/* Send */}
+                  <div className="p-field" style={{ marginTop: 12 }}>
+                    <div className="lbl">
+                      <span>Send</span>
+                    </div>
+                    <div className="amt">
+                      <input
+                        className="big"
+                        value={amount}
+                        onChange={(e) =>
+                          setAmount(e.target.value.replace(/[^0-9.]/g, ""))
+                        }
+                        placeholder="0.0"
+                        inputMode="decimal"
+                        aria-label="Amount to send"
+                      />
+                      <span className="p-mini" style={{ flex: "none", color: "var(--clay)", fontWeight: 800 }}>
+                        {displaySymbolOf(fromTokenMeta)}
+                      </span>
+                    </div>
+                    {/* Balance row inside the Send field */}
+                    {walletAddress && fromToken && fromChainId && (
+                      <div className="bal-row">
+                        <span className="b1">
+                          {balanceLoading ? (
+                            <>Loading balance...</>
+                          ) : fromTokenBalance ? (
+                            <>
+                              Balance:{" "}
+                              {Number(fromTokenBalance).toLocaleString(
+                                undefined,
+                                {
+                                  maximumFractionDigits: 6,
+                                  minimumFractionDigits: 0,
+                                },
+                              )}{" "}
+                              {displaySymbolOf(fromTokenMeta)}
+                              {balanceUsdValue && (
+                                <span>
+                                  {" "}
+                                  (${Number(balanceUsdValue).toFixed(2)})
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>Unable to load balance</>
+                          )}
+                        </span>
+                        {/* Helper buttons */}
+                        {fromTokenBalance && !balanceLoading && (
+                          <span className="chips">
+                            <button type="button" onClick={handleSet20Percent}>
+                              20%
+                            </button>
+                            <button type="button" onClick={handleSet50Percent}>
+                              50%
+                            </button>
+                            <button type="button" onClick={handleSetMax}>
+                              MAX
+                            </button>
+                          </span>
+                        )}
                       </div>
                     )}
-                    <button
-                      onClick={handleReviewSwap}
-                      disabled={
-                        !quote || !canQuote || !amount || Number(amount) <= 0 || insufficientBalance
-                      }
-                      className="relative w-full cursor-pointer rounded py-4 text-base font-bold text-white transition-all sm:text-xl hover:scale-105 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <span>{insufficientBalance ? ` INSUFFICIENT ${displaySymbolOf(fromTokenMeta)} ` : " REVIEW SWAP "}</span>
-                      <Image
-                        src="/dapp/connect-wallet.png"
-                        alt="Review"
-                        width={200}
-                        height={200}
-                        className="absolute inset-0 z-[-1] h-full w-full object-fill"
-                      />
+                  </div>
+
+                  {/* Action Button (kept) */}
+                  {!walletAddress ? (
+                    <button onClick={handleConnectWallet} className="p-btn">
+                      Connect wallet
                     </button>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Receive Panel (kept, auto-shows when ready) */}
-          {showReceive && (
-            <div className="flex w-full flex-col px-2 sm:max-w-xl sm:flex-1 sm:p-6">
-              <div className="relative z-10 mx-auto w-[85%] rounded-lg px-6 py-4 text-center">
-                <h1 className="text-peach-300 font-family-ThaleahFat text-shadow-header text-xl font-bold tracking-widest uppercase sm:text-3xl lg:text-5xl">
-                  RECEIVE
-                </h1>
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="Header"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-              <div className="relative mb-6 block h-full">
-                <Image
-                  src="/quest/Quest-BG.png"
-                  alt="BG"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 z-[-1] h-full w-full object-fill"
-                />
-                <div className="relative z-10 mx-auto mt-4 w-[95%] sm:mt-12 sm:w-[90%]">
-                  {!quote ? (
-                    <div className="rounded bg-black/40 p-4 text-left text-sm text-[#BCBCBC]">
-                      {quoteRefreshing
-                        ? "Scanning every live pool for the best route…"
-                        : canQuote
-                          ? "No route with live liquidity for this pair."
-                          : "Select tokens and enter an amount to get a live quote."}
-                    </div>
                   ) : (
-                    <div className="relative z-50 p-4">
-                      <div className="flex w-full flex-col justify-between gap-3 py-1 sm:px-4">
-                        {/* Headline: what you receive */}
-                        <div className="flex items-center justify-between">
-                          <div className="border-ground-button-border h-8 w-8 overflow-hidden rounded-lg border-2 bg-black/50 sm:h-12 sm:w-12">
-                            <Image
-                              src={toLogo}
-                              alt={`${displaySymbolOf(toTokenMeta)} logo`}
-                              width={48}
-                              height={48}
-                              className="h-full w-full object-cover"
-                            />
-                          </div>
-                          <div className="mr-auto ml-4 min-w-0 flex-1 overflow-hidden text-left">
-                            <div className="font-family-ThaleahFat text-lg text-yellow-100 truncate sm:text-3xl">
-                              {expectedOut} {displaySymbolOf(toTokenMeta)}
+                    <>
+                      {thinPoolWarning && (
+                        <div className="warn-thin">⚠️ {thinPoolWarning}</div>
+                      )}
+                      <button
+                        onClick={handleReviewSwap}
+                        disabled={
+                          !quote || !canQuote || !amount || Number(amount) <= 0 || insufficientBalance
+                        }
+                        className="p-btn"
+                      >
+                        {insufficientBalance ? `Insufficient ${displaySymbolOf(fromTokenMeta)}` : "Review swap"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Receive Panel (kept, auto-shows when ready) */}
+              {showReceive && (
+                <div>
+                  <div className="p-card">
+                    <h3>Receive</h3>
+                    <div style={{ marginTop: 12 }}>
+                      {!quote ? (
+                        <div className="noq">
+                          {quoteRefreshing
+                            ? "Scanning every live pool for the best route…"
+                            : canQuote
+                              ? "No route with live liquidity for this pair."
+                              : "Select tokens and enter an amount to get a live quote."}
+                        </div>
+                      ) : (
+                        <>
+                          {/* Headline: what you receive */}
+                          <div className="quote-head">
+                            <TokenIcon logo={toLogo} symbol={displaySymbolOf(toTokenMeta)} address={toToken} size={40} />
+                            <div style={{ minWidth: 0 }}>
+                              <div className="qh-amt">
+                                {expectedOut} {displaySymbolOf(toTokenMeta)}
+                              </div>
+                              <div className="qh-sub">
+                                {expectedOutUsd !== null && (
+                                  <span>≈ ${expectedOutUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })} · </span>
+                                )}
+                                <span className="qh-live">
+                                  LIVE · updated {secondsSinceUpdate <= 1 ? "just now" : `${secondsSinceUpdate}s ago`}
+                                </span>
+                              </div>
                             </div>
-                            <div className="text-sm font-semibold text-[#BCBCBC]">
-                              {expectedOutUsd !== null && (
-                                <span>≈ ${expectedOutUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })} · </span>
-                              )}
-                              <span className="text-green-300">
-                                LIVE · updated {secondsSinceUpdate <= 1 ? "just now" : `${secondsSinceUpdate}s ago`}
+                          </div>
+
+                          {/* Rate */}
+                          <div className="rate-line">{rateLabel}</div>
+
+                          {/* Detail rows */}
+                          <div className="p-rows" style={{ marginTop: 6 }}>
+                            <div className="p-row">
+                              <span className="k">Min received</span>
+                              <span className="v">
+                                {minReceived} {displaySymbolOf(toTokenMeta)}
                               </span>
                             </div>
-                          </div>
-                          <button className="border-ground-button-border bg-ground-button justify-center rounded border-2 p-1 text-yellow-100">
-                            <ArrowDown className="z-10 h-4 w-4" />
-                          </button>
-                        </div>
-
-                        {/* Rate */}
-                        <div className="text-left text-xs font-semibold text-[#BCBCBC]">
-                          {rateLabel}
-                        </div>
-
-                        <div className="bg-peach-500 h-[1px] w-full" />
-
-                        {/* Detail rows */}
-                        <div className="space-y-1.5 text-left text-xs sm:text-sm">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[#9a9a9a]">Min received</span>
-                            <span className="text-yellow-100">
-                              {minReceived} {displaySymbolOf(toTokenMeta)}
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[#9a9a9a]">Slippage</span>
-                            <span className="text-yellow-100">{(quote.slippageBps / 100).toFixed(2)}%</span>
-                          </div>
-                          {priceImpactLabel && (
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[#9a9a9a]">Price impact</span>
-                              <span className={priceImpactLabel.tone}>{priceImpactLabel.text}</span>
+                            <div className="p-row">
+                              <span className="k">Slippage</span>
+                              <span className="v">{(quote.slippageBps / 100).toFixed(2)}%</span>
                             </div>
-                          )}
-                          {networkFeeLabel && (
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[#9a9a9a]">
-                                <Fuel className="mr-1 inline-block h-3.5 w-3.5" />
-                                Network fee
+                            {priceImpactLabel && (
+                              <div className="p-row">
+                                <span className="k">Price impact</span>
+                                <span
+                                  className="v"
+                                  style={{
+                                    color:
+                                      priceImpactLabel.tone === "text-red-400"
+                                        ? "var(--rust)"
+                                        : priceImpactLabel.tone === "text-yellow-400"
+                                          ? "#b8860b"
+                                          : "#1e9e50",
+                                  }}
+                                >
+                                  {priceImpactLabel.text}
+                                </span>
+                              </div>
+                            )}
+                            {networkFeeLabel && (
+                              <div className="p-row">
+                                <span className="k">
+                                  <Fuel size={13} style={{ display: "inline-block", verticalAlign: "-2px", marginRight: 5 }} />
+                                  Network fee
+                                </span>
+                                <span className="v">{networkFeeLabel}</span>
+                              </div>
+                            )}
+                            <div className="p-row">
+                              <span className="k">Aggregator fee</span>
+                              <span className={quote.feeBps ? "v" : "v pos"}>
+                                {quote.feeBps ? `${(quote.feeBps / 100).toFixed(2)}%` : "0%"}
                               </span>
-                              <span className="text-yellow-100">{networkFeeLabel}</span>
                             </div>
-                          )}
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[#9a9a9a]">Aggregator fee</span>
-                            <span className={quote.feeBps ? "text-yellow-100" : "text-green-300"}>
-                              {quote.feeBps ? `${(quote.feeBps / 100).toFixed(2)}%` : "0%"}
-                            </span>
+                            {etaSeconds != null && (
+                              <div className="p-row">
+                                <span className="k">Est. time</span>
+                                <span className="v">~{etaSeconds}s</span>
+                              </div>
+                            )}
                           </div>
-                          {etaSeconds != null && (
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[#9a9a9a]">Est. time</span>
-                              <span className="text-yellow-100">~{etaSeconds}s</span>
-                            </div>
-                          )}
-                        </div>
 
-                        {/* Route breakdown — every split, its path and venue */}
-                        {routeRows.length > 0 && (
-                          <>
-                            <div className="bg-peach-500 h-[1px] w-full" />
-                            <div className="space-y-1 text-left">
-                              <div className="text-xs font-bold tracking-wider text-[#9a9a9a] uppercase">
+                          {/* Route breakdown — every split, its path and venue */}
+                          {routeRows.length > 0 && (
+                            <>
+                              <div className="route-h">
                                 Route · {quote.poolsQuoted} pools scanned
                               </div>
                               {routeRows.map((r, i) => (
-                                <div key={i} className="flex items-center justify-between gap-2 text-xs">
-                                  <span className="w-9 shrink-0 text-yellow-100">{r.pct}%</span>
+                                <div key={i} className="route-row">
+                                  <span className="pct">{r.pct}%</span>
                                   {/* Token path with a logo for every hop node */}
-                                  <span className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                                  <span className="path">
                                     {r.pathTokens.map((t, j) => (
-                                      <span key={j} className="flex items-center gap-0.5">
-                                        {j > 0 && <span className="text-[#7a7a7a]">›</span>}
-                                        <Image
-                                          src={t.logo}
-                                          alt={t.symbol}
-                                          width={16}
-                                          height={16}
-                                          className="h-4 w-4 shrink-0 rounded-full"
-                                        />
-                                        <span className="text-[#BCBCBC]">{t.symbol}</span>
+                                      <span key={j} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                                        {j > 0 && <span className="sep">›</span>}
+                                        <TokenIcon logo={t.logo} symbol={t.symbol} size={16} />
+                                        <span>{t.symbol}</span>
                                       </span>
                                     ))}
                                   </span>
-                                  <span className="shrink-0 text-right text-[#9a9a9a]">{r.venues}</span>
+                                  <span className="ven">{r.venues}</span>
                                 </div>
                               ))}
-                            </div>
-                          </>
-                        )}
+                            </>
+                          )}
 
-                        {priceImpactLabel?.severe && (
-                          <div className="rounded bg-red-900/40 px-2 py-1 text-left text-xs text-red-300">
-                            ⚠️ High price impact — this trade moves the pool
-                            price by {priceImpactLabel.text}. Consider a smaller
-                            amount.
-                          </div>
-                        )}
-                      </div>
-                      <Image
-                        src="/quest/header-quest-bg.png"
-                        alt="BG"
-                        width={200}
-                        height={200}
-                        className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                      />
+                          {priceImpactLabel?.severe && (
+                            <div className="warn-red">
+                              ⚠️ High price impact — this trade moves the pool
+                              price by {priceImpactLabel.text}. Consider a smaller
+                              amount.
+                            </div>
+                          )}
+                        </>
+                      )}
                     </div>
+                  </div>
+                </div>
+              )}
+            </section>
+          </main>
+
+          {/* Swap History Modal */}
+          {showHistory && (
+            <div className="cm-scrim" style={{ opacity: 1 }} onClick={() => setShowHistory(false)}>
+              <div className="cm-panel wide" onClick={(e) => e.stopPropagation()}>
+                <div className="cm-head">
+                  <h2>Swap history</h2>
+                  <button className="cm-x" onClick={() => setShowHistory(false)} aria-label="Close">
+                    ✕
+                  </button>
+                </div>
+                <div className="cm-body" style={{ maxHeight: 440, overflow: "auto" }}>
+                  {swapHistory.length === 0 ? (
+                    <div className="p-empty" style={{ padding: "44px 10px" }}>
+                      <div style={{ fontSize: "1.3rem", fontWeight: 800, color: "var(--ink-2)" }}>No swaps yet</div>
+                      <div style={{ marginTop: 6 }}>Completed swaps will appear here</div>
+                    </div>
+                  ) : (
+                    swapHistory.map((swap: any) => {
+                      const txHash = typeof swap.txHash === "object"
+                        ? (swap.txHash?.hash || swap.txHash?.txHash || "")
+                        : (swap.txHash || "");
+                      return (
+                        <div key={swap.id} className="hist-row">
+                          <div className="h1">
+                            {swap.fromAmount} <span className="fs">{swap.fromSymbol}</span>
+                            <span style={{ color: "var(--ink-3)" }}>→</span>
+                            {swap.toAmount?.length > 10 ? swap.toAmount.slice(0, 10) + "..." : swap.toAmount}{" "}
+                            <span className="ts">{swap.toSymbol}</span>
+                          </div>
+                          <div className="h2">
+                            <span>
+                              {swap.timestamp ? new Date(swap.timestamp).toLocaleString() : ""}
+                            </span>
+                            {txHash && (
+                              <a
+                                href={`https://robinhoodchain.blockscout.com/tx/${txHash}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                {txHash.slice(0, 10)}...{txHash.slice(-6)} ↗
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </div>
             </div>
           )}
-        </div>
+
+          <ExchangeStyles />
+        </>
       )}
     </>
   );

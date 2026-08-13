@@ -1,112 +1,130 @@
 "use client";
 import { useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Menu, X } from "lucide-react";
 import { FaXTwitter } from "react-icons/fa6";
-import Lottie from "lottie-react";
-import moleAnimation from "@/public/dapp/data-4.json";
+import { ConnectWalletButton } from "@/components/ConnectWalletButton";
+
+/** The drawn Burrow mole glyph — the brand mark, no image assets. */
+export const MoleGlyph = ({ size = 18 }: { size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.2"
+    strokeLinecap="round"
+    aria-hidden="true"
+  >
+    <path d="M3.5 17.5c0-4.7 3.8-8.5 8.5-8.5s8.5 3.8 8.5 8.5" />
+    <circle cx="9" cy="14" r="1.2" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="14" r="1.2" fill="currentColor" stroke="none" />
+    <path d="M12 16.5v1.4" />
+  </svg>
+);
+
+/** The hero mascot — a full drawn mole, replaces the pixel sprites. */
+export const MoleMascot = ({ className }: { className?: string }) => (
+  <svg className={className ?? "mole"} viewBox="0 0 120 120" aria-hidden="true">
+    <ellipse cx="60" cy="104" rx="46" ry="11" fill="rgba(42,24,10,.28)" />
+    <path d="M22 104c0-24 17-42 38-42s38 18 38 42Z" fill="#6b4423" />
+    <path d="M30 104c0-20 13-34 30-34s30 14 30 34Z" fill="#8a5c33" />
+    <circle cx="49" cy="86" r="4.2" fill="#2a180a" />
+    <circle cx="71" cy="86" r="4.2" fill="#2a180a" />
+    <circle cx="50.4" cy="84.6" r="1.4" fill="#fff" opacity=".85" />
+    <circle cx="72.4" cy="84.6" r="1.4" fill="#fff" opacity=".85" />
+    <ellipse cx="60" cy="95" rx="6" ry="4.4" fill="#e88f8f" />
+    <path
+      d="M34 96c-6 2-10 5-12 9M86 96c6 2 10 5 12 9"
+      stroke="#5c3a1e"
+      strokeWidth="3"
+      strokeLinecap="round"
+      fill="none"
+    />
+  </svg>
+);
+
 export const NavBar = () => {
   const [isOpen, setIsOpen] = useState(false);
-
   const currentPath = usePathname();
 
-  const linkClass = (path: string) =>
-    `cursor-pointer transition-colors ${currentPath === path
-      ? "text-yellow-300 underline"
-      : "hover:text-yellow-300"
-    }`;
-
-  const toggleMenu = () => setIsOpen(!isOpen);
-
-  // DEX destinations on the left, game/profile on the right.
+  // DEX destinations on the left, game/profile on the right. QUEUE lives only
+  // in the expanded menu — the original app's deliberate asymmetry, preserved.
   const LEFT = [
-    { href: "/dapp", label: "SWAP" },
-    { href: "/pools", label: "POOLS" },
-    { href: "/vault", label: "VAULT" },
+    { href: "/dapp", label: "Swap" },
+    { href: "/pools", label: "Pools" },
+    { href: "/vault", label: "Vault" },
     { href: "/dca", label: "DCA" },
-    { href: "/limit", label: "LIMIT" },
+    { href: "/limit", label: "Limit" },
   ];
   const RIGHT = [
-    { href: "/quests", label: "QUESTS" },
-    { href: "/profile", label: "PROFILE" },
-    { href: "/leaderboard", label: "RANKS" },
+    { href: "/quests", label: "Quests" },
+    { href: "/profile", label: "Profile" },
+    { href: "/leaderboard", label: "Ranks" },
   ];
-  const ALL = [...LEFT, ...RIGHT, { href: "/queue", label: "QUEUE" }];
+  const ALL = [...LEFT, ...RIGHT, { href: "/queue", label: "Queue" }];
+
+  const current = (path: string) =>
+    currentPath === path ? { "aria-current": "page" as const } : {};
 
   return (
-    <div className="relative flex w-full items-center justify-center">
-      {/* Brown pixel bar */}
-      <div className="bg-ground font-family-ThaleahFat relative flex w-full items-center justify-center rounded-lg border-3 border-[#523525] px-4 py-2 text-base font-medium tracking-wider text-white shadow-[0px_-6px_0px_0px_#523525_inset,0px_7.5px_0px_0px_rgba(255,255,255,0.6)_inset] sm:text-lg md:px-6 lg:max-w-6xl lg:justify-between lg:py-3 lg:text-lg xl:text-xl">
-        {/* Mobile: logo left, hamburger right */}
-        <div className="flex w-full items-center justify-between lg:hidden">
-          <Image
-            src="/moleswap-logo.png"
-            alt="MoleSwap"
-            width={64}
-            height={64}
-            className="h-10 w-10 shrink-0 rounded-full object-cover sm:h-16 sm:w-16"
-          />
-          <button
-            onClick={toggleMenu}
-            className="shrink-0 cursor-pointer text-white transition-transform hover:scale-110"
-            aria-label="Toggle menu"
-          >
-            {isOpen ? <X size={24} /> : <Menu size={24} />}
-          </button>
-        </div>
-
-        {/* Desktop Menu - Hidden on mobile */}
-        <div className="hidden w-full items-center justify-between lg:flex">
-          <div className="flex gap-3 lg:gap-5 xl:gap-7">
-            {LEFT.map((l) => (
-              <Link key={l.href} href={l.href} className={linkClass(l.href)}>
-                {l.label}
-              </Link>
-            ))}
+    <div className="chrome" id="chrome">
+      <div className="chrome-in">
+        <Link className="brand" href="/" aria-label="MoleSwap home">
+          <div className="glyph" aria-hidden="true">
+            <MoleGlyph />
           </div>
+          <div className="name">MoleSwap</div>
+        </Link>
 
-          <Link href="/" className="-my-4 mx-2 shrink-0 lg:mx-3">
-            <Image src="/moleswap-logo.png" alt="MoleSwap" width={64} height={64} className="h-14 w-14 rounded-full object-cover" />
-          </Link>
-
-          <div className="flex gap-3 lg:gap-5 xl:gap-7">
-            {RIGHT.map((l) => (
-              <Link key={l.href} href={l.href} className={linkClass(l.href)}>
-                {l.label}
-              </Link>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Mobile Dropdown Menu */}
-      <div
-        className={`border-background bg-ground absolute top-full right-2 left-2 z-[600] mt-2 overflow-y-auto rounded-lg border-3 shadow-[4px_4px_0_#000] transition-all duration-300 ease-in-out lg:hidden ${isOpen
-          ? "max-h-[70vh] opacity-100"
-          : "pointer-events-none max-h-0 opacity-0"
-          }`}
-      >
-        <div className="font-family-ThaleahFat relative !z-[500] grid grid-cols-2 gap-1 p-4 text-white">
-          {ALL.map((l) => (
-            <Link
-              key={l.href}
-              href={l.href}
-              className={`${linkClass(l.href)} rounded-lg px-3 py-2 text-center text-lg transition-all hover:bg-[#523525]`}
-              onClick={() => setIsOpen(false)}
-            >
+        <nav className="tabs" aria-label="Primary">
+          {LEFT.map((l) => (
+            <Link key={l.href} href={l.href} {...current(l.href)}>
               {l.label}
             </Link>
           ))}
+          <span className="nav-gap" aria-hidden="true" />
+          {RIGHT.map((l) => (
+            <Link key={l.href} href={l.href} {...current(l.href)}>
+              {l.label}
+            </Link>
+          ))}
+        </nav>
+
+        <div id="walletSlot">
+          <ConnectWalletButton />
         </div>
+
+        <button
+          className="burger"
+          onClick={() => setIsOpen(!isOpen)}
+          aria-label="Menu"
+        >
+          {isOpen ? <X size={18} /> : <Menu size={18} />}
+        </button>
+      </div>
+
+      {/* Expanded menu — the only place QUEUE appears, like the original. */}
+      <div className="menu-panel" hidden={!isOpen}>
+        {ALL.map((l) => (
+          <Link
+            key={l.href}
+            href={l.href}
+            {...current(l.href)}
+            onClick={() => setIsOpen(false)}
+          >
+            {l.label}
+          </Link>
+        ))}
       </div>
     </div>
   );
 };
 
 export const BackgroundImage = ({
-  isLoading,
+  isLoading, // kept for call-site compatibility — the Burrow ground is static
   getMolePosition,
   ref,
 }: {
@@ -116,115 +134,59 @@ export const BackgroundImage = ({
 }) => {
   return (
     <>
-      {/* Gradient Sky Layers */}
-      <div className="fixed inset-0 top-0 flex h-[50vh] flex-col">
-        <Image
-          src="/dapp/sky-dapp.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="h-full w-full object-fill"
-        />
-      </div>
-      <div className="fixed inset-0 z-0 max-md:hidden">
-        {/* clouds right top  */}
-        <Image
-          src="/profile/c2.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="animate-float-left absolute top-5 right-25 w-[120px] object-cover"
-        />
-        {/* clouds Center  */}
-        <Image
-          src="/profile/c3.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="animate-float-right absolute top-[10%] left-[40%] w-[120px] object-cover"
-        />
-      </div>
-      {/* Soil / Tunnel */}
-      <div className="fixed bottom-0 h-full w-full">
-        {/* Static ground image (visible when not loading) */}
-        <Image
-          src="/dapp/Soil_Grass_Tunnel.svg"
-          alt="Ground"
-          width={200}
-          height={200}
-          className={`absolute -bottom-4 w-full object-contain transition-opacity duration-500 sm:-bottom-8`}
-        />
-
-        {/* Lottie digging animation (always mounted, visibility toggled) */}
-        {/* <Lottie
-          lottieRef={ref}
-          animationData={moleAnimation}
-          loop={isLoading} // Loop while loading (swap in progress)
-          autoplay={false}
-          className={`absolute bottom-0 w-full object-fill opacity-100 transition-opacity duration-500`}
-        /> */}
+      {/* Soil strata + grit + grass horizon — the Burrow backdrop, all CSS/SVG. */}
+      <div className="ground" aria-hidden="true" />
+      <div className="grit" aria-hidden="true" />
+      <div className="horizon" aria-hidden="true">
+        <svg viewBox="0 0 1200 26" preserveAspectRatio="none">
+          <path
+            d="M0 26 V10 Q30 2 60 10 T120 10 T180 9 T240 11 T300 8 T360 11 T420 9 T480 10 T540 8 T600 11 T660 9 T720 10 T780 8 T840 11 T900 9 T960 10 T1020 8 T1080 11 T1140 9 T1200 10 V26 Z"
+            fill="#5c9440"
+          />
+          <path
+            d="M0 26 V17 Q40 12 80 17 T160 17 T240 16 T320 18 T400 16 T480 17 T560 16 T640 18 T720 16 T800 17 T880 16 T960 18 T1040 16 T1120 17 T1200 17 V26 Z"
+            fill="#3f6f2b"
+          />
+        </svg>
       </div>
     </>
   );
 };
 
 export const Footer = () => {
-  const currentYear = new Date().getFullYear();
   const currentPath = usePathname();
-
-  const footerLinkClass = (path: string) =>
-    `font-family-ThaleahFat cursor-pointer text-xl transition-colors sm:text-2xl ${currentPath === path
-      ? "text-peach-300"
-      : "text-peach-300/80 hover:text-peach-300"
-    }`;
+  const active = (path: string) =>
+    currentPath === path ? { color: "#ffe6c4" } : undefined;
 
   return (
-    <footer className="bg-ground relative z-50 w-full border-t-2 border-[#5D2C28] py-2 sm:py-3">
-      <div className="mx-auto w-full max-w-7xl px-4">
-        <div className="flex flex-col items-center gap-3 sm:flex-row sm:items-center sm:justify-between">
-          {/* Brand Section */}
-          <div className="flex items-center gap-2">
-            <Image
-              src="/profile/profile-logo.png"
-              alt="MoleSwap Logo"
-              width={32}
-              height={32}
-              className="h-10 w-10 sm:h-12 sm:w-12"
-            />
-            <span className="font-family-ThaleahFat text-peach-300 text-lg font-light sm:text-xl">
-              MOLE SWAP
-            </span>
-          </div>
-
-          {/* Page Links */}
-          <div className="flex flex-wrap items-center justify-center gap-3 text-base sm:gap-4 sm:text-lg">
-            <Link href="/about" className={footerLinkClass("/about")}>ABOUT</Link>
-            <span className="font-family-ThaleahFat text-peach-300/40 text-xl">·</span>
-            <Link href="/terms" className={footerLinkClass("/terms")}>TERMS</Link>
-            <span className="font-family-ThaleahFat text-peach-300/40 text-xl">·</span>
-            <Link href="/privacy" className={footerLinkClass("/privacy")}>PRIVACY</Link>
-            <p className="font-family-ThaleahFat text-peach-300/60 text-lg font-light sm:text-2xl">
-              follow us on
-            </p>
-            {/* Social Links */}
-            <div className="flex items-center gap-3">
-              <Link
-                href="https://x.com/moleswapcom"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="group relative flex h-8 w-8 items-center justify-center transition-all hover:scale-110 sm:h-10 sm:w-10"
-              >
-                <Image
-                  src="/profile/footer-image.svg"
-                  alt="Twitter"
-                  fill
-                  className="absolute inset-0 object-contain"
-                />
-                <FaXTwitter className="group-hover:text-peach-400 relative z-10 h-4 w-4 text-black transition-colors sm:h-5 sm:w-5" />
-              </Link>
-            </div>
-          </div>
-        </div>
+    <footer className="relative z-50 w-full">
+      <div className="foot-in">
+        <strong>MoleSwap</strong>
+        <span>
+          DEX aggregator &amp; AMM on Robinhood Chain — swap tokens, earn XP,
+          climb the leaderboard.
+        </span>
+        <nav className="foot-links">
+          <Link href="/about" style={active("/about")}>
+            About
+          </Link>
+          <Link href="/terms" style={active("/terms")}>
+            Terms
+          </Link>
+          <Link href="/privacy" style={active("/privacy")}>
+            Privacy
+          </Link>
+          <span className="foot-follow">follow us on</span>
+          <Link
+            href="https://x.com/moleswapcom"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="MoleSwap on X (Twitter)"
+            className="inline-flex items-center"
+          >
+            <FaXTwitter className="h-4 w-4" />
+          </Link>
+        </nav>
       </div>
     </footer>
   );

@@ -1,8 +1,6 @@
 "use client";
 import React from "react";
-import { BackgroundImage, NavBar } from "../shared";
-import Image from "next/image";
-import { ArrowLeft, ArrowUpDown, Move } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 const Settings = ({
@@ -23,310 +21,195 @@ const Settings = ({
   };
 
   return (
-    <div className="relative flex w-full flex-col items-center gap-4">
-      <div className="relative z-20 mb-[40%] flex w-full flex-1 items-center justify-center sm:mb-[8%]">
-        {" "}
-        <div className="flex w-full max-w-3xl flex-1 flex-col px-2 sm:p-6">
-          {/* Header */}
-          <div className="font-family-ThaleahFat relative top-[40px] z-10 mx-auto flex w-[85%] items-center justify-center rounded-lg px-3 py-4 text-center sm:px-6">
-            <button
-              onClick={() => setShowSettings(false)}
-              className="border-ground-button-border bg-ground-button absolute left-2 cursor-pointer justify-center rounded border-2 p-1 text-yellow-100 hover:scale-105 sm:left-4"
-            >
-              <ArrowLeft className="text-peach-400 h-5 w-5 sm:h-6 sm:w-6" />
-            </button>
+    <div style={{ maxWidth: 640, margin: "0 auto", width: "100%" }}>
+      {/* Header */}
+      <div className="pick-head" style={{ marginBottom: 14 }}>
+        <button
+          className="tool-btn"
+          onClick={() => setShowSettings(false)}
+          aria-label="Back"
+        >
+          <ArrowLeft size={16} />
+        </button>
+        <h2
+          style={{
+            margin: 0,
+            fontSize: "1.3rem",
+            fontWeight: 800,
+            color: "var(--p-onbg)",
+          }}
+        >
+          Settings
+        </h2>
+      </div>
 
-            <h1 className="text-peach-300 text-shadow-header mx-auto text-2xl font-bold tracking-widest uppercase sm:text-3xl md:text-5xl">
-              SETTINGS
-            </h1>
-            <Image
-              src="/quest/header-quest-bg.png"
-              alt="Profile"
-              width={200}
-              height={200}
-              className="absolute inset-0 left-0 z-[-1] h-full w-full"
-            />
+      {/* Settings cards */}
+      <div className="p-grid">
+        {/* Route Priority */}
+        <div
+          className="p-card tight set-card"
+          onClick={() => toggleCard("route")}
+        >
+          <div className="sc-top">
+            <span className="ic" aria-hidden="true">
+              🧭
+            </span>
+            <h3>Route Priority</h3>
+            <span className="cur">
+              {expandedCard === "route" ? "" : routePriority}
+            </span>
           </div>
-
-          {/* Main Exchange Section */}
-          <div className="relative mb-6 block h-full">
-            <Image
-              src="/quest/Quest-BG.png"
-              alt="Profile"
-              width={200}
-              height={200}
-              className="absolute inset-0 z-0 h-full w-full object-fill"
-            />
-
-            {/* Settings Cards */}
-            <div className="relative z-50 mx-auto mt-12 mb-6 grid w-full grid-cols-1 gap-3 p-3 sm:w-[85%] sm:gap-4 sm:p-4">
-              {/* Route Priority */}
-              <div
-                className="relative z-10 mx-auto w-full cursor-pointer rounded-lg px-4 py-3 text-center transition-opacity hover:opacity-90 sm:w-[90%] sm:px-6 sm:py-4"
-                onClick={() => toggleCard("route")}
+          {expandedCard === "route" && (
+            <div className="set-seg">
+              <button
+                data-on={routePriority === "BEST RETURN"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRoutePriority("BEST RETURN");
+                }}
               >
-                <div className="flex items-center justify-between gap-2 sm:gap-4">
-                  <div className="flex items-center gap-2 sm:gap-4">
-                    <Image
-                      src="/settings/route.svg"
-                      alt="Profile"
-                      width={24}
-                      height={24}
-                      className="h-5 w-5 text-white sm:h-7 sm:w-7"
-                    />
-
-                    <div className="text-left">
-                      <h2 className="font-family-ThaleahFat text-xl tracking-widest text-white uppercase sm:text-2xl md:text-3xl">
-                        Route Priority
-                      </h2>
-                    </div>
-                  </div>
-                  <p className="font-family-ThaleahFat text-base font-medium tracking-widest text-[#B0B0B0] uppercase sm:text-xl md:text-2xl">
-                    {expandedCard === "route" ? "" : routePriority}
-                  </p>
-                </div>
-                {expandedCard === "route" && (
-                  <div className="my-2 mt-3 flex sm:mt-4">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setRoutePriority("BEST RETURN");
-                      }}
-                      className={`font-family-ThaleahFat flex-1 cursor-pointer rounded-l-xs px-2 py-1 text-base tracking-widest uppercase transition-colors sm:px-3 sm:text-lg md:text-2xl ${
-                        routePriority === "BEST RETURN"
-                          ? "bg-[#F4D03F] text-black"
-                          : "bg-[#3D2817] text-[#B0B0B0] hover:bg-[#4D3827]"
-                      }`}
-                    >
-                      BEST RETURN
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setRoutePriority("FASTEST");
-                      }}
-                      className={`font-family-ThaleahFat flex-1 cursor-pointer rounded-r-xs px-2 py-1 text-base tracking-widest uppercase transition-colors sm:px-3 sm:text-lg md:text-2xl ${
-                        routePriority === "FASTEST"
-                          ? "bg-[#F4D03F] text-black"
-                          : "bg-[#3D2817] text-[#B0B0B0] hover:bg-[#4D3827]"
-                      }`}
-                    >
-                      FASTEST
-                    </button>
-                  </div>
-                )}
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="Profile"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-
-              {/* Max Slippage */}
-              <div
-                className="relative z-10 mx-auto w-full cursor-pointer rounded-lg px-4 py-3 text-center transition-opacity hover:opacity-90 sm:w-[90%] sm:px-6 sm:py-4"
-                onClick={() => toggleCard("slippage")}
+                BEST RETURN
+              </button>
+              <button
+                data-on={routePriority === "FASTEST"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRoutePriority("FASTEST");
+                }}
               >
-                <div className="flex items-center justify-between gap-2 sm:gap-4">
-                  <div className="flex items-center gap-2 sm:gap-4">
-                    <Image
-                      src="/settings/divide.svg"
-                      alt="Profile"
-                      width={24}
-                      height={24}
-                      className="h-4 w-4 text-white sm:h-5 sm:w-5"
-                    />
-                    <div className="text-left">
-                      <h2 className="font-family-ThaleahFat text-xl tracking-widest text-white uppercase sm:text-2xl md:text-3xl">
-                        Max Slippage
-                      </h2>
-                    </div>
-                  </div>
-                  <p className="font-family-ThaleahFat text-base font-medium tracking-widest text-[#B0B0B0] uppercase sm:text-xl md:text-2xl">
-                    {expandedCard === "slippage" ? "" : maxSlippage}
-                  </p>
-                </div>
-                {expandedCard === "slippage" && (
-                  <div className="my-2 mt-3 flex sm:mt-4">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setMaxSlippage("AUTO");
-                      }}
-                      className={`font-family-ThaleahFat flex-1 cursor-pointer rounded-l-xs px-2 py-1 text-base tracking-widest uppercase transition-colors sm:px-3 sm:text-lg md:text-2xl ${
-                        maxSlippage === "AUTO"
-                          ? "bg-[#F4D03F] text-black"
-                          : "bg-[#3D2817] text-[#B0B0B0] hover:bg-[#4D3827]"
-                      }`}
-                    >
-                      AUTO
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setMaxSlippage("0.5");
-                      }}
-                      className={`font-family-ThaleahFat flex-1 cursor-pointer rounded-r-xs px-2 py-1 text-base tracking-widest uppercase transition-colors sm:px-3 sm:text-lg md:text-2xl ${
-                        maxSlippage === "0.5"
-                          ? "bg-[#F4D03F] text-black"
-                          : "bg-[#3D2817] text-[#B0B0B0] hover:bg-[#4D3827]"
-                      }`}
-                    >
-                      0.5
-                    </button>
-                  </div>
-                )}
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="Profile"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-
-              {/* Gas Price */}
-              <div
-                className="relative z-10 mx-auto w-full cursor-pointer rounded-lg px-4 py-3 text-center transition-opacity hover:opacity-90 sm:w-[90%] sm:px-6 sm:py-4"
-                onClick={() => toggleCard("gas")}
-              >
-                <div className="flex items-center justify-between gap-2 sm:gap-4">
-                  <div className="flex items-center gap-2 sm:gap-4">
-                    <Image
-                      src="/settings/gas.svg"
-                      alt="Profile"
-                      width={24}
-                      height={24}
-                      className="h-5 w-5 text-white sm:h-7 sm:w-7"
-                    />
-                    <div className="text-left">
-                      <h2 className="font-family-ThaleahFat text-xl tracking-widest text-white uppercase sm:text-2xl md:text-3xl">
-                        Gas Price
-                      </h2>
-                    </div>
-                  </div>
-                  <p className="font-family-ThaleahFat text-base font-medium tracking-widest text-[#B0B0B0] uppercase sm:text-xl md:text-2xl">
-                    {expandedCard === "gas" ? "" : gasPrice}
-                  </p>
-                </div>
-                {expandedCard === "gas" && (
-                  <div className="my-2 mt-3 flex sm:mt-4">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setGasPrice("SLOW");
-                      }}
-                      className={`font-family-ThaleahFat flex-1 cursor-pointer rounded-l-xs px-2 py-1 text-base tracking-widest uppercase transition-colors sm:px-3 sm:text-lg md:text-2xl ${
-                        gasPrice === "SLOW"
-                          ? "bg-[#F4D03F] text-black"
-                          : "bg-[#3D2817] text-[#B0B0B0] hover:bg-[#4D3827]"
-                      }`}
-                    >
-                      SLOW
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setGasPrice("NORMAL");
-                      }}
-                      className={`font-family-ThaleahFat flex-1 cursor-pointer px-2 py-1 text-base tracking-widest uppercase transition-colors sm:px-3 sm:text-lg md:text-2xl ${
-                        gasPrice === "NORMAL"
-                          ? "bg-[#F4D03F] text-black"
-                          : "bg-[#3D2817] text-[#B0B0B0] hover:bg-[#4D3827]"
-                      }`}
-                    >
-                      NORMAL
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setGasPrice("FAST");
-                      }}
-                      className={`font-family-ThaleahFat flex-1 cursor-pointer rounded-r-xs px-2 py-1 text-base tracking-widest uppercase transition-colors sm:px-3 sm:text-lg md:text-2xl ${
-                        gasPrice === "FAST"
-                          ? "bg-[#F4D03F] text-black"
-                          : "bg-[#3D2817] text-[#B0B0B0] hover:bg-[#4D3827]"
-                      }`}
-                    >
-                      FAST
-                    </button>
-                  </div>
-                )}
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="Profile"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-
-              {/* Bridges */}
-              <div className="relative z-10 mx-auto w-full cursor-pointer rounded-lg px-4 py-3 text-center transition-opacity hover:opacity-90 sm:w-[90%] sm:px-6 sm:py-4">
-                <div className="flex items-center justify-between gap-2 sm:gap-4">
-                  <div className="flex items-center gap-2 sm:gap-4">
-                    <Image
-                      src="/settings/bridges.svg"
-                      alt="Profile"
-                      width={24}
-                      height={24}
-                      className="h-5 w-5 text-white sm:h-7 sm:w-7"
-                    />
-
-                    <div className="text-left">
-                      <h2 className="font-family-ThaleahFat text-xl tracking-widest text-white uppercase sm:text-2xl md:text-3xl">
-                        Bridges
-                      </h2>
-                    </div>
-                  </div>
-                  <p className="font-family-ThaleahFat text-base font-medium tracking-widest text-[#B0B0B0] uppercase sm:text-xl md:text-2xl">
-                    20/20
-                  </p>
-                </div>
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="Profile"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-
-              {/* Exchanges */}
-              <div className="relative z-10 mx-auto w-full cursor-pointer rounded-lg px-4 py-3 text-center transition-opacity hover:opacity-90 sm:w-[90%] sm:px-6 sm:py-4">
-                <div className="flex items-center justify-between gap-2 sm:gap-4">
-                  <div className="flex items-center gap-2 sm:gap-4">
-                    <Image
-                      src="/settings/exchanges.svg"
-                      alt="Profile"
-                      width={24}
-                      height={24}
-                      className="h-5 w-5 text-white sm:h-7 sm:w-7"
-                    />
-                    <div className="text-left">
-                      <h2 className="font-family-ThaleahFat text-xl tracking-widest text-white uppercase sm:text-2xl md:text-3xl">
-                        Exchanges
-                      </h2>
-                    </div>
-                  </div>
-                  <p className="font-family-ThaleahFat text-base font-medium tracking-widest text-[#B0B0B0] uppercase sm:text-xl md:text-2xl">
-                    16/16
-                  </p>
-                </div>
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="Profile"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
+                FASTEST
+              </button>
             </div>
+          )}
+        </div>
+
+        {/* Max Slippage */}
+        <div
+          className="p-card tight set-card"
+          onClick={() => toggleCard("slippage")}
+        >
+          <div className="sc-top">
+            <span className="ic" aria-hidden="true">
+              ➗
+            </span>
+            <h3>Max Slippage</h3>
+            <span className="cur">
+              {expandedCard === "slippage" ? "" : maxSlippage}
+            </span>
+          </div>
+          {expandedCard === "slippage" && (
+            <div className="set-seg">
+              <button
+                data-on={maxSlippage === "AUTO"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMaxSlippage("AUTO");
+                }}
+              >
+                AUTO
+              </button>
+              <button
+                data-on={maxSlippage === "0.5"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMaxSlippage("0.5");
+                }}
+              >
+                0.5
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Gas Price */}
+        <div
+          className="p-card tight set-card"
+          onClick={() => toggleCard("gas")}
+        >
+          <div className="sc-top">
+            <span className="ic" aria-hidden="true">
+              ⛽
+            </span>
+            <h3>Gas Price</h3>
+            <span className="cur">{expandedCard === "gas" ? "" : gasPrice}</span>
+          </div>
+          {expandedCard === "gas" && (
+            <div className="set-seg">
+              <button
+                data-on={gasPrice === "SLOW"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setGasPrice("SLOW");
+                }}
+              >
+                SLOW
+              </button>
+              <button
+                data-on={gasPrice === "NORMAL"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setGasPrice("NORMAL");
+                }}
+              >
+                NORMAL
+              </button>
+              <button
+                data-on={gasPrice === "FAST"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setGasPrice("FAST");
+                }}
+              >
+                FAST
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Bridges */}
+        <div className="p-card tight set-card">
+          <div className="sc-top">
+            <span className="ic" aria-hidden="true">
+              🌉
+            </span>
+            <h3>Bridges</h3>
+            <span className="cur">20/20</span>
+          </div>
+        </div>
+
+        {/* Exchanges */}
+        <div className="p-card tight set-card">
+          <div className="sc-top">
+            <span className="ic" aria-hidden="true">
+              🔁
+            </span>
+            <h3>Exchanges</h3>
+            <span className="cur">16/16</span>
           </div>
         </div>
       </div>
+
+      <style>{`
+        .pick-head { display: flex; align-items: center; gap: 12px; }
+        .tool-btn {
+          width: 34px; height: 34px; border-radius: 11px; cursor: pointer; display: grid; place-items: center;
+          background: var(--p-chip); border: 1px solid var(--p-card-line); color: var(--p-card-ink-2);
+          box-shadow: var(--p-card-sh);
+        }
+        .tool-btn:active { transform: scale(.94); }
+        .set-card { cursor: pointer; }
+        .set-card .sc-top { display: flex; align-items: center; gap: 12px; }
+        .set-card .sc-top .ic { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: var(--p-accent-soft); font-size: 17px; flex: none; }
+        .set-card .sc-top h3 { flex: 1; }
+        .set-card .cur { font-size: 12px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: var(--p-card-ink-3); }
+        .set-seg { display: flex; gap: 6px; margin-top: 14px; }
+        .set-seg button {
+          flex: 1; border: 1px solid var(--p-card-line); background: var(--p-field); color: var(--p-card-ink-2);
+          font: inherit; font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+          padding: 9px 10px; border-radius: 12px; cursor: pointer;
+        }
+        .set-seg button[data-on="true"] { background: var(--amber); color: #3d2410; border-color: transparent; }
+      `}</style>
     </div>
   );
 };

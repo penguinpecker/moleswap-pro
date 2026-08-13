@@ -12,12 +12,9 @@ export function ChainSelectorButton() {
   if (!isConnected) return null;
 
   return (
-    <div
-      className="font-family-ThaleahFat flex items-center gap-1.5 px-3 py-3 text-lg tracking-wider text-black sm:text-xl"
-      title="Connected to Robinhood Chain"
-    >
-      <span className={`h-2 w-2 rounded-full ${onRH ? "bg-green-500" : "bg-yellow-500"}`} />
-      <span className="hidden sm:inline">RH</span>
-    </div>
+    <span className="chain-pill" title="Connected to Robinhood Chain">
+      <span className={`dot ${onRH ? "on" : ""}`} />
+      <span className="hide-sm">RH</span>
+    </span>
   );
 }

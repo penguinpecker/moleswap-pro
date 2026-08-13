@@ -1,47 +1,36 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./burrow.css";
 
 @custom-variant dark (&:is(.dark *));
 
-@font-face {
-  font-family: ThaleahFat;
-  src: url("/fonts/ThaleahFat.ttf") format("truetype");
-  font-weight: normal;
-  font-style: normal;
-}
-
-@font-face {
-  font-family: "PixelfySans";
-  src: url("/fonts/PixelfySans-Bold.ttf") format("truetype");
-  font-weight: bold;
-  font-style: normal;
-}
+/* ============================================================
+   MoleSwap — Burrow design system (see burrow.css).
+   The pixel-art era tokens below are kept as ALIASES into the
+   Burrow palette so any straggler class resolves to the new
+   look instead of the old one. ThaleahFat/Pixelify webfonts are
+   retired — the display face is the Burrow rounded system stack.
+   ============================================================ */
 
 :root {
-  --ground: #784834;
-  --ground-button: #5b3119;
-  --ground-button-border: #402113;
+  /* legacy token names → Burrow palette */
+  --ground: #3e2410; /* loam-3 — brand brown, also the chrome bar */
+  --ground-button: #5c3719; /* loam-2 */
+  --ground-button-border: #2a180a; /* loam-4 */
 
-  --peach: #ffd3bf;
-  --peach-300: #f7d580;
-  --peach-400: #feca61;
-  --peach-500: #feae34;
+  --peach: #fdf4e6; /* cream */
+  --peach-300: #ffe6c4; /* chrome cream text */
+  --peach-400: #ffcd7d; /* light amber */
+  --peach-500: #f0a03c; /* amber */
 
-  --leaderboard: #1b1018;
-  --leaderboard-text: #d08d67;
-  --leaderboard-rank: #f69d25;
-  --wallet-address-profile-bg: #ba6d4f;
+  --leaderboard: #2a180a;
+  --leaderboard-text: #9c8067;
+  --leaderboard-rank: #f0a03c;
+  --wallet-address-profile-bg: #cd5f2a;
 
-  --hover-text: #281a1286;
-  --selected-text: #281a12;
-  /* --peach-50: #fff1ce;
-  --peach-100: #ffdeba;
-  --peach-200: #ffcc95;
-  --peach-300: #ffba6f; 
-  --peach-500: #ff9a2b;
-  --peach-700: #ff7600;
-  --peach-800: #ff6400;
-  --peach-900: #ff5200;   */
+  --hover-text: #6d523a;
+  --selected-text: #2c1a0c;
+
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -113,28 +102,26 @@
 }
 
 @theme inline {
-  /*  CUSTOM FONT FAMILY  */
-  --font-family-ThaleahFat: "ThaleahFat", sans-serif;
-  --font-family-PixelfySans: "PixelfySans", sans-serif;
-  /* --font-family-mono: var(--font-mono); */
+  /* Retired pixel fonts — both aliases now resolve to the Burrow stacks so any
+     straggler `font-family-ThaleahFat` class renders in the new type. */
+  --font-family-ThaleahFat: ui-rounded, "SF Pro Rounded", ui-sans-serif,
+    -apple-system, "Nunito", system-ui, sans-serif;
+  --font-family-PixelfySans: ui-monospace, "SF Mono", "JetBrains Mono", Menlo,
+    monospace;
   /*  CUSTOM COLORS  */
-  /* ------------GROUND--------- */
   --color-ground: var(--ground);
   --color-ground-button: var(--ground-button);
   --color-ground-button-border: var(--ground-button-border);
-  /* ---------PEACH---------- */
   --color-peach: var(--peach);
   --color-peach-300: var(--peach-300);
   --color-peach-400: var(--peach-400);
   --color-peach-500: var(--peach-500);
-  /* ------------LEADERBOARD----------- */
   --color-leaderboard: var(--leaderboard);
   --color-leaderboard-text: var(--leaderboard-text);
   --color-leaderboard-rank: var(--leaderboard-rank);
   --color-wallet-address-profile-bg: var(--wallet-address-profile-bg);
   --color-hover-text: var(--hover-text);
   --color-selected-text: var(--selected-text);
-  /* optional: --font-sans, --font-serif, --font-mono if they are applied in the layout.tsx */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -177,82 +164,54 @@
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
-  }
 }
 
-/* Pixel art styling */
-* {
-  image-rendering: -moz-crisp-edges;
-  image-rendering: -webkit-crisp-edges;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
-}
-
-/* ------------- SCROLLBAR -------------  */
-/* scrollbar.css */
+/* ------------- SCROLLBAR (Burrow ambers) -------------  */
 .custom-scrollbar {
   scrollbar-width: thin;
-  scrollbar-color: #ffc107 #281a12; /* thumb amber, track dark brown */
+  scrollbar-color: #f0a03c #2a180a;
 }
-
 .custom-scrollbar::-webkit-scrollbar {
   width: 8px;
   border-radius: 999px;
 }
-
 .custom-scrollbar::-webkit-scrollbar-track {
-  background: #281a12; /* dark brown */
+  background: #2a180a;
   border-radius: 999px;
 }
-
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: linear-gradient(
-    135deg,
-    #ffc107 60%,
-    #ffb676 100%
-  ); /* amber-peach gradient */
+  background: linear-gradient(135deg, #f0a03c 60%, #cd5f2a 100%);
   border-radius: 999px;
-  border: 2px solid #864b21; /* subtle brown border */
+  border: 2px solid #5c3719;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(135deg, #ffb676 40%, #ffc107 100%);
+  background: linear-gradient(135deg, #ffcd7d 40%, #f0a03c 100%);
 }
-
-/* ---------HIDE SCROLLBAR---------  */
-
-/* Hide scrollbar but allow scroll - works for Webkit browsers */
 .hide-scrollbar {
-  scrollbar-width: none; /* For Firefox */
-  -ms-overflow-style: none; /* Internet Explorer 10+ */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 .hide-scrollbar::-webkit-scrollbar {
-  /* Webkit browsers like Chrome, Safari, Edge */
   display: none;
 }
-/* -----------OVER ALL SCROLLBAR-----------  */
 ::-webkit-scrollbar {
   width: 8px;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-track {
-  background: #281a12; /* dark brown */
+  background: #2a180a;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(
-    135deg,
-    #ffc107 60%,
-    #ffb676 100%
-  ); /* amber-peach gradient */
+  background: linear-gradient(135deg, #f0a03c 60%, #cd5f2a 100%);
   border-radius: 999px;
-  border: 2px solid #864b21; /* subtle brown border */
+  border: 2px solid #5c3719;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(135deg, #ffb676 40%, #ffc107 100%);
+  background: linear-gradient(135deg, #ffcd7d 40%, #f0a03c 100%);
 }
-/* --------------pop up --------------- */
+
+/* --------------pop up (kept: wallet dropdown, mole pop) --------------- */
 @keyframes pop-up {
   0% {
     transform: translate(-50%, -50%) scale(0);
@@ -267,18 +226,46 @@
     opacity: 1;
   }
 }
-
 .animate-pop-up {
   animation: pop-up 0.25s ease-out forwards;
 }
-/* MoleSwap engine panel animations */
-@keyframes spin-slow { to { transform: rotate(360deg); } }
-.animate-spin-slow { animation: spin-slow 7s linear infinite; display: inline-block; }
-@keyframes ping-slow {
-  0% { box-shadow: 0 0 0 0 rgba(74,222,128,.7); }
-  70%, 100% { box-shadow: 0 0 0 9px rgba(74,222,128,0); }
+
+/* pop that doesn't assume a -50% translate (Burrow dropdowns) */
+@keyframes pop-in {
+  0% {
+    transform: scale(0.92);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
-.animate-ping-slow { animation: ping-slow 1.6s ease-out infinite; }
+.animate-pop-in {
+  animation: pop-in 0.16s ease-out forwards;
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.animate-spin-slow {
+  animation: spin-slow 7s linear infinite;
+  display: inline-block;
+}
+@keyframes ping-slow {
+  0% {
+    box-shadow: 0 0 0 0 rgba(47, 125, 79, 0.7);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 9px rgba(47, 125, 79, 0);
+  }
+}
+.animate-ping-slow {
+  animation: ping-slow 1.6s ease-out infinite;
+}
 .game-container,
 .game-container * {
   -webkit-user-select: none;
@@ -287,188 +274,20 @@
   -webkit-user-drag: none;
   user-drag: none;
 }
-/* --------------------animated chains moving ---------------------- */
-@keyframes cloud-left {
-  0%,
-  100% {
-    transform: translateX(-10px);
-  }
-  50% {
-    transform: translateX(10px);
-  }
-}
 
-@keyframes cloud-right {
-  0%,
-  100% {
-    transform: translateX(10px);
-  }
-  50% {
-    transform: translateX(-10px);
-  }
-}
-.animate-cloud-left {
-  animation: cloud-left 6s ease-in-out infinite;
-}
-
-.animate-cloud-right {
-  animation: cloud-right 6s ease-in-out infinite;
-}
-/* --------------------animated clouds moving ---------------------- */
-
-/* Clouds that move fully across the screen */
-@keyframes float-left {
-  0% {
-    transform: translateX(50vw);
-  }
-  100% {
-    transform: translateX(-100vw);
-  }
-}
-
-@keyframes float-right {
-  0% {
-    transform: translateX(-60vw);
-  }
-  100% {
-    transform: translateX(80vw);
-  }
-}
-
-/* Infinite marquee-like drift */
-.animate-float-left {
-  animation: float-left 15s linear infinite;
-}
-
-.animate-float-right {
-  animation: float-right 25s linear infinite;
-}
-
+/* Burrow text shadows — the pixel-era classes resolve to subtle depth now */
 .text-shadow-header {
-  text-shadow:
-    -4.5px -4.5px 0 #211110,
-    4.5px -4.5px 0 #211110,
-    -4.5px 4.5px 0 #57221f,
-    4.5px 4.5px 0 #57221f,
-    -3px -3px 0 #211110,
-    -3px 3px 0 #57221f,
-    3px 3px 0 #57221f,
-    -2px -2px 0 #211110,
-    2px -2px 0 #211110,
-    -2px 2px 0 #57221f,
-    2px 2px 0 #57221f;
+  text-shadow: 0 2px 0 rgba(255, 255, 255, 0.35);
 }
-
 .text-shadow-black {
-  text-shadow:
-    -3px -3px 0 #000000,
-    3px -3px 0 #000000,
-    -3px 3px 0 #49201e,
-    3px 3px 0 #49201e,
-    -2px -2px 0 #000000,
-    2px -2px 0 #000000,
-    -2px 2px 0 #49201e,
-    2px 2px 0 #49201e;
+  text-shadow: 0 2px 0 rgba(42, 24, 10, 0.35);
 }
 
-/* ═══ Wallet Button — MoleSwap Theme Override ═══ */
-
-/* Header connect button wrapper */
-.moleswap-wallet-btn {
-  display: flex;
-  align-items: center;
+/* Mobile utilities */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
-
-/* Nuclear override: ANY button/div inside the wallet wrapper */
-.moleswap-wallet-btn > div,
-.moleswap-wallet-btn > button,
-.moleswap-wallet-btn div[style],
-.moleswap-wallet-btn button[style] {
-  background: transparent !important;
-  background-color: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  border-radius: 0 !important;
-  padding: 4px 8px !important;
-  font-family: 'ThaleahFat', sans-serif !important;
-  font-size: 1.25rem !important;
-  letter-spacing: 0.1em !important;
-  text-transform: uppercase !important;
-  color: #000 !important;
-  cursor: pointer !important;
-  min-height: unset !important;
-  height: auto !important;
-}
-
-/* Override for the pools page connect button */
-.moleswap-pools-connect div[style],
-.moleswap-pools-connect button[style],
-.moleswap-pools-connect > div,
-.moleswap-pools-connect > button {
-  background: #feae34 !important;
-  background-color: #feae34 !important;
-  border: 3px solid #523525 !important;
-  border-radius: 10px !important;
-  padding: 12px 28px !important;
-  font-family: 'ThaleahFat', sans-serif !important;
-  font-size: 1.35rem !important;
-  letter-spacing: 0.15em !important;
-  text-transform: uppercase !important;
-  color: #000 !important;
-  cursor: pointer !important;
-  box-shadow: 0px -6px 0px 0px #C97E00 inset, 0px 7.5px 0px 0px rgba(255,212,122,0.6) inset !important;
-  transition: transform 0.15s !important;
-}
-
-.moleswap-pools-connect div[style]:hover,
-.moleswap-pools-connect button[style]:hover {
-  transform: scale(1.02) !important;
-}
-
-/* Profile page connect button override */
-.moleswap-profile-connect div[style],
-.moleswap-profile-connect button[style],
-.moleswap-profile-connect > div,
-.moleswap-profile-connect > button {
-  background: #5b3119 !important;
-  background-color: #5b3119 !important;
-  border: 4px solid #402113 !important;
-  border-radius: 8px !important;
-  padding: 14px 24px !important;
-  font-family: 'ThaleahFat', sans-serif !important;
-  font-size: 1.35rem !important;
-  letter-spacing: 0.15em !important;
-  text-transform: uppercase !important;
-  color: #feca61 !important;
-  width: 100% !important;
-  cursor: pointer !important;
-}
-
-/* Exchange page green connect wallet button override */
-.moleswap-exchange-connect div[style],
-.moleswap-exchange-connect button[style],
-.moleswap-exchange-connect > div,
-.moleswap-exchange-connect > button {
-  background: #6DBB3E !important;
-  background-color: #6DBB3E !important;
-  border: none !important;
-  border-radius: 8px !important;
-  padding: 16px 24px !important;
-  font-family: 'ThaleahFat', sans-serif !important;
-  font-size: 1.35rem !important;
-  letter-spacing: 0.15em !important;
-  text-transform: uppercase !important;
-  color: #fff !important;
-  width: 100% !important;
-  cursor: pointer !important;
-  box-shadow: 0px -4px 0px 0px #4A8B29 inset, 0px 4px 0px 0px rgba(255,255,255,0.3) inset !important;
-}
-
-/* Mobile optimization utilities */
-.no-scrollbar::-webkit-scrollbar { display: none; }
-.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-
-@media (max-width: 640px) {
-  /* Scale down ThaleahFat headers on mobile */
-  .font-family-ThaleahFat { letter-spacing: 0.02em; }
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }

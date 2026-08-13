@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import Image from "next/image";
+import { BackgroundImage, NavBar, MoleMascot } from "../shared";
 
 interface Mole {
   id: number;
@@ -150,80 +150,22 @@ export default function MoleWhack({
     setMoles((prev) => prev.map((m) => ({ ...m, visible: false, hit: false })));
   };
 
-  return (
+  // The game board — sky-to-grass gradient field, drawn pits and moles.
+  // Fills its parent, so it drops into the modal / quest containers unchanged.
+  const game = (
     <div
       ref={gameContainerRef}
-      className="game-container relative flex h-full w-full cursor-none flex-col overflow-hidden bg-[url(/wack/bg.png)] bg-cover bg-center p-3 sm:p-4 md:p-5 lg:p-6"
+      className="wk-area game-container relative flex h-full w-full cursor-none flex-col overflow-hidden p-3 sm:p-4 md:p-5 lg:p-6"
     >
-      {/* Background images */}
-      <div className="pointer-events-none absolute inset-0">
-        <Image
-          src="/wack/tree-top-left.png"
-          alt=""
-          width={300}
-          height={300}
-          className="absolute top-0 left-0 w-[50px] object-cover select-none sm:w-[100px]"
-          priority
-        />
-        <Image
-          src="/wack/tree-top-right.png"
-          alt=""
-          width={300}
-          height={300}
-          className="absolute top-0 right-0 w-[50px] object-cover select-none sm:w-[100px]"
-          priority
-        />
-        <Image
-          src="/wack/left-bottom.png"
-          alt=""
-          width={175}
-          height={175}
-          className="absolute bottom-0 left-0 w-[50px] object-cover select-none sm:w-[100px]"
-        />
-        <div className="absolute right-0 bottom-0 flex items-end max-sm:hidden">
-          <Image
-            src="/wack/right-bottom-2.png"
-            alt=""
-            width={150}
-            height={150}
-            className="relative w-[50px] object-cover select-none"
-          />
-          <Image
-            src="/wack/right-bottom.png"
-            alt=""
-            width={150}
-            height={150}
-            className="relative w-[50px] object-cover select-none"
-          />
-        </div>
-      </div>
-
       {/* Score board */}
       <div className="relative z-10 mx-auto flex w-full items-center justify-center gap-3 sm:gap-4 md:gap-5 lg:gap-6">
         {[
-          { icon: "/wack/stopwatch.png", value: gameTime },
-          { icon: "/wack/xp.png", value: xp.toString().padStart(3, "0") },
-        ].map(({ icon, value }, i) => (
-          <div
-            key={i}
-            className="relative flex h-[70px] w-[120px] items-center justify-center p-3"
-          >
-            <Image
-              src="/wack/score.png"
-              alt=""
-              fill
-              className="pointer-events-none object-contain select-none"
-            />
-            <Image
-              src={icon}
-              alt=""
-              width={40}
-              height={40}
-              className="absolute -top-2 -left-2 z-10 h-8 w-8 select-none sm:h-9 sm:w-9 md:h-10 md:w-10"
-            />
-            <span className="font-family-ThaleahFat relative z-20 text-center text-2xl font-bold text-amber-200 drop-shadow-[2px_2px_0_#000] sm:text-2xl md:text-3xl">
-              {value}
-            </span>
+          { label: "⏱ TIME", value: gameTime },
+          { label: "⚡ XP", value: xp.toString().padStart(3, "0") },
+        ].map(({ label, value }, i) => (
+          <div key={i} className="wk-tile">
+            <span className="lb">{label}</span>
+            <b>{value}</b>
           </div>
         ))}
       </div>
@@ -251,13 +193,8 @@ export default function MoleWhack({
                 transform: "translate(-50%, -50%)",
               }}
             >
-              <Image
-                src="/wack/holes.png"
-                alt=""
-                width={200}
-                height={200}
-                className="pointer-events-none absolute inset-0 h-full w-full object-contain select-none"
-              />
+              {/* the pit — a dark carved ellipse, no image assets */}
+              <div className="wk-pit" aria-hidden="true" />
 
               {mole.visible && (
                 <div
@@ -272,13 +209,27 @@ export default function MoleWhack({
                     animationPlayState: mole.hit ? "paused" : "running",
                   }}
                 >
-                  <Image
-                    src="/wack/mole-popping.png"
-                    alt=""
-                    width={50}
-                    height={50}
+                  {/* drawn Burrow mole — same dome/eyes/nose/whiskers as the mascot */}
+                  <svg
+                    viewBox="16 60 88 46"
+                    aria-hidden="true"
                     className="size-[60px] object-contain select-none sm:size-[70px] md:size-[75px] lg:size-[85px]"
-                  />
+                  >
+                    <path d="M22 104c0-24 17-42 38-42s38 18 38 42Z" fill="#6b4423" />
+                    <path d="M30 104c0-20 13-34 30-34s30 14 30 34Z" fill="#8a5c33" />
+                    <circle cx="49" cy="86" r="4.2" fill="#2a180a" />
+                    <circle cx="71" cy="86" r="4.2" fill="#2a180a" />
+                    <circle cx="50.4" cy="84.6" r="1.4" fill="#fff" opacity=".85" />
+                    <circle cx="72.4" cy="84.6" r="1.4" fill="#fff" opacity=".85" />
+                    <ellipse cx="60" cy="95" rx="6" ry="4.4" fill="#e88f8f" />
+                    <path
+                      d="M34 96c-6 2-10 5-12 9M86 96c6 2 10 5 12 9"
+                      stroke="#5c3a1e"
+                      strokeWidth="3"
+                      strokeLinecap="round"
+                      fill="none"
+                    />
+                  </svg>
                   {mole.hit && (
                     <div className="absolute inset-0 flex animate-bounce items-center justify-center text-4xl">
                       💥
@@ -293,46 +244,16 @@ export default function MoleWhack({
 
       {/* Game over screen - hidden when onGameEnd callback is provided (modal handles it) */}
       {!gameActive && !onGameEnd && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
-          <div
-            className="relative rounded-lg border-4 border-[#5D2C28] bg-[#784834] p-6 text-center sm:p-8"
-            style={{
-              boxShadow:
-                "8px 8px 0px 0px #5D2C28, 4px 4px 0px 0px #8A4836, inset 0px 0px 0px 1px rgba(255, 255, 255, 0.1)",
-            }}
-          >
-            <h2 className="font-family-ThaleahFat text-peach-300 mb-6 text-3xl font-bold sm:text-4xl">
-              GAME OVER!
-            </h2>
-            <div className="mb-4 flex items-center justify-center gap-3">
-              <Image
-                src="/wack/xp.png"
-                alt="XP"
-                width={40}
-                height={40}
-                className="h-10 w-10 sm:h-12 sm:w-12"
-              />
-              <div className="flex flex-col">
-                <p className="font-family-ThaleahFat text-peach-300 text-2xl font-thin sm:text-3xl">
-                  {xp} XP
-                </p>
-                <p className="font-family-ThaleahFat text-peach-300/80 text-sm sm:text-base">
-                  EARNED
-                </p>
-              </div>
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-[rgba(20,10,4,.62)]">
+          <div className="wk-go-panel">
+            <h3>Game over!</h3>
+            <div className="wk-xpline">
+              <b>{xp} XP</b>
+              <span>EARNED</span>
             </div>
-            <p className="font-family-ThaleahFat text-peach-300/80 mb-6 text-lg sm:text-xl">
-              MOLES HIT: {score}
-            </p>
-            <button
-              onClick={resetGame}
-              className="font-family-ThaleahFat relative rounded-lg border-2 border-black bg-green-600 px-6 py-3 text-lg font-thin text-white transition-all hover:scale-105 hover:bg-green-700 sm:px-8 sm:py-4 sm:text-xl"
-              style={{
-                boxShadow:
-                  "4px 4px 0px 0px #000000, 2px 2px 0px 0px #8A4836, inset 0px 0px 0px 1px rgba(255, 255, 255, 0.1)",
-              }}
-            >
-              PLAY AGAIN
+            <div className="wk-hits">Moles hit: {score}</div>
+            <button onClick={resetGame} className="wk-again">
+              Play again
             </button>
           </div>
         </div>
@@ -348,14 +269,170 @@ export default function MoleWhack({
           top: mousePos.y - 40,
         }}
       >
-        <Image
-          src="/wack/hammer.svg"
-          alt="hammer"
-          width={80}
-          height={80}
-          className="object-contain"
-        />
+        <span className="wk-hammer" aria-hidden="true">
+          🔨
+        </span>
       </div>
+
+      <style jsx global>{`
+        .wk-area {
+          background: linear-gradient(
+            180deg,
+            #ffe3b0 0%,
+            #ffcf8a 14%,
+            #8fbf68 27%,
+            #5c9440 58%,
+            #47772f 100%
+          );
+          touch-action: manipulation;
+        }
+        .wk-tile {
+          min-width: 84px;
+          padding: 6px 14px 7px;
+          border-radius: 12px;
+          text-align: center;
+          background: linear-gradient(180deg, var(--cream), var(--cream-2));
+          border: 1px solid rgba(255, 255, 255, 0.65);
+          box-shadow:
+            0 2px 0 rgba(42, 24, 10, 0.28),
+            inset 0 2px 0 rgba(255, 255, 255, 0.7);
+          color: var(--ink);
+        }
+        .wk-tile .lb {
+          display: block;
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 0.12em;
+          color: var(--ink-3);
+        }
+        .wk-tile b {
+          display: block;
+          margin-top: 1px;
+          font-family: var(--font-num);
+          font-size: 17px;
+          font-weight: 700;
+          font-variant-numeric: tabular-nums;
+        }
+        .wk-pit {
+          position: absolute;
+          left: 8%;
+          right: 8%;
+          top: 50%;
+          height: 30%;
+          border-radius: 50%;
+          background: radial-gradient(ellipse at 50% 42%, #241305 0%, #170c04 70%);
+          box-shadow:
+            inset 0 3px 6px rgba(0, 0, 0, 0.65),
+            0 1px 0 rgba(255, 255, 255, 0.14);
+        }
+        .wk-hammer {
+          display: block;
+          font-size: 42px;
+          line-height: 1;
+          filter: drop-shadow(2px 3px 0 rgba(42, 24, 10, 0.35));
+        }
+        .wk-go-panel {
+          text-align: center;
+          padding: 26px 36px;
+          border-radius: 18px;
+          color: var(--ink);
+          background: linear-gradient(180deg, var(--cream), var(--cream-2));
+          border: 1px solid rgba(255, 255, 255, 0.6);
+          box-shadow: var(--sh-2);
+        }
+        .wk-go-panel h3 {
+          margin: 0;
+          font-size: 1.45rem;
+          font-weight: 800;
+          letter-spacing: -0.02em;
+        }
+        .wk-xpline {
+          margin-top: 12px;
+        }
+        .wk-xpline b {
+          font-family: var(--font-num);
+          font-size: 1.6rem;
+          font-weight: 700;
+        }
+        .wk-xpline span {
+          display: block;
+          font-size: 10px;
+          font-weight: 800;
+          letter-spacing: 0.14em;
+          color: var(--ink-3);
+          margin-top: 2px;
+        }
+        .wk-hits {
+          margin-top: 10px;
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--ink-2);
+        }
+        .wk-again {
+          margin-top: 16px;
+          border: 0;
+          cursor: pointer;
+          font: inherit;
+          font-size: 13px;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+          color: #fff;
+          padding: 11px 22px;
+          border-radius: 12px;
+          background: linear-gradient(180deg, #3f9e66, var(--moss));
+          box-shadow:
+            0 3px 0 #1e5535,
+            inset 0 1px 0 rgba(255, 255, 255, 0.35);
+        }
+        .wk-again:active {
+          transform: translateY(1px);
+          box-shadow: 0 1px 0 #1e5535;
+        }
+        .wk-wrap {
+          max-width: 760px;
+          margin: 6px auto 0;
+        }
+        .wk-shell {
+          position: relative;
+          aspect-ratio: 1;
+          border-radius: var(--r-xl);
+          overflow: hidden;
+          border: 1px solid rgba(255, 255, 255, 0.35);
+          box-shadow: var(--sh-2);
+        }
+        @media (max-width: 560px) {
+          .wk-shell {
+            aspect-ratio: 4 / 5;
+          }
+        }
+      `}</style>
     </div>
+  );
+
+  // Embedded (modal / quest): the host container sizes and frames the game.
+  if (onMoleHit || onGameEnd) {
+    return game;
+  }
+
+  // Standalone page: full Burrow chrome + hero, game in a framed shell.
+  return (
+    <>
+      <BackgroundImage />
+      <NavBar />
+      <main>
+        <header className="hero">
+          <span className="badge">
+            <span className="dot" />
+            Mini-game · free play
+          </span>
+          <h1>Whack-a-Mole.</h1>
+          <p className="sub">30 seconds. Seven holes. 50 XP a mole.</p>
+          <MoleMascot />
+        </header>
+        <section className="wk-wrap">
+          <div className="wk-shell">{game}</div>
+        </section>
+      </main>
+    </>
   );
 }

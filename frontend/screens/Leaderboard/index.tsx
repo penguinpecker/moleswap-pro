@@ -1,53 +1,78 @@
 "use client";
-import { Button } from "@/components/ui/button";
-import { ArrowLeft, ArrowRight, SquareArrowOutUpRight } from "lucide-react";
-import Image from "next/image";
-import Link from "next/link";
+import { ChevronLeft, ChevronRight, SquareArrowOutUpRight } from "lucide-react";
 import React, { useState, useEffect } from "react";
-import { NavBar } from "../shared";
+import { NavBar, BackgroundImage, MoleMascot } from "../shared";
 import { getLeaderboard } from "@/lib/supabase/api";
 
 const EXPLORER_URL = "https://robinhoodchain.blockscout.com/address/";
 const PLAYERS_PER_PAGE = 25;
 
+/* page-scoped Burrow styles — lifted from the leaderboard.html prototype */
+const PAGE_CSS = `
+.lb-head {
+  display: grid; grid-template-columns: 56px minmax(0,1fr) auto; gap: 14px; align-items: center;
+  padding: 0 20px; height: 46px;
+  background: linear-gradient(180deg, #40270f, #331d0b);
+  color: rgba(255,230,196,.72);
+  font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+}
+.lb-head .r { text-align: right; }
+.lb-row {
+  position: relative; display: grid; grid-template-columns: 56px minmax(0,1fr) auto; gap: 14px;
+  align-items: center; padding: 11px 20px; min-height: 66px;
+  border-bottom: 1px solid rgba(44,26,12,.07);
+  animation: rowin .38s ease backwards;
+}
+@keyframes rowin { from { opacity: 0; transform: translateY(9px); } }
+.lb-row:last-child { border-bottom: 0; }
+.lb-row.top1 { background: linear-gradient(90deg, rgba(233,181,52,.20), rgba(233,181,52,.04)); }
+.lb-row.top2 { background: linear-gradient(90deg, rgba(148,155,170,.22), rgba(148,155,170,.04)); }
+.lb-row.top3 { background: linear-gradient(90deg, rgba(200,118,54,.18), rgba(200,118,54,.04)); }
+.lb-row > * { position: relative; }
+.lb-tile {
+  width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center;
+  font-family: var(--font-num); font-size: 14px; font-weight: 700; color: var(--ink-2);
+  background: rgba(44,26,12,.08); border: 1px solid rgba(44,26,12,.10);
+}
+.lb-tile.t1 { font-size: 19px; background: linear-gradient(180deg,#ffe08a,#e8ad2e); border-color: #c8901f; box-shadow: 0 2px 0 rgba(140,90,10,.45), inset 0 1px 0 rgba(255,255,255,.6); }
+.lb-tile.t2 { font-size: 19px; background: linear-gradient(180deg,#eceef2,#b9bdc9); border-color: #9aa0af; box-shadow: 0 2px 0 rgba(90,95,110,.4), inset 0 1px 0 rgba(255,255,255,.7); }
+.lb-tile.t3 { font-size: 19px; background: linear-gradient(180deg,#eab887,#c07a3e); border-color: #a2622d; box-shadow: 0 2px 0 rgba(120,70,25,.45), inset 0 1px 0 rgba(255,255,255,.5); }
+.lb-who { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.lb-av {
+  width: 34px; height: 34px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  font-size: 16px; font-weight: 800; color: var(--ink-2);
+  background: rgba(255,255,255,.75); border: 1px solid rgba(44,26,12,.14);
+  box-shadow: inset 0 -2px 3px rgba(44,26,12,.08);
+}
+.lb-nm { font-size: 14.5px; font-weight: 750; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-addr {
+  display: inline-flex; align-items: center; gap: 5px; margin-top: 2px;
+  font-family: var(--font-num); font-size: 11.5px; color: var(--ink-3); text-decoration: none;
+}
+.lb-addr:hover { color: var(--clay); text-decoration: underline; }
+.lb-addr svg { flex: none; opacity: .75; }
+.lb-xp { justify-self: end; text-align: right; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 15.5px; font-weight: 800; letter-spacing: -.02em; }
+.lb-xp small { display: block; font-family: var(--font-ui); font-size: 10px; font-weight: 700; letter-spacing: .09em; color: var(--ink-3); margin-top: 2px; }
+.lb-xp-m { display: none; }
+@media (max-width: 560px) {
+  .lb-xp { display: none; }
+  .lb-head, .lb-row { grid-template-columns: 56px minmax(0,1fr); }
+  .lb-head .r { display: none; }
+  .lb-xp-m { display: block; margin-top: 2px; font-family: var(--font-num); font-size: 11.5px; font-weight: 700; color: #a8722c; }
+}
+`;
+
 const LeaderboardPage = () => {
   return (
-    <div className="relative flex min-h-screen w-full flex-col items-center gap-2 sm:gap-4">
+    <>
       <BackgroundImage />
-      <div className="relative z-50 mx-auto mt-2 block w-full px-2 sm:mt-4 sm:px-4">
-        <NavBar />
-      </div>
-      <div className="relative z-20 flex w-full flex-1">
-        <QuestCardComponent />
-      </div>
-    </div>
+      <NavBar />
+      <QuestCardComponent />
+    </>
   );
 };
 
 export default LeaderboardPage;
-
-const BackgroundImage = () => {
-  return (
-    <>
-      <div className="fixed inset-0 flex h-full flex-col">
-        <Image
-          src="/leaderboard/bricks.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="absolute top-0 z-10 h-full w-full max-lg:object-cover"
-        />
-      </div>
-      <Image
-        src="/leaderboard/soil.png"
-        alt="Profile"
-        width={200}
-        height={200}
-        className="fixed bottom-0 h-full max-h-[30vh] w-full object-fill"
-      />
-    </>
-  );
-};
 
 export const QuestCardComponent = () => {
   const [allPlayers, setAllPlayers] = useState<any[]>([]);
@@ -81,149 +106,97 @@ export const QuestCardComponent = () => {
   const currentPlayers = allPlayers.slice(startIdx, startIdx + PLAYERS_PER_PAGE);
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-2 sm:px-6">
-      {/* Header */}
-      <div className="relative top-[40px] z-10 mx-auto w-[85%] rounded-lg px-4 py-3 text-center sm:w-[75%] sm:px-6 sm:py-4">
-        <h1 className="text-peach-300 text-shadow-header font-family-ThaleahFat text-2xl font-bold tracking-widest uppercase sm:text-5xl">
-          leaderboard
-        </h1>
-        <Image
-          src="/quest/header-quest-bg.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="absolute inset-0 left-0 z-[-1] h-full w-full"
-        />
-      </div>
+    <div className="w-full">
+      <style>{PAGE_CSS}</style>
 
-      {/* Main Leaderboard Section */}
-      <div className="relative mb-6 flex h-full px-1 sm:px-4">
-        <Image
-          src="/leaderboard/list-board.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="absolute inset-0 z-0 h-full w-full object-fill"
-        />
-        {/* Leaderboard List */}
-        <div className="bg-leaderboard relative m-2 mx-auto flex w-full flex-1 flex-col items-center gap-2 p-2 pt-6 sm:m-6 sm:gap-2 sm:p-4 sm:pt-8">
+      {/* Hero */}
+      <header className="hero">
+        <span className="badge"><span className="dot" />Season 2 · ranked by XP</span>
+        <h1>Leaderboard.</h1>
+        <p className="sub">
+          The deepest diggers on Robinhood Chain. Swap, provide liquidity and finish
+          quests to earn XP — every point moves you up the tunnel.
+        </p>
+        <MoleMascot />
+      </header>
+
+      {/* Leaderboard List */}
+      <div className="panel">
+        <div className="lb-head">
+          <span>Rank</span>
+          <span>Digger</span>
+          <span className="r">XP</span>
+        </div>
+        <div>
           {loading ? (
-            <div className="font-family-ThaleahFat py-12 text-center text-xl text-[#FFD47A]">
-              Loading...
-            </div>
+            <div className="p-empty">Loading...</div>
           ) : currentPlayers.length === 0 ? (
-            <div className="font-family-ThaleahFat py-12 text-center text-xl text-[#FFD47A]">
-              No players yet
-            </div>
+            <div className="p-empty">No players yet</div>
           ) : (
-            currentPlayers.map((player) => {
+            currentPlayers.map((player, i) => {
               const globalIndex = player.id - 1;
-              const bgImage =
-                globalIndex === 0
-                  ? "/leaderboard/player-info-board-1.png"
-                  : globalIndex === 1
-                    ? "/leaderboard/player-info-board-2.png"
-                    : globalIndex === 2
-                      ? "/leaderboard/player-info-board-3.png"
-                      : "/leaderboard/player-info-board.png";
+              const top = globalIndex < 3 ? globalIndex + 1 : 0;
 
               return (
                 <div
                   key={player.id}
-                  className="relative flex w-full max-w-3xl justify-between px-2 py-2 text-white shadow-md max-sm:flex-col sm:items-center sm:px-4 sm:py-3"
+                  className={`lb-row${top ? ` top${top}` : ""}`}
+                  style={{ animationDelay: `${i * 22}ms` }}
                 >
-                  <Image
-                    src={bgImage}
-                    alt={`Player ${player.id} background`}
-                    width={200}
-                    height={200}
-                    className="absolute inset-0 z-[0] h-full w-full object-fill"
-                  />
-
-                  {/* Left side */}
-                  <div className="z-10 flex items-center gap-3 overflow-hidden">
-                    {player.trophy ? (
-                      <div className="relative w-10">
-                        <Image
-                          src={`/leaderboard/${globalIndex + 1}.png`}
-                          alt="Trophy"
-                          width={60}
-                          height={60}
-                          className="absolute -top-5 left-0"
-                        />
-                      </div>
-                    ) : (
-                      <div className="font-family-ThaleahFat text-leaderboard-rank relative flex h-[28px] w-[28px] items-center justify-center text-base sm:h-[40px] sm:w-[40px] sm:text-2xl">
-                        {player.id}
-                        <Image
-                          src="/leaderboard/rest.png"
-                          alt="Rank background"
-                          fill
-                          className="absolute inset-0 z-[-1] object-cover"
-                        />
-                      </div>
-                    )}
-                    <div className="flex flex-col">
-                      <span className="font-family-ThaleahFat text-base leading-5 sm:text-2xl sm:leading-7">
-                        {player.name}
-                      </span>
-                      <span className="font-family-ThaleahFat text-sm text-[#FFD47A] sm:hidden">
-                        {player.score.toLocaleString()}
-                      </span>
+                  <div className={`lb-tile${top ? ` t${top}` : ""}`}>
+                    {player.trophy ? player.trophy : player.id}
+                  </div>
+                  <div className="lb-who">
+                    <span className="lb-av" aria-hidden="true">
+                      {(player.name || "?").charAt(0).toUpperCase()}
+                    </span>
+                    <div style={{ minWidth: 0 }}>
+                      <div className="lb-nm">{player.name}</div>
+                      <span className="lb-xp-m">{player.score.toLocaleString()} XP</span>
                       <a
+                        className="lb-addr"
                         href={`${EXPLORER_URL}${player.wallet}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-leaderboard-text font-mono text-[10px] break-all transition-colors hover:text-[#FFD47A] sm:text-sm"
                       >
-                        {player.displayAddr}{" "}
-                        <SquareArrowOutUpRight
-                          size={14}
-                          className="inline text-sm"
-                        />
+                        {player.displayAddr}
+                        <SquareArrowOutUpRight size={11} />
                       </a>
                     </div>
                   </div>
-
-                  {/* Divider lines */}
-                  <div className="bg-leaderboard before:bg-leaderboard relative mr-auto ml-6 hidden h-full w-[4px] before:absolute before:top-0 before:left-0 before:h-[1px] before:w-full before:content-[''] sm:block" />
-                  <div className="bg-leaderboard before:bg-leaderboard relative mr-6 ml-auto hidden h-full w-[4px] before:absolute before:top-0 before:left-0 before:h-[1px] before:w-full before:content-[''] sm:block" />
-
-                  {/* Right side */}
-                  <span className="font-family-ThaleahFat z-10 text-xl max-sm:hidden sm:text-3xl">
+                  <div className="lb-xp">
                     {player.score.toLocaleString()}
-                  </span>
+                    <small>XP</small>
+                  </div>
                 </div>
               );
             })
           )}
-
-          {/* Pagination */}
-          {allPlayers.length > PLAYERS_PER_PAGE && (
-            <div className="z-30 mt-4 mb-2 flex flex-col items-center gap-3">
-              <span className="text-peach-400 bg-ground-button font-family-ThaleahFat rounded px-3 py-1 text-lg font-bold tracking-wider">
-                {currentPage} of {totalPages}
-              </span>
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  disabled={currentPage === 1}
-                  className="bg-ground-button border-ground-button-border flex h-10 w-10 cursor-pointer items-center justify-center rounded border-2 transition-all hover:scale-105 disabled:opacity-30 disabled:hover:scale-100"
-                >
-                  <ArrowLeft className="text-peach-400 h-5 w-5" />
-                </button>
-                <button
-                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={currentPage === totalPages}
-                  className="bg-ground-button border-ground-button-border flex h-10 w-10 cursor-pointer items-center justify-center rounded border-2 transition-all hover:scale-105 disabled:opacity-30 disabled:hover:scale-100"
-                >
-                  <ArrowRight className="text-peach-400 h-5 w-5" />
-                </button>
-              </div>
-            </div>
-          )}
         </div>
       </div>
+
+      {/* Pagination */}
+      {allPlayers.length > PLAYERS_PER_PAGE && (
+        <div className="pagi">
+          <button
+            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+            disabled={currentPage === 1}
+            aria-label="Previous page"
+          >
+            <ChevronLeft size={15} />
+          </button>
+          <span className="pg">
+            {currentPage} of {totalPages}
+          </span>
+          <button
+            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+            disabled={currentPage === totalPages}
+            aria-label="Next page"
+          >
+            <ChevronRight size={15} />
+          </button>
+        </div>
+      )}
     </div>
   );
 };

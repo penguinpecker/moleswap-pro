@@ -1,9 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, Fuel, RefreshCw } from "lucide-react";
+import { ArrowLeft, Fuel, RefreshCw } from "lucide-react";
 import { formatUnits, parseUnits } from "viem";
 import { DappStep } from ".";
-import Image from "next/image";
 import { getWalletClient } from "@/lib/wallet/walletClient";
 import type { TokenEntry, ChainEntry } from "@/lib/chain/tokenList";
 import { useWallet } from "@/lib/chain/provider";
@@ -25,6 +24,33 @@ const extractHash = (result: any): string => {
 const displaySymbolOf = (t: any, fallback?: string): string => {
   if (!t) return fallback || "";
   return t.displaySymbol || t.symbol || fallback || "";
+};
+
+/** Deterministic Burrow palette pick for tokens with no resolvable logo. */
+const COIN_COLORS = ["#b5601f", "#2f7d4f", "#2384c8", "#cd5f2a", "#7a4d29", "#8a5c33"];
+const coinColor = (sym: string) =>
+  COIN_COLORS[sym.split("").reduce((a, c) => a + c.charCodeAt(0), 0) % COIN_COLORS.length];
+
+/** Real remote logo when the registry resolves one; drawn coin chip otherwise. */
+const TokenCircle = ({ logo, symbol, size = 38 }: { logo?: string; symbol?: string; size?: number }) => {
+  const sym = (symbol || "?").toUpperCase();
+  return logo ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={logo}
+      alt={sym}
+      width={size}
+      height={size}
+      style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flex: "none" }}
+    />
+  ) : (
+    <span
+      className="coin"
+      style={{ width: size, height: size, fontSize: Math.round(size * 0.33), background: coinColor(sym) }}
+    >
+      {sym.slice(0, 2)}
+    </span>
+  );
 };
 
 interface SwapPageProps {
@@ -106,7 +132,7 @@ export const SwapPage = ({
     } catch {
       return;
     }
-    if (amountInWei <= 0n || !swapData.toToken) return;
+    if (amountInWei <= BigInt(0) || !swapData.toToken) return;
 
     let cancelled = false;
     const requote = async () => {
@@ -371,6 +397,9 @@ export const SwapPage = ({
         recipient: currentAddress,            // caller
         outputRecipient: customRecipient,     // optional; null → proceeds land at caller
         onStep: (_stepIdx, label, status) => {
+          // amm.ts emits status as a plain string; narrow it to the row union
+          // (type-level only — values are the same "signing"/"confirmed"/"error").
+          const stepStatus = status as "pending" | "signing" | "confirmed" | "error";
           // Match emitted label to the step row in the quote-derived list.
           // Label casing from amm.ts is now normalized to match quote.steps.
           setSwapSteps(prev => {
@@ -380,7 +409,7 @@ export const SwapPage = ({
             // Exact match path (sequential mode or wrap/unwrap short-circuit)
             if (idx !== -1) {
               const next = [...prev];
-              next[idx] = { label: prev[idx].label, status };
+              next[idx] = { label: prev[idx].label, status: stepStatus };
               return next;
             }
 
@@ -393,11 +422,11 @@ export const SwapPage = ({
               return prev.map(row =>
                 row.status === "confirmed" || row.status === "error"
                   ? row
-                  : { label: row.label, status },
+                  : { label: row.label, status: stepStatus },
               );
             }
 
-            if (status === "error") {
+            if (stepStatus === "error") {
               // Error label is freeform — mark the first non-confirmed row as error
               const firstPendingIdx = prev.findIndex(r => r.status !== "confirmed");
               if (firstPendingIdx === -1) return prev;
@@ -491,7 +520,9 @@ export const SwapPage = ({
       });
     } catch (error: any) {
       // ═══ DIAGNOSTICS: Analyze and log error ═══
-      const analysis = diagnostics.analyzeError(error, {});
+      // (analyzeError is typed 1-arg/string-return; the legacy 2-arg call and
+      // .category/.suggestion reads are preserved exactly via `any`.)
+      const analysis: any = (diagnostics.analyzeError as any)(error, {});
       console.error("Swap execution error:", error);
       console.log("[MoleSwap:Diagnostics] Error analysis:", analysis);
 
@@ -519,309 +550,188 @@ export const SwapPage = ({
     swapData.fromTokenMeta?.logoURI ||
     swapData.fromChain?.iconUrl ||
     swapData.fromChain?.logoUrl ||
-    "/placeholder-logo.png";
+    "";
   const toLogo =
     swapData.toTokenMeta?.logoURI ||
     swapData.toChain?.iconUrl ||
     swapData.toChain?.logoUrl ||
-    "/placeholder-logo.png";
+    "";
 
   return (
-    <div className="flex w-full flex-1 flex-col p-2 sm:max-w-3xl sm:p-6">
-      {/* Header with Back Button */}
-      <div className="font-family-ThaleahFat relative top-[40px] z-10 mx-auto flex w-[85%] items-center justify-center rounded-lg px-6 py-4 text-center">
-        <button
-          onClick={onBack}
-          className="border-ground-button-border bg-ground-button absolute left-4 cursor-pointer justify-center rounded border-2 p-1 text-yellow-100 hover:scale-105"
-        >
-          <ArrowLeft className="h-6 w-6 text-yellow-100" />
-        </button>
+    <main>
+      <div className="dapp-col" style={{ maxWidth: 620 }}>
+        {/* Header with back button */}
+        <div className="pick-head" style={{ marginBottom: 14 }}>
+          <button onClick={onBack} className="tool-btn" aria-label="Back">
+            <ArrowLeft size={16} />
+          </button>
+          <h2 style={{ margin: 0, fontSize: "1.3rem", fontWeight: 800, color: "var(--p-onbg)" }}>
+            Exchange
+          </h2>
+        </div>
 
-        <h1 className="text-peach-300 text-shadow-header mx-auto text-3xl font-bold tracking-widest uppercase sm:text-5xl">
-          Exchange
-        </h1>
-        <Image
-          src="/quest/header-quest-bg.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="absolute inset-0 left-0 z-[-1] h-full w-full"
-        />
-      </div>
-      <div className="relative mb-6 block h-full">
-        <Image
-          src="/quest/Quest-BG.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="absolute inset-0 z-0 h-full w-full object-fill"
-        />
-        <div className="relative z-50 mx-auto mt-12 mb-6 grid w-full grid-cols-1 gap-4 p-4 sm:w-[85%]">
-          {/* Swap Details */}
-          <div className="relative mb-6 space-y-4 p-4">
-            <Image
-              src="/dapp/start-swaping-info-box.png"
-              alt="Profile"
-              width={200}
-              height={200}
-              className="absolute inset-0 left-0 z-[-1] h-full w-full"
+        <div className="p-card">
+          {/* From token */}
+          <div className="rv-row">
+            <TokenCircle
+              logo={fromLogo}
+              symbol={displaySymbolOf(swapData.fromTokenMeta, swapData.fromToken)}
             />
-            {/* From Token */}
-            <div className="px-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center">
-                  <div className="border-ground-button-border bg-ground-button mr-3 flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg border-2">
-                    <Image
-                      src={fromLogo}
-                      alt="From token"
-                      width={40}
-                      height={40}
-                      className="h-full w-full object-cover"
-                    />
-                  </div>
-                  <div>
-                    <div className="font-family-ThaleahFat text-3xl text-zinc-100">
-                      {swapData.amount || "0"}
-                    </div>
-                    <div className="text-sm font-semibold text-stone-300">
-                      {displaySymbolOf(swapData.fromTokenMeta, swapData.fromToken)} on{" "}
-                      {swapData.fromChain?.displayName ||
-                        swapData.fromChain?.name ||
-                        "Unknown"}
-                    </div>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className="text-sm text-yellow-100">
-                    ETA:{" "}
-                    {(swapData.etaSeconds ?? null) !== null
-                      ? `${swapData.etaSeconds}s`
-                      : "-"}
-                  </div>
-                </div>
+            <div>
+              <div className="rv-amt">{swapData.amount || "0"}</div>
+              <div className="rv-sub">
+                {displaySymbolOf(swapData.fromTokenMeta, swapData.fromToken)} on{" "}
+                {swapData.fromChain?.displayName ||
+                  swapData.fromChain?.name ||
+                  "Unknown"}
               </div>
             </div>
+            <span className="rv-eta">
+              ETA:{" "}
+              {(swapData.etaSeconds ?? null) !== null
+                ? `${swapData.etaSeconds}s`
+                : "-"}
+            </span>
+          </div>
 
-            {/* Swap Via */}
-            <div className="px-4">
-              <div className="flex items-center">
-                <div className="border-ground-button-border bg-ground-button mr-3 flex h-10 w-10 items-center justify-center rounded-lg border-2 p-4">
-                  <span className="font-bold text-white">🔄</span>
-                </div>
-                <div>
-                  <div className="font-family-ThaleahFat text-2xl text-zinc-100">
-                    {swapData.routeLabel || "AUTO ROUTE"}
-                  </div>
-                </div>
-                <div className="ml-auto">
-                  <button className="border-ground-button-border bg-ground-button cursor-pointer justify-center rounded border-2 p-1 text-yellow-100 hover:scale-105">
-                    <ArrowDown className="z-10 h-4 w-4" />
-                  </button>
-                </div>
+          {/* Swap via */}
+          <div className="rv-mid">
+            <span style={{ fontSize: 16 }} aria-hidden="true">
+              🔄
+            </span>
+            <span>{swapData.routeLabel || "Auto route"}</span>
+          </div>
+
+          {/* To token */}
+          <div className="rv-row">
+            <TokenCircle
+              logo={toLogo}
+              symbol={displaySymbolOf(swapData.toTokenMeta, swapData.toToken)}
+            />
+            <div>
+              <div className="rv-amt">{displayOut}</div>
+              {/* The asset lands on Robinhood Chain, at the caller or the
+                  custom recipient. */}
+              <div className="rv-sub">
+                {swapData.feesLabel || ""} •{" "}
+                {(swapData.toTokenMeta as any)?.symbol ||
+                  displaySymbolOf(swapData.toTokenMeta, swapData.toToken)}{" "}
+                on Robinhood Chain
               </div>
-            </div>
-
-            {/* To Token */}
-            <div className="px-4">
-              <div className="flex items-center">
-                <div className="border-ground-button-border bg-ground-button mr-3 flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg border-2">
-                  <Image
-                    src={toLogo}
-                    alt="To token"
-                    width={40}
-                    height={40}
-                    className="h-full w-full object-cover"
+              {/* Live-quote freshness + expiry countdown — the number above re-quotes automatically. */}
+              {!isExecuting && !isCompleted && (
+                <div className="live-req">
+                  <RefreshCw
+                    className="spin"
+                    size={12}
+                    style={{ animationDuration: "3s" }}
                   />
+                  <span>LIVE · quote refreshes in {secsToRefresh}s</span>
                 </div>
-                <div>
-                  <div className="font-family-ThaleahFat text-3xl text-zinc-100">
-                    {displayOut}
-                  </div>
-                  {/* The asset lands on Robinhood Chain, at the caller or the
-                      custom recipient. */}
-                  <div className="text-sm font-semibold text-stone-300">
-                    {swapData.feesLabel || ""} •{" "}
-                    {(swapData.toTokenMeta as any)?.symbol || displaySymbolOf(swapData.toTokenMeta, swapData.toToken)} on Robinhood Chain
-                  </div>
-                  {/* Live-quote freshness + expiry countdown — the number above re-quotes automatically. */}
-                  {!isExecuting && !isCompleted && (
-                    <div className="mt-1 flex items-center gap-1 text-xs font-semibold text-[#6DBB3E]">
-                      <RefreshCw className="h-3 w-3 animate-spin" style={{ animationDuration: "3s" }} />
-                      LIVE · quote refreshes in {secsToRefresh}s
-                    </div>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
           </div>
 
-          {/* Transaction Fee */}
-          <div className="relative z-50 p-4">
-            <div className="flex w-full justify-between gap-4 px-4 py-1 max-sm:flex-col sm:items-center">
-              <div className="text-sm font-semibold text-stone-300">
-                {swapData.rateLabel ||
-                  `1 ${displaySymbolOf(swapData.fromTokenMeta, swapData.fromToken)} = ${swapData.expectedOut || "0"} ${displaySymbolOf(swapData.toTokenMeta, swapData.toToken)}`}
-              </div>
-              <div className="ml-auto text-sm text-yellow-200">
-                <Fuel className="inline-block h-4 w-4" />{" "}
-                {swapData.feesLabel || "<$0.01"} ETA:{" "}
-                {(swapData.etaSeconds ?? null) !== null
-                  ? `${swapData.etaSeconds}s`
-                  : "-"}
-              </div>
-            </div>
-            <Image
-              src="/quest/header-quest-bg.png"
-              alt="Profile"
-              width={200}
-              height={200}
-              className="absolute inset-0 left-0 z-[-1] h-full w-full"
-            />
+          {/* Rate / fee strip */}
+          <div className="rv-strip">
+            <span>
+              {swapData.rateLabel ||
+                `1 ${displaySymbolOf(swapData.fromTokenMeta, swapData.fromToken)} = ${swapData.expectedOut || "0"} ${displaySymbolOf(swapData.toTokenMeta, swapData.toToken)}`}
+            </span>
+            <span>
+              <Fuel size={13} style={{ display: "inline", verticalAlign: "-2px" }} />{" "}
+              {swapData.feesLabel || "<$0.01"} ETA:{" "}
+              {(swapData.etaSeconds ?? null) !== null
+                ? `${swapData.etaSeconds}s`
+                : "-"}
+            </span>
           </div>
 
-          {/* 3-Step Swap Progress */}
+          {/* Swap execution progress */}
           {isExecuting && (
-            <div className="relative z-50 flex flex-col gap-2 rounded-lg p-3">
+            <div style={{ marginTop: 6 }}>
               {swapSteps.map((step, i) => {
                 const isDone = step.status === "confirmed";
                 const isActive = step.status === "signing";
-                const isPending = step.status === "pending";
                 return (
                   <div
                     key={i}
-                    className={`relative flex items-center gap-3 rounded-lg px-4 py-3 ${
-                      isActive ? "border-2 border-yellow-400" : "border-2 border-transparent"
-                    }`}
+                    className={`step-row${isActive ? " active" : ""}${isDone ? " done" : ""}`}
                   >
-                    <Image
-                      src={isActive ? "/dapp/selected-network-bg.png" : "/quest/header-quest-bg.png"}
-                      alt="BG"
-                      width={200}
-                      height={200}
-                      className="absolute inset-0 z-[-1] h-full w-full"
-                    />
-                    {/* Step indicator */}
-                    <div
-                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
-                        isDone
-                          ? "bg-[#6DBB3E] text-white"
-                          : isActive
-                            ? "bg-yellow-400 text-black"
-                            : "bg-[#523525] text-[#8b6d4f]"
-                      }`}
-                    >
-                      {isDone ? "✓" : isActive ? (
-                        <div className="h-3 w-3 animate-spin rounded-full border-2 border-black border-t-transparent" />
+                    <span className="ind">
+                      {isDone ? (
+                        "✓"
+                      ) : isActive ? (
+                        <span className="spin">⟳</span>
                       ) : (
                         i + 1
                       )}
-                    </div>
-                    {/* Step label */}
-                    <div className="flex-1">
-                      <span
-                        className={`font-family-ThaleahFat text-lg tracking-wider ${
-                          isDone
-                            ? "text-[#6DBB3E]"
-                            : isActive
-                              ? "text-peach-300"
-                              : "text-[#8b6d4f]"
-                        }`}
-                      >
-                        {step.label}
-                      </span>
-                      {isActive && (
-                        <span className="font-family-ThaleahFat ml-2 text-sm tracking-wider text-yellow-400">
-                          WAITING FOR SIGNATURE...
-                        </span>
-                      )}
-                      {isDone && (
-                        <span className="font-family-ThaleahFat ml-2 text-sm tracking-wider text-[#6DBB3E]">
-                          CONFIRMED
-                        </span>
-                      )}
-                    </div>
+                    </span>
+                    <span className="lbl2">{step.label}</span>
+                    <span className="sub">
+                      {isActive
+                        ? "Waiting for signature..."
+                        : isDone
+                          ? "Confirmed"
+                          : ""}
+                    </span>
                   </div>
                 );
               })}
             </div>
           )}
 
-          {/* Error Message — actionable messages can be long; don't truncate. */}
+          {/* Error message — actionable messages can be long; don't truncate. */}
           {executionError && (
-            <div className="relative z-50 max-w-full overflow-hidden rounded-lg bg-red-900/40 p-4 text-center text-sm text-red-200">
-              <p className="font-family-ThaleahFat mb-1 text-base text-red-300">SWAP FAILED</p>
-              <p className="whitespace-pre-line break-words text-xs leading-relaxed">
+            <div className="warn-red">
+              <b style={{ display: "block", marginBottom: 4 }}>Swap failed</b>
+              <span style={{ whiteSpace: "pre-line", overflowWrap: "break-word" }}>
                 {executionError}
-              </p>
+              </span>
             </div>
           )}
+
           {/* Start Swapping Button */}
           {/* Case 1: Wallet not connected — show connect prompt */}
           {!walletState.isConnected && !walletState.isConnecting ? (
-            <button
-              onClick={() => walletState.connect?.()}
-              className="relative w-full cursor-pointer rounded py-4 text-xl font-bold text-white transition-all hover:scale-105"
-            >
-              <span>CONNECT WALLET</span>
-              <Image
-                src="/dapp/connect-wallet.png"
-                alt="Connect"
-                width={200}
-                height={200}
-                className="absolute inset-0 z-[-1] h-full w-full object-fill"
-              />
+            <button onClick={() => walletState.connect?.()} className="p-btn">
+              Connect wallet
             </button>
           ) : walletState.isConnecting ? (
             /* Case 2: Wallet is connecting */
             <button
               disabled
-              className="relative w-full cursor-not-allowed rounded py-4 text-xl font-bold text-white opacity-60"
+              className="p-btn"
+              style={{ opacity: 0.6, cursor: "not-allowed" }}
             >
-              <span>CONNECTING...</span>
-              <Image
-                src="/dapp/connect-wallet.png"
-                alt="Connecting"
-                width={200}
-                height={200}
-                className="absolute inset-0 z-[-1] h-full w-full object-fill"
-              />
+              Connecting...
             </button>
           ) : !walletState.chainClient ? (
             /* Case 3: Connected but SDK not ready */
             <button
               disabled
-              className="relative w-full cursor-not-allowed rounded py-4 text-xl font-bold text-white opacity-60"
+              className="p-btn"
+              style={{ opacity: 0.6, cursor: "not-allowed" }}
             >
-              <span>INITIALIZING...</span>
-              <Image
-                src="/dapp/connect-wallet.png"
-                alt="Initializing"
-                width={200}
-                height={200}
-                className="absolute inset-0 z-[-1] h-full w-full object-fill"
-              />
+              Initializing...
             </button>
           ) : (
             /* Case 4: Ready to swap */
             <button
               onClick={handleStartSwapping}
               disabled={isExecuting || !swapData.quote}
-              className="relative w-full cursor-pointer rounded py-4 text-xl font-bold text-white transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-60"
+              className="p-btn"
+              style={
+                isExecuting || !swapData.quote
+                  ? { opacity: 0.6, cursor: "not-allowed" }
+                  : undefined
+              }
             >
-              <span>
-                {isExecuting ? currentStep || "SWAPPING..." : "START SWAPPING"}
-              </span>
-              <Image
-                src="/dapp/connect-wallet.png"
-                alt="Profile"
-                width={200}
-                height={200}
-                className="absolute inset-0 z-[-1] h-full w-full object-fill"
-              />
+              {isExecuting ? currentStep || "Swapping..." : "Start swapping"}
             </button>
           )}
         </div>
       </div>
-    </div>
+    </main>
   );
 };

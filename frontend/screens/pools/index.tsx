@@ -1,10 +1,9 @@
 "use client";
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { NavBar, BackgroundImage } from "../shared";
+import { NavBar, BackgroundImage, MoleMascot } from "../shared";
 import { RefreshCw, Plus, Minus, ArrowUpRight, ChevronDown, AlertTriangle, Loader2 } from "lucide-react";
 import { useWalletContext, useChainClient, WalletUI } from "@/lib/chain/provider";
 import { useWallet } from "@/lib/chain/provider";
@@ -75,6 +74,14 @@ const fmt = (n: number) => {
 const chainColors: Record<string, string> = {
   "Robinhood Chain": "#D548EC",
 };
+
+/* Coin-chip colors for tokens without a real remote logo (Burrow palette). */
+const COIN_COLORS: Record<string, string> = {
+  ETH: "#6f7ce0",
+  WETH: "#627eea",
+  USDG: "#1c74d4",
+};
+const coinColor = (symbol: string) => COIN_COLORS[symbol?.toUpperCase()] || "#8a5c33";
 
 interface PoolDisplay {
   name: string;
@@ -189,10 +196,10 @@ const Badge = ({ chain }: { chain: string }) => {
   const c = chainColors[chain] || "#D548EC";
   return (
     <span
-      className="font-family-ThaleahFat rounded-sm px-1.5 py-px text-sm tracking-wider"
-      style={{ color: c, background: c + "22", border: `1px solid ${c}33` }}
+      className="chainb"
+      style={chain !== "Robinhood Chain" ? { color: c, background: c + "22", borderColor: c + "40" } : undefined}
     >
-      {chain.toUpperCase()}
+      {chain}
     </span>
   );
 };
@@ -200,48 +207,43 @@ const Badge = ({ chain }: { chain: string }) => {
 const TokenIcon = ({ token, size = 28 }: { token: TokenInfo; size?: number }) => {
   const [err, setErr] = useState(false);
   if (err || !token.logoURI) {
+    // Coin-chip fallback — the Burrow drawn token mark, no image asset needed.
     return (
-      <div
-        className="bg-ground-button border-ground-button-border flex items-center justify-center rounded border-2"
-        style={{ width: size, height: size }}
+      <span
+        className="coin"
+        style={{ width: size, height: size, fontSize: Math.round(size * 0.33), background: coinColor(token.symbol) }}
       >
-        <span className="font-family-ThaleahFat text-peach-300" style={{ fontSize: size * 0.35 }}>
-          {token.symbol.slice(0, 2)}
-        </span>
-      </div>
+        {token.symbol.slice(0, 2)}
+      </span>
     );
   }
   return (
+    // eslint-disable-next-line @next/next/no-img-element
     <img
       src={token.logoURI}
       alt={token.symbol}
       width={size}
       height={size}
-      className="border-ground-button-border rounded border-2"
+      className="coin"
+      style={{ width: size, height: size, objectFit: "cover", background: "#fff" }}
       onError={() => setErr(true)}
     />
   );
 };
 
 const TokenPair = ({ t0, t1, size = 28 }: { t0: TokenInfo; t1: TokenInfo; size?: number }) => (
-  <div className="flex items-center">
+  <span className="coins">
     <TokenIcon token={t0} size={size} />
-    <div style={{ marginLeft: -size * 0.25, zIndex: 1 }}>
-      <TokenIcon token={t1} size={size * 0.7} />
-    </div>
-  </div>
+    <TokenIcon token={t1} size={size} />
+  </span>
 );
 
 const PoolsPage = () => (
-  <div className="relative flex min-h-screen w-full flex-col items-center">
+  <>
     <BackgroundImage />
-    <div className="relative z-50 mx-auto mt-4 block w-full px-2 sm:px-4">
-      <NavBar />
-    </div>
-    <div className="relative z-20 mt-2 flex w-full flex-1 justify-center">
-      <PoolsContent />
-    </div>
-  </div>
+    <NavBar />
+    <PoolsContent />
+  </>
 );
 
 export default PoolsPage;
@@ -260,6 +262,110 @@ interface LiquidityPosition {
   token1Info?: TokenInfo;
   poolInfo?: PoolInfo;
 }
+
+/* Page-scoped Burrow styles (mirrors the pools.html prototype's style block). */
+const POOLS_CSS = `
+.foot-cap { margin: 34px 0 0; text-align: center; font-size: 12px; font-weight: 700;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--p-onbg-3); }
+.seg button[aria-selected="true"] {
+  background: linear-gradient(180deg, #ffcd7d, var(--amber));
+  box-shadow: 0 2px 0 rgba(140,74,20,.6), inset 0 1px 0 rgba(255,255,255,.55); }
+
+/* markets loading */
+.load-block { padding: 52px 20px; text-align: center; }
+.ldr { width: 32px; height: 32px; border-radius: 50%; border: 4px solid var(--amber);
+  border-top-color: transparent; animation: rot 1s linear infinite; margin: 0 auto 14px; }
+.load-block .t1 { font-weight: 800; font-size: 15px; color: var(--clay); letter-spacing: .03em; }
+.load-block .t2 { margin-top: 4px; font-size: 12.5px; color: var(--ink-3); }
+
+/* row "+ Liquidity" button (green, like the original) */
+.liq-btn { justify-self: end; display: inline-flex; align-items: center; gap: 4px; text-decoration: none;
+  font-size: 11.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: #fff;
+  background: linear-gradient(180deg, #43a06a, var(--moss)); padding: 8px 12px; border-radius: 11px;
+  box-shadow: 0 2px 0 #1e5837, inset 0 1px 0 rgba(255,255,255,.3); white-space: nowrap; }
+.liq-btn:active { transform: translateY(1px); box-shadow: 0 1px 0 #1e5837, inset 0 1px 0 rgba(255,255,255,.3); }
+@media (max-width: 780px) {
+  .thead { display: none; }
+  .thead, .row { grid-template-columns: minmax(120px, 1.5fr) 1fr 96px; }
+}
+
+/* pool detail */
+.backlink { background: none; border: 0; cursor: pointer; font: inherit; padding: 0;
+  color: #ffcd7d; font-weight: 800; font-size: 13px; letter-spacing: .04em; }
+.backlink:hover { color: #ffe6c4; }
+.det-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 14px 0 18px; }
+.det-head h2 { margin: 0; font-size: 1.5rem; font-weight: 800; letter-spacing: -.02em; color: var(--p-onbg); }
+.sm-lbl { font-size: 10.5px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+.sm-val { margin-top: 8px; font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  font-size: 1.25rem; font-weight: 700; letter-spacing: -.02em; }
+.sm-val.pos { color: var(--moss); } .sm-val.neg { color: var(--rust); }
+.dp { margin-top: 12px; font-size: 1.15rem; font-weight: 700; letter-spacing: -.02em; }
+
+/* liquidity distribution graph */
+.lg-wrap { position: relative; margin-top: 16px; }
+.lg-wash { position: absolute; left: 5%; right: 5%; top: 0; bottom: 0; background: rgba(47,125,79,.07); border-radius: 6px; }
+.lg-line { position: absolute; top: -4px; bottom: -2px; width: 2px; background: var(--amber);
+  box-shadow: 0 0 8px rgba(240,160,60,.85); z-index: 2; border-radius: 2px; }
+.lg-bars { position: absolute; inset: 0; display: flex; align-items: flex-end; gap: 2px; }
+.lg-bar { flex: 1; position: relative; height: 100%; display: flex; align-items: flex-end; cursor: crosshair; }
+.lg-bar i { display: block; width: 100%; min-height: 2px; border-radius: 3px 3px 0 0; background: var(--moss);
+  transition: background .1s ease, opacity .1s ease; }
+.lg-bar:hover i { background: #43a06a; }
+.lg-bar.cur i { background: var(--amber); box-shadow: 0 0 6px rgba(240,160,60,.9); }
+.lg-tip { position: absolute; bottom: 100%; z-index: 5; pointer-events: none;
+  background: rgba(42,24,10,.95); border: 1px solid var(--amber); border-radius: 10px; padding: 8px 10px;
+  font-size: 11px; line-height: 1.5; white-space: nowrap; box-shadow: var(--sh-1); }
+.lg-tip .l1 { color: #ffd47a; font-family: var(--font-num); font-weight: 700; }
+.lg-tip .l2 { color: rgba(255,240,214,.85); font-family: var(--font-num); }
+.lg-tip .l3 { color: #7ec98f; font-weight: 700; letter-spacing: .05em; }
+.lg-foot { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px;
+  font-family: var(--font-num); font-size: 11.5px; color: var(--ink-3); flex-wrap: wrap; }
+.lg-foot .in { color: var(--moss); font-weight: 700; }
+
+/* detail actions */
+.act-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.act-btn { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  text-decoration: none; border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 800;
+  letter-spacing: .05em; text-transform: uppercase; padding: 14px 16px; border-radius: 14px; white-space: nowrap; }
+.act-btn.add { background: linear-gradient(180deg, #43a06a, var(--moss)); color: #fff;
+  box-shadow: 0 3px 0 #1e5837, inset 0 1px 0 rgba(255,255,255,.35); }
+.act-btn.rem { background: linear-gradient(180deg, #ffcd7d, var(--amber)); color: #3d2410;
+  box-shadow: 0 3px 0 #8c4a14, inset 0 1px 0 rgba(255,255,255,.5); }
+.act-btn:active { transform: translateY(1px); }
+
+/* positions */
+.mole2 { display: block; width: 92px; height: 92px; margin: 0 auto 8px; position: static; }
+.pc-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.glowdot { width: 7px; height: 7px; border-radius: 50%; background: var(--moss);
+  box-shadow: 0 0 6px var(--moss); display: inline-block; }
+.exit2 { border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 800;
+  letter-spacing: .06em; text-transform: uppercase; color: #fff;
+  background: linear-gradient(180deg, #d9584a, var(--rust)); padding: 10px 18px; border-radius: 12px;
+  box-shadow: 0 2px 0 #7e2415, inset 0 1px 0 rgba(255,255,255,.35); }
+.exit2:disabled { opacity: .5; cursor: default; }
+.exit2:not(:disabled):active { transform: translateY(1px); box-shadow: 0 1px 0 #7e2415; }
+.pos-load .t1 { font-weight: 800; font-size: 15px; color: var(--clay); letter-spacing: .03em; }
+
+/* modals */
+.m-lbl { display: flex; align-items: center; gap: 10px; margin: 16px 0 4px;
+  font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); }
+.m-lbl::after { content: ""; flex: 1; height: 1px; background: rgba(44,26,12,.12); }
+.tot-box { margin-top: 6px; padding: 12px 13px; border-radius: var(--r-md); text-align: center;
+  background: rgba(255,255,255,.55); border: 1px solid rgba(44,26,12,.12);
+  font-family: var(--font-num); font-weight: 700; font-size: 14.5px; letter-spacing: -.01em; }
+.warnbox { margin-top: 14px; padding: 12px 14px; border-radius: var(--r-md); font-size: 12px; line-height: 1.55;
+  background: rgba(240,160,60,.12); border: 1px solid rgba(240,160,60,.35); color: var(--ink-2); }
+.m-actions { display: flex; gap: 10px; margin-top: 16px; }
+.m-btn { flex: 1; height: 46px; border: 0; border-radius: 14px; cursor: pointer; font: inherit;
+  font-size: 13px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.m-btn.cancel { background: rgba(44,26,12,.08); color: var(--ink-2); border: 1px solid rgba(44,26,12,.12); }
+.m-btn.danger { background: linear-gradient(180deg, #d9584a, var(--rust)); color: #fff;
+  box-shadow: 0 3px 0 #7e2415, inset 0 1px 0 rgba(255,255,255,.3); }
+.m-btn.amber { background: linear-gradient(180deg, #ffcd7d, var(--amber)); color: #3d2410;
+  box-shadow: 0 3px 0 #8c4a14, inset 0 1px 0 rgba(255,255,255,.5); }
+.m-btn:disabled { opacity: .5; cursor: default; }
+.m-btn:not(:disabled):active { transform: translateY(1px); }
+`;
 
 const PoolsContent = () => {
   const walletCtx = useWalletContext();
@@ -333,203 +439,152 @@ const PoolsContent = () => {
   const totalVol24h = pools.reduce((s, p) => s + p.vol24h, 0);
   const deepestTvl = pools.length > 0 ? Math.max(...pools.map((p) => p.tvl)) : 0;
 
-  const tabClass = (t: string) =>
-    `font-family-ThaleahFat text-shadow-black px-4 py-1 rounded-full text-base sm:text-2xl sm:px-6 transition-colors duration-150 cursor-pointer ${
-      tab === t
-        ? "bg-ground-button border-3 sm:border-4 border-ground-button-border text-peach-400"
-        : "text-gray-200 hover:text-yellow-200 border-3 sm:border-4 border-transparent"
-    }`;
-
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-2 sm:px-6">
-      <div className="relative z-10 mx-auto mt-2 w-[90%] rounded-lg px-4 py-3 text-center sm:w-[85%] sm:px-6 sm:py-4">
-        <h1 className="text-peach-300 text-shadow-header font-family-ThaleahFat text-2xl font-bold tracking-widest uppercase sm:text-5xl">
-          LIQUIDITY POOLS
-        </h1>
-        <p className="font-family-ThaleahFat mt-1 text-base tracking-wider text-gray-200 sm:text-lg">
-          ROBINHOOD CHAIN — AGGREGATED ACROSS EVERY VENUE
-        </p>
-        <Image
-          src="/quest/header-quest-bg.png" alt="Header" width={200} height={200}
-          className="absolute inset-0 left-0 z-[-1] h-full w-full"
-        />
-      </div>
+    <main>
+      <style>{POOLS_CSS}</style>
 
-      <div className="relative mb-6 h-full min-h-[500px]">
-        <Image
-          src="/quest/Quest-BG.png" alt="BG" width={200} height={200}
-          className="absolute inset-0 z-0 h-full w-full object-fill"
-        />
+      <header className="hero">
+        <span className="badge">
+          <span className="dot" />
+          {loading ? "…" : pools.length} pools live · MoleHook v4
+        </span>
+        <h1>Liquidity pools.</h1>
+        <p className="sub">Robinhood Chain — aggregated across every venue.</p>
+        <MoleMascot />
+      </header>
 
-        <div className="relative z-50 mt-8 flex justify-center gap-2 px-2 pt-3 sm:mt-12 sm:gap-4 sm:px-4">
+      <div className="toolbar" style={{ margin: "0 0 22px" }}>
+        <div className="seg" role="tablist">
           {/* Clicking a tab while a pool is opened must also close the detail
               view — otherwise PoolDetail keeps rendering (see the `selectedPool
               ? <PoolDetail/> : …` below) and the tab switch looks like a dead
               click. `clearDetail()` drops the selected pool alongside the tab
               change so users can navigate between Markets/Positions from ANY
               pool's detail page. */}
-          <button className={tabClass("markets")} onClick={() => { setTab("markets"); setSelectedPool(null); }}>
-            <svg width="20" height="20" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" className="mr-1 inline sm:mr-2" style={{imageRendering:"pixelated"}}><rect x="3" y="4" width="8" height="2" fill="#FFD47A"/><rect x="3" y="4" width="8" height="1" fill="#FFF3B0"/><rect x="10" y="2" width="2" height="2" fill="#FFD47A"/><rect x="10" y="6" width="2" height="2" fill="#FFD47A"/><rect x="12" y="4" width="2" height="2" fill="#FFD47A"/><rect x="12" y="4" width="2" height="1" fill="#FFF3B0"/><rect x="5" y="10" width="8" height="2" fill="#E8A849"/><rect x="5" y="10" width="8" height="1" fill="#FFD47A"/><rect x="4" y="8" width="2" height="2" fill="#E8A849"/><rect x="4" y="12" width="2" height="2" fill="#E8A849"/><rect x="2" y="10" width="2" height="2" fill="#E8A849"/><rect x="2" y="10" width="2" height="1" fill="#FFD47A"/></svg>
-            MARKETS
+          <button role="tab" aria-selected={tab === "markets"} onClick={() => { setTab("markets"); setSelectedPool(null); }}>
+            Markets
           </button>
-          <button className={tabClass("positions")} onClick={() => { setTab("positions"); setSelectedPool(null); }}>
-            <svg width="20" height="20" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" className="mr-1 inline sm:mr-2" style={{imageRendering:"pixelated"}}><rect x="3" y="11" width="1" height="1" fill="#8B5E3C"/><rect x="4" y="10" width="1" height="1" fill="#8B5E3C"/><rect x="5" y="9" width="1" height="1" fill="#A0704A"/><rect x="6" y="8" width="1" height="1" fill="#A0704A"/><rect x="7" y="7" width="1" height="1" fill="#A0704A"/><rect x="2" y="12" width="1" height="1" fill="#7A5030"/><rect x="1" y="13" width="1" height="1" fill="#7A5030"/><rect x="8" y="6" width="1" height="1" fill="#C0C0C0"/><rect x="9" y="5" width="1" height="1" fill="#D8D8D8"/><rect x="10" y="4" width="1" height="1" fill="#E8E8E8"/><rect x="11" y="3" width="1" height="1" fill="#F0F0F0"/><rect x="12" y="2" width="2" height="1" fill="#E8E8E8"/><rect x="13" y="3" width="1" height="1" fill="#D8D8D8"/><rect x="12" y="4" width="1" height="1" fill="#C0C0C0"/><rect x="10" y="8" width="2" height="2" fill="#FFD47A"/><rect x="10" y="8" width="1" height="1" fill="#FFF3B0"/><rect x="12" y="10" width="2" height="2" fill="#E8A849"/><rect x="12" y="10" width="1" height="1" fill="#FFD47A"/><rect x="8" y="11" width="2" height="1" fill="#E8A849"/><rect x="9" y="12" width="1" height="1" fill="#FFD47A"/></svg>
-            POSITIONS
+          <button role="tab" aria-selected={tab === "positions"} onClick={() => { setTab("positions"); setSelectedPool(null); }}>
+            Positions
           </button>
-        </div>
-
-        <div className="relative z-10 mx-auto mt-4 mb-8 w-[95%] p-2 sm:p-4">
-          {selectedPool ? (
-            <PoolDetail pool={selectedPool} onBack={() => setSelectedPool(null)} address={address} isConnected={isConnected} walletCtx={walletCtx} chainClient={chainClient} />
-          ) : tab === "markets" ? (
-            <>
-              <div className="mb-4 grid grid-cols-2 gap-1.5 sm:mb-5 sm:grid-cols-4 sm:gap-3">
-                {[
-                  { l: "TOTAL VALUE LOCKED", v: loading ? "..." : `$${fmt(totalTvl)}`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="2" y="7" width="12" height="7" fill="#8B5E3C"/><rect x="2" y="7" width="12" height="1" fill="#A0704A"/><rect x="2" y="13" width="12" height="1" fill="#5D3A1F"/><rect x="2" y="4" width="12" height="4" fill="#A0704A"/><rect x="2" y="4" width="12" height="1" fill="#C49A6C"/><rect x="3" y="5" width="10" height="1" fill="#B8896A"/><rect x="1" y="7" width="14" height="1" fill="#E8A849"/><rect x="1" y="4" width="14" height="1" fill="#E8A849"/><rect x="7" y="6" width="2" height="3" fill="#FFD47A"/><rect x="7" y="5" width="2" height="1" fill="#E8A849"/><rect x="4" y="3" width="2" height="2" fill="#FFD47A"/><rect x="5" y="3" width="1" height="1" fill="#FFF3B0"/><rect x="9" y="2" width="2" height="2" fill="#FFD47A"/><rect x="10" y="2" width="1" height="1" fill="#FFF3B0"/><rect x="7" y="2" width="2" height="2" fill="#E8A849"/><rect x="8" y="2" width="1" height="1" fill="#FFD47A"/></svg> },
-                  { l: "DEEPEST POOL", v: loading ? "..." : `$${fmt(deepestTvl)}`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="2" y="9" width="2" height="5" fill="#E8A849"/><rect x="2" y="9" width="2" height="1" fill="#FFD47A"/><rect x="5" y="5" width="2" height="9" fill="#FFD47A"/><rect x="5" y="5" width="2" height="1" fill="#FFF3B0"/><rect x="8" y="7" width="2" height="7" fill="#E8A849"/><rect x="8" y="7" width="2" height="1" fill="#FFD47A"/><rect x="11" y="3" width="2" height="11" fill="#FFD47A"/><rect x="11" y="3" width="2" height="1" fill="#FFF3B0"/><rect x="1" y="14" width="14" height="1" fill="#C49A6C"/><rect x="13" y="1" width="1" height="1" fill="#7FE87F"/><rect x="12" y="2" width="1" height="1" fill="#7FE87F"/><rect x="14" y="2" width="1" height="1" fill="#7FE87F"/></svg> },
-                  { l: "ACTIVE POOLS", v: loading ? "..." : `${pools.filter(p => p.active).length}/${pools.length}`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="7" y="1" width="2" height="1" fill="#5BC0DE"/><rect x="6" y="2" width="4" height="1" fill="#5BC0DE"/><rect x="5" y="3" width="6" height="1" fill="#5BC0DE"/><rect x="4" y="4" width="8" height="1" fill="#5BC0DE"/><rect x="3" y="5" width="10" height="1" fill="#5BC0DE"/><rect x="3" y="6" width="10" height="1" fill="#4AADCC"/><rect x="3" y="7" width="10" height="1" fill="#4AADCC"/><rect x="3" y="8" width="10" height="1" fill="#3A9ABB"/><rect x="3" y="9" width="10" height="1" fill="#3A9ABB"/><rect x="4" y="10" width="8" height="1" fill="#2D87A8"/><rect x="5" y="11" width="6" height="1" fill="#2D87A8"/><rect x="6" y="12" width="4" height="1" fill="#2D87A8"/><rect x="5" y="4" width="2" height="1" fill="#9EEAFF"/><rect x="4" y="5" width="2" height="1" fill="#9EEAFF"/><rect x="4" y="6" width="1" height="2" fill="#7FD9F0"/></svg> },
-                  { l: "24H VOLUME", v: loading ? "..." : `$${fmt(totalVol24h)}`, icon: <svg width="28" height="28" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" style={{imageRendering:"pixelated"}}><rect x="2" y="12" width="1" height="1" fill="#E8A849"/><rect x="3" y="11" width="1" height="1" fill="#E8A849"/><rect x="4" y="10" width="1" height="1" fill="#FFD47A"/><rect x="5" y="9" width="1" height="1" fill="#FFD47A"/><rect x="6" y="10" width="1" height="1" fill="#FFD47A"/><rect x="7" y="9" width="1" height="1" fill="#FFD47A"/><rect x="8" y="8" width="1" height="1" fill="#FFD47A"/><rect x="9" y="7" width="1" height="1" fill="#FFD47A"/><rect x="10" y="6" width="1" height="1" fill="#FFD47A"/><rect x="11" y="5" width="1" height="1" fill="#FFD47A"/><rect x="12" y="4" width="1" height="1" fill="#FFD47A"/><rect x="13" y="3" width="1" height="1" fill="#FFD47A"/><rect x="13" y="2" width="2" height="1" fill="#7FE87F"/><rect x="14" y="3" width="1" height="1" fill="#7FE87F"/><rect x="13" y="4" width="1" height="1" fill="#7FE87F"/><rect x="2" y="13" width="12" height="1" fill="#5D3A1F"/><rect x="3" y="12" width="11" height="1" fill="#5D3A1F"/><rect x="4" y="11" width="10" height="1" fill="#5D3A1F"/><rect x="5" y="10" width="9" height="1" fill="#4A2C15"/><rect x="7" y="9" width="7" height="1" fill="#4A2C15"/><rect x="9" y="8" width="5" height="1" fill="#4A2C15"/><rect x="1" y="14" width="14" height="1" fill="#C49A6C"/></svg> },
-                ].map((s, i) => (
-                  <div key={i} className="relative overflow-hidden rounded px-3 py-3 text-center">
-                    <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200}
-                      className="absolute inset-0 z-[-1] h-full w-full rounded" />
-                    <div className="mb-1 flex items-center justify-center">{s.icon}</div>
-                    <div className="font-family-ThaleahFat text-base tracking-wider text-gray-200 sm:text-lg">{s.l}</div>
-                    <div className="font-family-ThaleahFat text-peach-300 truncate text-xl sm:text-3xl">{s.v}</div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="no-scrollbar mb-3 flex gap-1.5 overflow-x-auto pb-1 sm:mb-4 sm:gap-2">
-                {chains.map(ch => (
-                  <button
-                    key={ch}
-                    onClick={() => setChainFilter(ch)}
-                    className={`font-family-ThaleahFat cursor-pointer whitespace-nowrap rounded px-3 py-1.5 text-base tracking-wider transition-all ${
-                      chainFilter === ch
-                        ? "border-2 border-yellow-400 text-yellow-400"
-                        : "border-2 border-[#E8A849]/55 text-gray-300 hover:border-[#FFD47A]/80 hover:text-white"
-                    }`}
-                    style={chainFilter === ch && ch !== "all" ? {
-                      borderColor: chainColors[ch] || "#D548EC",
-                      color: chainColors[ch] || "#D548EC",
-                      background: (chainColors[ch] || "#D548EC") + "18",
-                    } : {}}
-                  >
-                    {ch === "all" ? "ALL CHAINS" : ch.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-
-              <div className="mb-2 flex items-center justify-end gap-1">
-                {([["tvl", "TVL"], ["vol", "VOL"], ["apy", "APY"]] as const).map(([k, l]) => (
-                  <button
-                    key={k}
-                    onClick={() => setSort(k)}
-                    className={`font-family-ThaleahFat cursor-pointer rounded px-3 py-1 text-base transition-all ${
-                      sort === k
-                        ? "bg-ground-button border-ground-button-border text-peach-500 border"
-                        : "border border-transparent text-gray-300"
-                    }`}
-                  >
-                    {l}
-                  </button>
-                ))}
-                <button onClick={loadPools} className="text-peach-300 ml-2 cursor-pointer transition-all hover:scale-110">
-                  <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-                </button>
-              </div>
-
-              <div className="hidden px-3 pb-2 sm:grid" style={{ gridTemplateColumns: "2.4fr .6fr .7fr .7fr .9fr" }}>
-                {["POOL", "TVL", "24H VOL", "APY", ""].map((h, i) => (
-                  <span key={i} className={`font-family-ThaleahFat text-xl tracking-wider text-gray-300 ${i > 0 ? "text-right" : ""}`}>
-                    {h}
-                  </span>
-                ))}
-              </div>
-
-              {loading ? (
-                <div className="py-12 text-center">
-                  <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-yellow-100 border-t-transparent" />
-                  <p className="font-family-ThaleahFat text-peach-300 mt-4 text-xl">READING ON-CHAIN DATA...</p>
-                  <p className="font-family-ThaleahFat mt-1 text-sm text-gray-300">Fetching from Robinhood Chain</p>
-                </div>
-              ) : sorted.length === 0 ? (
-                <div className="py-12 text-center">
-                  <p className="font-family-ThaleahFat text-2xl text-gray-100">NO POOLS FOUND</p>
-                  <p className="font-family-ThaleahFat mt-2 text-base text-gray-300">No active liquidity on-chain for this filter</p>
-                </div>
-              ) : (
-              <div className="flex flex-col gap-1.5">
-                {sorted.map((p) => (
-                  <button
-                    key={p.pool.address}
-                    onClick={() => setSelectedPool(p)}
-                    className="relative w-full cursor-pointer rounded text-left transition-all hover:scale-[1.005]"
-                  >
-                    <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200}
-                      className="absolute inset-0 z-[-1] h-full w-full rounded" />
-                    <div className="hidden items-center gap-1 px-3 py-3 sm:grid" style={{ gridTemplateColumns: "2.4fr .6fr .7fr .7fr .9fr" }}>
-                      <div className="flex items-center gap-3">
-                        <TokenPair t0={p.token0} t1={p.token1} size={36} />
-                        <div>
-                          <div className="font-family-ThaleahFat text-xl tracking-wider text-white">{p.name}</div>
-                          <div className="mt-0.5 flex gap-1">
-                            <Badge chain="Robinhood Chain" />
-                            <span className="font-family-ThaleahFat bg-ground-button-border rounded-sm px-1.5 py-px text-sm text-gray-200">
-                              {(p.fee / 10000).toFixed(2)}%
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right"><span className="font-family-ThaleahFat truncate text-2xl text-white">${fmt(p.tvl)}</span></div>
-                      <div className="font-family-ThaleahFat text-right text-2xl text-white">{p.vol24h > 0 ? `$${fmt(p.vol24h)}` : "—"}</div>
-                      <div className="font-family-ThaleahFat text-right text-2xl text-[#6DBB3E]">{p.feeApy > 0 ? `${p.feeApy.toFixed(p.feeApy >= 100 ? 0 : 1)}%` : "—"}</div>
-                      <div className="flex justify-end gap-1.5">
-                        <Link href="/vault" className="font-family-ThaleahFat cursor-pointer rounded bg-[#6DBB3E] px-3 py-1.5 text-lg text-white shadow-[0_-2px_0_#4A8B29_inset] transition-all hover:brightness-110">
-                          + LIQUIDITY
-                        </Link>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between px-3 py-3 sm:hidden">
-                      <div className="flex items-center gap-2">
-                        <TokenPair t0={p.token0} t1={p.token1} size={32} />
-                        <div>
-                          <div className="font-family-ThaleahFat text-lg text-white">{p.name}</div>
-                          <Badge chain="Robinhood Chain" />
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-family-ThaleahFat text-xl text-gray-200">${fmt(p.tvl)} TVL</div>
-                        <div className="font-family-ThaleahFat text-lg text-white">{p.vol24h > 0 ? `$${fmt(p.vol24h)} VOL` : `${(p.fee / 10000).toFixed(2)}% FEE`}</div>
-                        {p.feeApy > 0 && <div className="font-family-ThaleahFat text-lg text-[#6DBB3E]">{p.feeApy.toFixed(p.feeApy >= 100 ? 0 : 1)}% APY</div>}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-              )}
-            </>
-          ) : (
-            /* ═══ POSITIONS TAB ═══ */
-            <PositionsTab
-              positions={positions}
-              loading={posLoading}
-              isConnected={isConnected}
-              walletCtx={walletCtx}
-              chainClient={chainClient}
-              address={address}
-              onRefresh={loadPositions}
-              onGoToMarkets={() => setTab("markets")}
-            />
-          )}
-
-          <p className="font-family-ThaleahFat mt-6 text-center text-sm tracking-widest text-gray-400">
-            CONCENTRATED LIQUIDITY ON ROBINHOOD CHAIN — BEST EXECUTION VIA THE MOLESWAP AGGREGATOR
-          </p>
         </div>
       </div>
-    </div>
+
+      {selectedPool ? (
+        <PoolDetail pool={selectedPool} onBack={() => setSelectedPool(null)} address={address} isConnected={isConnected} walletCtx={walletCtx} chainClient={chainClient} />
+      ) : tab === "markets" ? (
+        <>
+          <div className="stats" style={{ marginTop: 0 }}>
+            {[
+              { l: "Total value locked", v: loading ? "..." : `$${fmt(totalTvl)}` },
+              { l: "Deepest pool", v: loading ? "..." : `$${fmt(deepestTvl)}` },
+              { l: "Active pools", v: loading ? "..." : `${pools.filter(p => p.active).length}/${pools.length}` },
+              { l: "24h volume", v: loading ? "..." : `$${fmt(totalVol24h)}` },
+            ].map((s, i) => (
+              <div key={i} className="chamber">
+                <div className="label">{s.l}</div>
+                <div className="value mono">{s.v}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="toolbar">
+            <div className="p-chipset">
+              {chains.map(ch => (
+                <button
+                  key={ch}
+                  onClick={() => setChainFilter(ch)}
+                  data-on={chainFilter === ch ? "true" : "false"}
+                  style={chainFilter === ch && ch !== "all" ? {
+                    borderColor: (chainColors[ch] || "#D548EC") + "55",
+                    color: chainColors[ch] || "#D548EC",
+                    background: (chainColors[ch] || "#D548EC") + "18",
+                  } : {}}
+                >
+                  {ch === "all" ? "All chains" : ch}
+                </button>
+              ))}
+            </div>
+            <span className="spacer" style={{ marginLeft: "auto" }} />
+            <div className="p-chipset" aria-label="Sort pools">
+              {([["tvl", "TVL"], ["vol", "VOL"], ["apy", "APY"]] as const).map(([k, l]) => (
+                <button key={k} onClick={() => setSort(k)} data-on={sort === k ? "true" : "false"}>
+                  {l}
+                </button>
+              ))}
+            </div>
+            <button className="ctl" onClick={loadPools} aria-label="Refresh pools" style={{ width: 38, height: 38, padding: 0, justifyContent: "center" }}>
+              <RefreshCw size={15} className={loading ? "spin" : ""} />
+            </button>
+          </div>
+
+          <div className="panel">
+            <div className="thead">
+              <span>Pool</span>
+              <span className="num-h">TVL</span>
+              <span className="num-h col-vol">24h vol</span>
+              <span className="num-h col-apy">APY</span>
+              <span />
+            </div>
+
+            {loading ? (
+              <div className="load-block">
+                <div className="ldr" />
+                <div className="t1">Reading on-chain data...</div>
+                <div className="t2">Fetching from Robinhood Chain</div>
+              </div>
+            ) : sorted.length === 0 ? (
+              <div className="empty">
+                <div style={{ fontSize: 16, fontWeight: 800, color: "var(--ink-2)" }}>No pools found</div>
+                <div style={{ marginTop: 5 }}>No active liquidity on-chain for this filter</div>
+              </div>
+            ) : (
+              sorted.map((p) => (
+                <div key={p.pool.address} className="row" onClick={() => setSelectedPool(p)}>
+                  <div className="pair">
+                    <TokenPair t0={p.token0} t1={p.token1} size={32} />
+                    <div>
+                      <div className="nm">{p.name}</div>
+                      <div className="tag">
+                        <Badge chain="Robinhood Chain" />
+                        <span className="fee">{(p.fee / 10000).toFixed(2)}%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="num">${fmt(p.tvl)}</div>
+                  <div className="num col-vol" style={p.vol24h > 0 ? undefined : { color: "var(--ink-3)" }}>
+                    {p.vol24h > 0 ? `$${fmt(p.vol24h)}` : "—"}
+                  </div>
+                  {p.feeApy > 0 ? (
+                    <span className="apy col-apy">{p.feeApy.toFixed(p.feeApy >= 100 ? 0 : 1)}%</span>
+                  ) : (
+                    <div className="num col-apy" style={{ color: "var(--ink-3)" }}>—</div>
+                  )}
+                  {/* Let the link go to the vault without also opening the detail view. */}
+                  <Link href="/vault" className="liq-btn" onClick={(e) => e.stopPropagation()}>
+                    + Liquidity
+                  </Link>
+                </div>
+              ))
+            )}
+          </div>
+        </>
+      ) : (
+        /* ═══ POSITIONS TAB ═══ */
+        <PositionsTab
+          positions={positions}
+          loading={posLoading}
+          isConnected={isConnected}
+          walletCtx={walletCtx}
+          chainClient={chainClient}
+          address={address}
+          onRefresh={loadPositions}
+          onGoToMarkets={() => setTab("markets")}
+        />
+      )}
+
+      <p className="foot-cap">Concentrated liquidity on Robinhood Chain — best execution via the MoleSwap aggregator</p>
+    </main>
   );
 };
 
@@ -585,40 +640,38 @@ const LiquidityGraph = ({ currentTick, tickLower, tickUpper, height = 80, price,
   };
 
   return (
-    <div className="relative overflow-hidden rounded" style={{ height, background: "rgba(0,0,0,0.2)", border: "1px solid #3A1F0E" }}>
-      <div style={{ position: "absolute", top: 0, bottom: 0, left: "5%", right: "5%", background: "rgba(107,187,62,0.06)" }} />
-      {!isFullRange && <div style={{ position: "absolute", top: 0, bottom: 0, left: "5%", width: 1, borderLeft: "1px dashed #6B7280" }} />}
-      {!isFullRange && <div style={{ position: "absolute", top: 0, bottom: 0, right: "5%", width: 1, borderRight: "1px dashed #6B7280" }} />}
-      <div style={{ position: "absolute", top: 0, bottom: 0, left: `${5 + currentPos * 90}%`, width: 2, background: "#FFD47A", zIndex: 2, boxShadow: "0 0 6px #FFD47A" }} />
+    <div className="lg-wrap" style={{ height }}>
+      <div className="lg-wash" />
+      {!isFullRange && <div style={{ position: "absolute", top: 0, bottom: 0, left: "5%", width: 1, borderLeft: "1px dashed rgba(44,26,12,.4)" }} />}
+      {!isFullRange && <div style={{ position: "absolute", top: 0, bottom: 0, right: "5%", width: 1, borderRight: "1px dashed rgba(44,26,12,.4)" }} />}
+      <div className="lg-line" style={{ left: `${5 + currentPos * 90}%` }} />
 
       {hovered !== null && price && height > 50 && (() => {
         const bd = getBarData(hovered);
         const leftPct = (hovered / (bars - 1)) * 100;
         return (
-          <div className="pointer-events-none absolute z-50 rounded border border-[#E8A849] bg-[#3A1F0E]/95 px-2.5 py-1.5 shadow-lg" style={{ bottom: "100%", left: `${Math.min(Math.max(leftPct, 15), 85)}%`, transform: "translateX(-50%) translateY(-4px)", whiteSpace: "nowrap" }}>
-            <div className="font-family-ThaleahFat text-xs text-[#FFD47A]">{bd.barPrice > 1000 ? fmt(bd.barPrice) : bd.barPrice.toFixed(2)} {token1Symbol || ""}</div>
-            <div className="font-family-ThaleahFat text-xs text-gray-200">LIQ: {bd.liq.toFixed(0)}%</div>
-            <div className="font-family-ThaleahFat text-xs text-[#6DBB3E]">{bd.inRange ? "IN RANGE" : "OUT OF RANGE"}</div>
+          <div className="lg-tip" style={{ left: `${Math.min(Math.max(leftPct, 15), 85)}%`, transform: "translateX(-50%) translateY(-4px)" }}>
+            <div className="l1">{bd.barPrice > 1000 ? fmt(bd.barPrice) : bd.barPrice.toFixed(2)} {token1Symbol || ""}</div>
+            <div className="l2">LIQ: {bd.liq.toFixed(0)}%</div>
+            <div className="l3">{bd.inRange ? "IN RANGE" : "OUT OF RANGE"}</div>
           </div>
         );
       })()}
 
-      <div className="flex items-end gap-px px-1" style={{ height: "100%", padding: "4px 2px" }}>
+      <div className="lg-bars">
         {Array.from({ length: bars }).map((_, i) => {
           const bd = getBarData(i);
           const isCurrent = i === peakIdx;
           const isHov = hovered === i;
           return (
-            <div key={i}
-              onMouseEnter={() => setHovered(i)} onMouseLeave={() => setHovered(null)}
-              style={{
-                flex: 1, borderRadius: "1px 1px 0 0", minHeight: 2, cursor: "crosshair",
-                height: `${bd.h}%`,
-                background: isCurrent ? "#FFD47A" : isHov ? "#8FDB5E" : "#6DBB3E",
-                opacity: isCurrent ? 1 : isHov ? 0.9 : 0.5 + (bd.h / 200),
-                boxShadow: isCurrent ? "0 0 6px #FFD47A" : isHov ? "0 0 4px #6DBB3E" : "none",
-                transition: "opacity 0.1s, background 0.1s",
-              }} />
+            <div
+              key={i}
+              className={`lg-bar${isCurrent ? " cur" : ""}`}
+              onMouseEnter={() => setHovered(i)}
+              onMouseLeave={() => setHovered(null)}
+            >
+              <i style={{ height: `${bd.h}%`, opacity: isCurrent ? 1 : isHov ? 0.9 : 0.5 + (bd.h / 200) }} />
+            </div>
           );
         })}
       </div>
@@ -636,66 +689,62 @@ const RemoveLiquidityModal = ({ pos, ep, t0, t1, fees0, fees1, onConfirm, onCanc
 
   if (typeof document === "undefined") return null;
   return createPortal(
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm" onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div className="border-ground mx-4 w-full max-w-md overflow-hidden rounded-xl border-3 bg-gradient-to-b from-[#52301A] to-[#4A2C15] shadow-[0_0_40px_rgba(232,168,73,0.12),0_8px_0_#3A1F0E]" style={{ borderColor: "#E8A849" }}>
-        <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/20 px-5 py-3">
-          <span className="font-family-ThaleahFat text-xl tracking-wider text-[#FFD47A]">REMOVE LIQUIDITY</span>
-          <button onClick={onCancel} className="font-family-ThaleahFat cursor-pointer text-lg text-gray-300 hover:text-white">✕</button>
+    <div className="cm-scrim" style={{ opacity: 1 }} onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="cm-panel">
+        <div className="cm-head">
+          <h2>Remove liquidity</h2>
+          <button className="cm-x" onClick={onCancel} aria-label="Close">✕</button>
         </div>
-        <div className="px-5 py-4">
-          <div className="mb-4 flex items-center gap-3 border-b border-white/5 pb-4">
+        <div className="cm-body">
+          <div className="pair">
             <TokenPair t0={t0} t1={t1} size={32} />
             <div>
-              <div className="font-family-ThaleahFat text-lg tracking-wider text-white">{t0.symbol} / {t1.symbol}</div>
-              <div className="font-family-ThaleahFat mt-0.5 text-sm text-gray-300">NFT #{pos.tokenId} · {feeTier} FEE · {isFullRange ? "FULL RANGE" : "CUSTOM"}</div>
+              <div className="nm">{t0.symbol} / {t1.symbol}</div>
+              <div className="tag mono">NFT #{pos.tokenId} · {feeTier} FEE · {isFullRange ? "FULL RANGE" : "CUSTOM"}</div>
             </div>
           </div>
 
-          <div className="mb-3">
-            <div className="font-family-ThaleahFat mb-2 flex items-center gap-2 text-sm text-[#E8A849]">YOU WILL RECEIVE <span className="flex-1 border-t border-white/5" /></div>
-            <div className="flex justify-between py-1">
-              <span className="font-family-ThaleahFat flex items-center gap-2 text-base text-gray-200"><TokenIcon token={t0} size={16} />{t0.symbol}</span>
-              <span className="font-family-ThaleahFat text-base text-[#FFD47A]">{ep ? ep.amount0.toFixed(ep.amount0 < 0.01 ? 6 : 4) : "..."}</span>
+          <div className="m-lbl">You will receive</div>
+          <div className="p-rows">
+            <div className="p-row">
+              <span className="k" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><TokenIcon token={t0} size={16} />{t0.symbol}</span>
+              <span className="v">{ep ? ep.amount0.toFixed(ep.amount0 < 0.01 ? 6 : 4) : "..."}</span>
             </div>
-            <div className="flex justify-between py-1">
-              <span className="font-family-ThaleahFat flex items-center gap-2 text-base text-gray-200"><TokenIcon token={t1} size={16} />{t1.symbol}</span>
-              <span className="font-family-ThaleahFat text-base text-[#FFD47A]">{ep ? ep.amount1.toFixed(ep.amount1 < 0.01 ? 6 : 4) : "..."}</span>
-            </div>
-          </div>
-
-          <div className="mb-3">
-            <div className="font-family-ThaleahFat mb-2 flex items-center gap-2 text-sm text-[#E8A849]">FEES COLLECTED <span className="flex-1 border-t border-white/5" /></div>
-            <div className="flex justify-between py-1">
-              <span className="font-family-ThaleahFat flex items-center gap-2 text-base text-gray-200"><TokenIcon token={t0} size={16} />{t0.symbol} FEES</span>
-              <span className={`font-family-ThaleahFat text-base ${fees0 > 0 ? "text-[#6DBB3E]" : "text-gray-400"}`}>{fees0 > 0 ? `+${fmtFee(fees0)}` : "0.00"}</span>
-            </div>
-            <div className="flex justify-between py-1">
-              <span className="font-family-ThaleahFat flex items-center gap-2 text-base text-gray-200"><TokenIcon token={t1} size={16} />{t1.symbol} FEES</span>
-              <span className={`font-family-ThaleahFat text-base ${fees1 > 0 ? "text-[#6DBB3E]" : "text-gray-400"}`}>{fees1 > 0 ? `+${fmtFee(fees1)}` : "0.00"}</span>
+            <div className="p-row">
+              <span className="k" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><TokenIcon token={t1} size={16} />{t1.symbol}</span>
+              <span className="v">{ep ? ep.amount1.toFixed(ep.amount1 < 0.01 ? 6 : 4) : "..."}</span>
             </div>
           </div>
 
-          <div className="my-3 rounded-lg border-2 border-[#3A1F0E] bg-black/20 px-4 py-2.5">
-            <div className="flex items-center justify-between">
-              <span className="font-family-ThaleahFat text-sm text-[#C49A6C]">TOTAL ESTIMATED</span>
-              <span className="font-family-ThaleahFat text-lg text-[#FFD47A]">
-                {ep ? `${(ep.amount0 + fees0).toFixed(4)} ${t0.symbol} + ${(ep.amount1 + fees1).toFixed(4)} ${t1.symbol}` : "..."}
-              </span>
+          <div className="m-lbl">Fees collected</div>
+          <div className="p-rows">
+            <div className="p-row">
+              <span className="k">{t0.symbol} fees</span>
+              {fees0 > 0
+                ? <span className="v pos">+{fmtFee(fees0)}</span>
+                : <span className="v" style={{ color: "var(--ink-3)" }}>0.00</span>}
+            </div>
+            <div className="p-row">
+              <span className="k">{t1.symbol} fees</span>
+              {fees1 > 0
+                ? <span className="v pos">+{fmtFee(fees1)}</span>
+                : <span className="v" style={{ color: "var(--ink-3)" }}>0.00</span>}
             </div>
           </div>
 
-          <div className="mb-4 rounded border border-[#E8A849]/20 bg-[#E8A849]/5 px-3 py-2">
-            <p className="font-family-ThaleahFat text-xs leading-relaxed text-[#E8A849]">
-              ⚠ REMOVING 100% OF LIQUIDITY. YOUR NFT #{pos.tokenId} WILL BE BURNED AND ALL TOKENS + ACCRUED FEES RETURNED TO YOUR WALLET.
-            </p>
+          <div className="m-lbl">Total estimated</div>
+          <div className="tot-box">
+            {ep ? `${(ep.amount0 + fees0).toFixed(4)} ${t0.symbol} + ${(ep.amount1 + fees1).toFixed(4)} ${t1.symbol}` : "..."}
           </div>
 
-          <div className="flex gap-2">
-            <button onClick={onCancel} className="font-family-ThaleahFat flex-1 cursor-pointer rounded-lg border-2 border-[#5D3A1F] bg-[#3A1F0E] px-4 py-3 text-base tracking-wider text-[#C49A6C] transition-all hover:scale-[1.01]">
-              CANCEL
-            </button>
-            <button onClick={onConfirm} disabled={removing} className="font-family-ThaleahFat flex-1 cursor-pointer rounded-lg bg-red-600 px-4 py-3 text-base tracking-wider text-white shadow-[0px_-3px_0px_0px_#991B1B_inset] transition-all hover:scale-[1.01] disabled:opacity-50">
-              {removing ? "REMOVING..." : "CONFIRM REMOVE"}
+          <div className="warnbox">
+            ⚠ Removing 100% of liquidity. Your NFT #{pos.tokenId} will be burned and all tokens + accrued fees returned to your wallet.
+          </div>
+
+          <div className="m-actions">
+            <button className="m-btn cancel" onClick={onCancel}>Cancel</button>
+            <button className="m-btn danger" onClick={onConfirm} disabled={removing}>
+              {removing ? "Removing..." : "Confirm remove"}
             </button>
           </div>
         </div>
@@ -715,47 +764,47 @@ const CollectFeesModal = ({ pos, t0, t1, fees0, fees1, onConfirm, onCancel, coll
 
   if (typeof document === "undefined") return null;
   return createPortal(
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm" onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div className="border-ground mx-4 w-full max-w-md overflow-hidden rounded-xl border-3 bg-gradient-to-b from-[#52301A] to-[#4A2C15] shadow-[0_0_40px_rgba(232,168,73,0.12),0_8px_0_#3A1F0E]" style={{ borderColor: "#E8A849" }}>
-        <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/20 px-5 py-3">
-          <span className="font-family-ThaleahFat text-xl tracking-wider text-[#FFD47A]">COLLECT FEES</span>
-          <button onClick={onCancel} className="font-family-ThaleahFat cursor-pointer text-lg text-gray-300 hover:text-white">✕</button>
+    <div className="cm-scrim" style={{ opacity: 1 }} onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="cm-panel">
+        <div className="cm-head">
+          <h2>Collect fees</h2>
+          <button className="cm-x" onClick={onCancel} aria-label="Close">✕</button>
         </div>
-        <div className="px-5 py-4">
-          <div className="mb-4 flex items-center gap-3 border-b border-white/5 pb-4">
+        <div className="cm-body">
+          <div className="pair">
             <TokenPair t0={t0} t1={t1} size={32} />
             <div>
-              <div className="font-family-ThaleahFat text-lg tracking-wider text-white">{t0.symbol} / {t1.symbol}</div>
-              <div className="font-family-ThaleahFat mt-0.5 text-sm text-gray-300">NFT #{pos.tokenId} · {feeTier} FEE</div>
+              <div className="nm">{t0.symbol} / {t1.symbol}</div>
+              <div className="tag mono">NFT #{pos.tokenId} · {feeTier} FEE</div>
             </div>
           </div>
 
-          <div className="mb-3">
-            <div className="font-family-ThaleahFat mb-2 flex items-center gap-2 text-sm text-[#E8A849]">UNCLAIMED FEES <span className="flex-1 border-t border-white/5" /></div>
-            <div className="flex justify-between py-1">
-              <span className="font-family-ThaleahFat flex items-center gap-2 text-base text-gray-200"><TokenIcon token={t0} size={16} />{t0.symbol}</span>
-              <span className={`font-family-ThaleahFat text-base ${fees0 > 0 ? "text-[#6DBB3E]" : "text-gray-400"}`}>{fees0 > 0 ? `+${fmtFee(fees0)}` : "0.00"}</span>
+          <div className="m-lbl">Unclaimed fees</div>
+          <div className="p-rows">
+            <div className="p-row">
+              <span className="k" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><TokenIcon token={t0} size={16} />{t0.symbol}</span>
+              {fees0 > 0
+                ? <span className="v pos">+{fmtFee(fees0)}</span>
+                : <span className="v" style={{ color: "var(--ink-3)" }}>0.00</span>}
             </div>
-            <div className="flex justify-between py-1">
-              <span className="font-family-ThaleahFat flex items-center gap-2 text-base text-gray-200"><TokenIcon token={t1} size={16} />{t1.symbol}</span>
-              <span className={`font-family-ThaleahFat text-base ${fees1 > 0 ? "text-[#6DBB3E]" : "text-gray-400"}`}>{fees1 > 0 ? `+${fmtFee(fees1)}` : "0.00"}</span>
+            <div className="p-row">
+              <span className="k" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><TokenIcon token={t1} size={16} />{t1.symbol}</span>
+              {fees1 > 0
+                ? <span className="v pos">+{fmtFee(fees1)}</span>
+                : <span className="v" style={{ color: "var(--ink-3)" }}>0.00</span>}
             </div>
           </div>
 
-          <div className="mb-4 rounded border border-[#E8A849]/20 bg-[#E8A849]/5 px-3 py-2">
-            <p className="font-family-ThaleahFat text-xs leading-relaxed text-[#E8A849]">
-              {hasAny
-                ? `⚠ THIS WILL SEND YOUR ACCRUED FEES TO YOUR WALLET. POSITION NFT #${pos.tokenId} STAYS INTACT — YOUR LIQUIDITY KEEPS EARNING.`
-                : `NO FEES ACCRUED YET. YOU CAN STILL SUBMIT — THE TX WILL JUST BE A NO-OP. FEES ACCRUE WHEN SWAPS OCCUR THROUGH YOUR PRICE RANGE.`}
-            </p>
+          <div className="warnbox">
+            {hasAny
+              ? `⚠ This will send your accrued fees to your wallet. Position NFT #${pos.tokenId} stays intact — your liquidity keeps earning.`
+              : `No fees accrued yet. You can still submit — the tx will just be a no-op. Fees accrue when swaps occur through your price range.`}
           </div>
 
-          <div className="flex gap-2">
-            <button onClick={onCancel} className="font-family-ThaleahFat flex-1 cursor-pointer rounded-lg border-2 border-[#5D3A1F] bg-[#3A1F0E] px-4 py-3 text-base tracking-wider text-[#C49A6C] transition-all hover:scale-[1.01]">
-              CANCEL
-            </button>
-            <button onClick={onConfirm} disabled={collecting} className="font-family-ThaleahFat bg-peach-500 flex-1 cursor-pointer rounded-lg px-4 py-3 text-base tracking-wider text-black shadow-[0px_-3px_0px_0px_#C97E00_inset] transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100">
-              {collecting ? "COLLECTING..." : "CONFIRM COLLECT"}
+          <div className="m-actions">
+            <button className="m-btn cancel" onClick={onCancel}>Cancel</button>
+            <button className="m-btn amber" onClick={onConfirm} disabled={collecting}>
+              {collecting ? "Collecting..." : "Confirm collect"}
             </button>
           </div>
         </div>
@@ -852,11 +901,15 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
 
   if (!isConnected) {
     return (
-      <div className="flex flex-col items-center gap-4 py-12">
-        <Image src="/profile/c2.png" alt="Mole" width={80} height={80} className="object-contain" style={{ imageRendering: "pixelated" }} />
-        <p className="font-family-ThaleahFat text-shadow-black text-2xl tracking-wider text-white">CONNECT WALLET TO VIEW POSITIONS</p>
-        <button onClick={() => walletCtx?.handleConnectWallet?.()} className="font-family-ThaleahFat bg-peach-500 border-3 mt-2 cursor-pointer rounded-lg border-[#523525] px-8 py-3 text-xl tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.02]">
-          CONNECT WALLET
+      <div className="p-card center" style={{ padding: "44px 20px" }}>
+        <MoleMascot className="mole2" />
+        <h3 style={{ fontSize: "1.15rem" }}>Connect wallet to view positions</h3>
+        <button
+          onClick={() => walletCtx?.handleConnectWallet?.()}
+          className="p-btn"
+          style={{ maxWidth: 260, margin: "18px auto 0", display: "block" }}
+        >
+          Connect wallet
         </button>
       </div>
     );
@@ -864,22 +917,26 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
 
   if (loading || enriching) {
     return (
-      <div className="py-12 text-center">
-        <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-yellow-100 border-t-transparent" />
-        <p className="font-family-ThaleahFat text-peach-300 mt-4 text-xl">LOADING POSITIONS...</p>
-        <p className="font-family-ThaleahFat mt-1 text-sm text-gray-300">Reading on-chain position data</p>
+      <div className="p-card center pos-load" style={{ padding: "52px 20px" }}>
+        <div className="ldr" />
+        <div className="t1">Loading positions...</div>
+        <p className="d" style={{ marginTop: 4 }}>Reading on-chain position data</p>
       </div>
     );
   }
 
   if (positions.length === 0) {
     return (
-      <div className="flex flex-col items-center gap-4 py-12">
-        <Image src="/profile/c2.png" alt="Mole" width={80} height={80} className="object-contain" style={{ imageRendering: "pixelated" }} />
-        <p className="font-family-ThaleahFat text-shadow-black text-2xl tracking-wider text-white">NO ACTIVE POSITIONS</p>
-        <p className="font-family-ThaleahFat max-w-xs text-center text-base text-gray-200">ADD LIQUIDITY TO A POOL TO START EARNING FEES</p>
-        <button onClick={onGoToMarkets} className="font-family-ThaleahFat mt-2 cursor-pointer rounded-lg bg-[#6DBB3E] px-8 py-3 text-xl tracking-wider text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset] transition-all hover:scale-[1.02]">
-          EXPLORE MARKETS
+      <div className="p-card center" style={{ padding: "44px 20px" }}>
+        <MoleMascot className="mole2" />
+        <h3 style={{ fontSize: "1.15rem" }}>No active positions</h3>
+        <p className="d" style={{ maxWidth: 300, margin: "6px auto 0" }}>Add liquidity to a pool to start earning fees</p>
+        <button
+          onClick={onGoToMarkets}
+          className="p-btn"
+          style={{ maxWidth: 260, margin: "18px auto 0", display: "block" }}
+        >
+          Explore markets
         </button>
       </div>
     );
@@ -891,7 +948,7 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
   const activeCount = positions.filter(p => BigInt(p.liquidity) > 0n).length;
 
   return (
-    <div className="flex flex-col gap-3">
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {removeModal && (() => {
         const t0 = removeModal.token0Info || getTokenByAddress(removeModal.token0);
         const t1 = removeModal.token1Info || getTokenByAddress(removeModal.token1);
@@ -916,30 +973,37 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
       })()}
 
       {txMsg && (
-        <div className="relative rounded px-4 py-3 text-center">
-          <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-          <p className="font-family-ThaleahFat text-peach-300 text-lg">{txMsg}</p>
-        </div>
+        <div className="statline" style={{ margin: "0 0 6px", color: "#ffcd7d" }}>{txMsg}</div>
       )}
 
       {/* Portfolio Summary */}
-      <div className="grid grid-cols-3 gap-2">
-        {[
-          { l: "TOTAL DEPOSITED", v: enriched.length > 0 ? `${enriched.reduce((s, e) => s + e.amount0, 0).toFixed(4)} / ${enriched.reduce((s, e) => s + e.amount1, 0).toFixed(4)}` : "...", c: "text-peach-300" },
-          { l: "UNCLAIMED FEES", v: (totalFees0 > 0 || totalFees1 > 0) ? `+${fmtFee(totalFees0)} / +${fmtFee(totalFees1)}` : "NONE", c: totalFees0 > 0 || totalFees1 > 0 ? "text-[#6DBB3E]" : "text-gray-400" },
-          { l: "POSITIONS", v: `${activeCount} ACTIVE`, c: "text-peach-300" },
-        ].map((s, i) => (
-          <div key={i} className="relative rounded px-3 py-2 text-center">
-            <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-            <div className="font-family-ThaleahFat text-sm tracking-wider text-gray-300">{s.l}</div>
-            <div className={`font-family-ThaleahFat mt-0.5 truncate text-base ${s.c}`}>{s.v}</div>
+      <div className="p-grid p-3">
+        <div className="p-card tight">
+          <div className="sm-lbl">Total deposited</div>
+          <div className="sm-val mono">
+            {enriched.length > 0 ? `${enriched.reduce((s, e) => s + e.amount0, 0).toFixed(4)} / ${enriched.reduce((s, e) => s + e.amount1, 0).toFixed(4)}` : "..."}
           </div>
-        ))}
+        </div>
+        <div className="p-card tight">
+          <div className="sm-lbl">Unclaimed fees</div>
+          <div className="sm-val mono" style={{ color: totalFees0 > 0 || totalFees1 > 0 ? "var(--moss)" : "var(--ink-3)" }}>
+            {(totalFees0 > 0 || totalFees1 > 0) ? `+${fmtFee(totalFees0)} / +${fmtFee(totalFees1)}` : "None"}
+          </div>
+        </div>
+        <div className="p-card tight">
+          <div className="sm-lbl">Positions</div>
+          <div className="sm-val mono">
+            {activeCount} <span style={{ fontSize: 12, color: "var(--moss)", fontWeight: 700 }}>ACTIVE</span>
+          </div>
+        </div>
       </div>
 
-      <div className="flex items-center justify-between">
-        <span className="font-family-ThaleahFat text-xl text-white">{positions.length} POSITION{positions.length !== 1 ? "S" : ""}</span>
-        <button onClick={onRefresh} className="text-peach-300 cursor-pointer transition-all hover:scale-110"><RefreshCw className="h-4 w-4" /></button>
+      <div className="p-sec" style={{ margin: "10px 0 0" }}>
+        <h2>{positions.length} position{positions.length !== 1 ? "s" : ""}</h2>
+        <span className="spacer" />
+        <button onClick={onRefresh} className="linkish" style={{ textDecoration: "none", color: "#ffcd7d" }} aria-label="Refresh positions">
+          <RefreshCw size={14} />
+        </button>
       </div>
 
       {displayPositions.map((pos) => {
@@ -954,122 +1018,122 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
         const isFullRange = pos.tickLower <= -887200 && pos.tickUpper >= 887200;
 
         return (
-          <div key={pos.tokenId} className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">
+          <div key={pos.tokenId} className="p-card">
             {/* Header */}
-            <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/15 px-4 py-3">
-              <div className="flex items-center gap-3">
-                {t0 && t1 && <TokenPair t0={t0} t1={t1} size={36} />}
+            <div className="pc-top">
+              <div className="pair">
+                {t0 && t1 && <TokenPair t0={t0} t1={t1} size={32} />}
                 <div>
-                  <span className="font-family-ThaleahFat text-2xl tracking-wider text-white">{poolName}</span>
-                  <div className="mt-0.5 flex flex-wrap gap-1">
+                  <div className="nm">{poolName}</div>
+                  <div className="tag">
                     <Badge chain="Robinhood Chain" />
                     {t0 && t0.sourceChain !== "Robinhood Chain" && (
-                      <span className="font-family-ThaleahFat rounded-sm bg-[#3A1F0E] px-1.5 py-px text-sm text-[#C49A6C]">
-                        bridged from {t0.sourceChain}
-                      </span>
+                      <span className="badge2">bridged from {t0.sourceChain}</span>
                     )}
-                    <span className="font-family-ThaleahFat rounded-sm bg-[#3A1F0E] px-1.5 py-px text-sm text-[#C49A6C]">
-                      {ep?.feeTier || `${(pos.fee / 10000).toFixed(2)}%`}
-                    </span>
-                    <span className="font-family-ThaleahFat rounded-sm bg-gray-800 px-1.5 py-px text-sm text-gray-300">NFT #{pos.tokenId}</span>
+                    <span className="fee">{ep?.feeTier || `${(pos.fee / 10000).toFixed(2)}%`}</span>
+                    <span className="badge2">NFT #{pos.tokenId}</span>
                   </div>
                 </div>
               </div>
-              <span className={`font-family-ThaleahFat text-lg ${hasLiq ? "text-[#6DBB3E]" : "text-gray-300"}`}>
-                {hasLiq && <span className="mr-1 inline-block h-2 w-2 rounded-full bg-[#6DBB3E] shadow-[0_0_6px_#6DBB3E]" />}
-                {hasLiq ? "ACTIVE" : "CLOSED"}
+              <span className={`p-pill ${hasLiq ? "pos" : "mute"}`} style={{ marginLeft: "auto" }}>
+                {hasLiq && <span className="glowdot" />}
+                {hasLiq ? "Active" : "Closed"}
               </span>
             </div>
 
-            <div className="px-4 py-3">
+            <div className="p-rows" style={{ marginTop: 8 }}>
               {/* Deposited amounts */}
               {t0 && t1 && (
-                <div className="mb-2 grid grid-cols-2 gap-2">
-                  {[{ tok: t0, amt: ep?.amount0, label: "DEPOSITED" }, { tok: t1, amt: ep?.amount1, label: "DEPOSITED" }].map((item, i) => (
-                    <div key={i} className="rounded border-2 border-[#3A1F0E] bg-black/20 px-3 py-2">
-                      <div className="flex items-center gap-1.5">
-                        <TokenIcon token={item.tok} size={16} />
-                        <span className="font-family-ThaleahFat text-sm text-gray-300">{item.tok.symbol} {item.label}</span>
-                      </div>
-                      <div className="font-family-ThaleahFat text-peach-300 mt-1 text-lg">
+                <>
+                  {[{ tok: t0, amt: ep?.amount0 }, { tok: t1, amt: ep?.amount1 }].map((item, i) => (
+                    <div key={i} className="p-row">
+                      <span className="k" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+                        <TokenIcon token={item.tok} size={16} />{item.tok.symbol} deposited
+                      </span>
+                      <span className="v">
                         {item.amt !== undefined ? item.amt.toFixed(item.amt < 0.01 ? 6 : 4) : "..."}
-                      </div>
+                      </span>
                     </div>
                   ))}
-                </div>
+                </>
               )}
 
               {/* Unclaimed fees */}
               {t0 && t1 && (
-                <div className="mb-2 rounded border-2 border-[#3A1F0E] bg-black/15 px-3 py-2">
-                  <div className="mb-1 flex items-center">
-                    <span className="font-family-ThaleahFat text-sm text-[#E8A849]">UNCLAIMED FEES</span>
+                <>
+                  <div className="p-row">
+                    <span className="k">{t0.symbol} fees</span>
+                    <span className="v" style={{ color: fees0 > 0 ? "var(--moss)" : "var(--ink-3)" }}>
+                      {fees0 > 0 ? `+${fmtFee(fees0)}` : "0.00"}
+                    </span>
                   </div>
-                  <div className="flex gap-4">
-                    <div>
-                      <div className="font-family-ThaleahFat text-sm text-gray-300">{t0.symbol}</div>
-                      <div className={`font-family-ThaleahFat text-base ${fees0 > 0 ? "text-[#6DBB3E]" : "text-gray-400"}`}>
-                        {fees0 > 0 ? `+${fmtFee(fees0)}` : "0.00"}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="font-family-ThaleahFat text-sm text-gray-300">{t1.symbol}</div>
-                      <div className={`font-family-ThaleahFat text-base ${fees1 > 0 ? "text-[#6DBB3E]" : "text-gray-400"}`}>
-                        {fees1 > 0 ? `+${fmtFee(fees1)}` : "0.00"}
-                      </div>
-                    </div>
+                  <div className="p-row">
+                    <span className="k">{t1.symbol} fees</span>
+                    <span className="v" style={{ color: fees1 > 0 ? "var(--moss)" : "var(--ink-3)" }}>
+                      {fees1 > 0 ? `+${fmtFee(fees1)}` : "0.00"}
+                    </span>
                   </div>
-                </div>
+                </>
               )}
 
-              {/* Details grid */}
-              <div className="mb-3 grid grid-cols-3 gap-2">
-                {[
-                  { l: "RANGE", v: isFullRange ? "FULL RANGE" : "CUSTOM", c: isFullRange ? "text-[#6DBB3E]" : "text-[#FFD47A]" },
-                  { l: "LIQUIDITY", v: BigInt(pos.liquidity) > 1e9 ? fmt(Number(BigInt(pos.liquidity))) : BigInt(pos.liquidity).toLocaleString(), c: "text-peach-300" },
-                  { l: "POOL", v: ep?.poolAddress ? `${ep.poolAddress.slice(0, 6)}...${ep.poolAddress.slice(-4)}` : "—", c: "text-gray-400" },
-                ].map(({ l, v, c }) => (
-                  <div key={l} className="rounded bg-black/10 px-2 py-1.5">
-                    <div className="font-family-ThaleahFat text-sm text-gray-300">{l}</div>
-                    <div className={`font-family-ThaleahFat mt-0.5 truncate text-base ${c}`}>{v}</div>
-                  </div>
-                ))}
+              {/* Details */}
+              <div className="p-row">
+                <span className="k">Range</span>
+                <span className="v" style={{ color: isFullRange ? "var(--moss)" : "var(--amber)" }}>
+                  {isFullRange ? "FULL RANGE" : "CUSTOM"}
+                </span>
               </div>
-
-              {/* Action buttons. ALM positions auto-compound fees (no separate claim), so there is only
-                  a single EXIT action — it returns the full underlying WETH/USDG including earned fees. */}
-              <div className="flex flex-col gap-2">
-                {(pos as any).isAlm ? (
-                  <>
-                    <p className="font-family-ThaleahFat text-center text-xs tracking-wider text-gray-400">
-                      Fees auto-compound into this position — exiting returns them with your liquidity.
-                    </p>
-                    {hasLiq && (
-                      <button onClick={() => setRemoveModal(pos)} disabled={removing === pos.tokenId}
-                        className="font-family-ThaleahFat w-full cursor-pointer rounded-lg bg-red-600 px-4 py-2.5 text-lg tracking-wider text-white shadow-[0px_-3px_0px_0px_#991B1B_inset] transition-all hover:scale-[1.01] disabled:opacity-50">
-                        {removing === pos.tokenId ? "EXITING..." : "EXIT POSITION"}
-                      </button>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={() => setCollectModal(pos)}
-                      disabled={collecting === pos.tokenId}
-                      className="font-family-ThaleahFat bg-peach-500 w-full cursor-pointer rounded-lg px-4 py-2.5 text-lg tracking-wider text-black shadow-[0px_-3px_0px_0px_#C97E00_inset] transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
-                    >
-                      {collecting === pos.tokenId ? "COLLECTING..." : "COLLECT FEES"}
-                    </button>
-                    {hasLiq && (
-                      <button onClick={() => setRemoveModal(pos)} disabled={removing === pos.tokenId}
-                        className="font-family-ThaleahFat w-full cursor-pointer rounded-lg bg-red-600 px-4 py-2.5 text-lg tracking-wider text-white shadow-[0px_-3px_0px_0px_#991B1B_inset] transition-all hover:scale-[1.01] disabled:opacity-50">
-                        {removing === pos.tokenId ? "REMOVING..." : "REMOVE LIQUIDITY"}
-                      </button>
-                    )}
-                  </>
-                )}
+              <div className="p-row">
+                <span className="k">Liquidity</span>
+                <span className="v">
+                  {BigInt(pos.liquidity) > 1e9 ? fmt(Number(BigInt(pos.liquidity))) : BigInt(pos.liquidity).toLocaleString()}
+                </span>
+              </div>
+              <div className="p-row">
+                <span className="k">Pool</span>
+                <span className="v" style={{ color: "var(--ink-3)" }}>
+                  {ep?.poolAddress ? `${ep.poolAddress.slice(0, 6)}...${ep.poolAddress.slice(-4)}` : "—"}
+                </span>
               </div>
             </div>
+
+            {/* Action buttons. ALM positions auto-compound fees (no separate claim), so there is only
+                a single EXIT action — it returns the full underlying WETH/USDG including earned fees. */}
+            {(pos as any).isAlm ? (
+              <>
+                <p className="d" style={{ marginTop: 10 }}>
+                  Fees auto-compound into this position — exiting returns them with your liquidity.
+                </p>
+                {hasLiq && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
+                    <button className="exit2" onClick={() => setRemoveModal(pos)} disabled={removing === pos.tokenId}>
+                      {removing === pos.tokenId ? "Exiting..." : "Exit position"}
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+                <button
+                  className="m-btn amber"
+                  style={{ flex: "none", width: "100%" }}
+                  onClick={() => setCollectModal(pos)}
+                  disabled={collecting === pos.tokenId}
+                >
+                  {collecting === pos.tokenId ? "Collecting..." : "Collect fees"}
+                </button>
+                {hasLiq && (
+                  <button
+                    className="m-btn danger"
+                    style={{ flex: "none", width: "100%" }}
+                    onClick={() => setRemoveModal(pos)}
+                    disabled={removing === pos.tokenId}
+                  >
+                    {removing === pos.tokenId ? "Removing..." : "Remove liquidity"}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         );
       })}
@@ -1208,241 +1272,242 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   const priceStr = Number.isFinite(pool.price) ? (pool.price > 1000 ? fmt(pool.price) : pool.price < 0.001 ? pool.price.toExponential(2) : pool.price.toFixed(4)) : "N/A";
 
   return (
-    <div className="flex flex-col gap-3">
+    <div>
       {/* Header */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-        <button onClick={onBack} className="font-family-ThaleahFat text-peach-300 cursor-pointer bg-transparent text-base">← BACK</button>
-        <TokenPair t0={pool.token0} t1={pool.token1} size={36} />
-        <div className="min-w-0 flex-1">
-          <h2 className="font-family-ThaleahFat truncate text-2xl tracking-wider text-white sm:text-3xl">
-            {getPoolDisplayInfo(pool.token0).symbol}/{getPoolDisplayInfo(pool.token1).symbol}
-          </h2>
-          <div className="mt-0.5 flex flex-wrap gap-1">
-            <Badge chain="Robinhood Chain" />
-            {pool.token0.sourceChain !== "Robinhood Chain" && (
-              <span className="font-family-ThaleahFat rounded-sm bg-[#3A1F0E] px-1.5 py-px text-sm text-[#C49A6C]">
-                bridged from {pool.token0.sourceChain}
-              </span>
-            )}
-            <span className="font-family-ThaleahFat rounded-sm bg-[#3A1F0E] px-1.5 py-px text-sm text-[#C49A6C]">FEE {(pool.fee / 10000).toFixed(2)}%</span>
-          </div>
-        </div>
+      <button className="backlink" onClick={onBack}>← Back</button>
+      <div className="det-head">
+        <TokenPair t0={pool.token0} t1={pool.token1} size={32} />
+        <h2>
+          {getPoolDisplayInfo(pool.token0).symbol}/{getPoolDisplayInfo(pool.token1).symbol}
+        </h2>
+        <Badge chain="Robinhood Chain" />
+        {pool.token0.sourceChain !== "Robinhood Chain" && (
+          <span className="badge2">bridged from {pool.token0.sourceChain}</span>
+        )}
+        <span className="badge2">Fee {(pool.fee / 10000).toFixed(2)}%</span>
       </div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      <div className="p-grid p-3">
         {[
-          { l: "TVL", v: `$${fmt(pool.tvl)}`, c: "text-peach-500" },
-          { l: "24H VOL", v: pool.vol24h > 0 ? `$${fmt(pool.vol24h)}` : "—", c: "text-white" },
-          { l: "APY", v: pool.feeApy > 0 ? `${pool.feeApy.toFixed(pool.feeApy >= 100 ? 0 : 1)}%` : "—", c: "text-[#6DBB3E]" },
-          { l: "FEE TIER", v: `${(pool.fee / 10000).toFixed(2)}%`, c: "text-[#6DBB3E]" },
-          { l: "PRICE", v: pool.price > 0 ? `$${fmt(pool.price)}` : "—", c: "text-[#6DBB3E]" },
-          { l: "LIQUIDITY", v: BigInt(pool.liquidity) > 0n ? "ACTIVE" : "EMPTY", c: BigInt(pool.liquidity) > 0n ? "text-[#6DBB3E]" : "text-red-400" },
-        ].map((s, i) => (
-          <div key={i} className="relative rounded px-3 py-3 text-center">
-            <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-            <div className="font-family-ThaleahFat text-base tracking-wider text-gray-200">{s.l}</div>
-            <div className={`font-family-ThaleahFat text-2xl ${s.c}`}>{s.v}</div>
+          { l: "TVL", v: `$${fmt(pool.tvl)}`, cls: "" },
+          { l: "24h vol", v: pool.vol24h > 0 ? `$${fmt(pool.vol24h)}` : "—", cls: "" },
+          { l: "APY", v: pool.feeApy > 0 ? `${pool.feeApy.toFixed(pool.feeApy >= 100 ? 0 : 1)}%` : "—", cls: pool.feeApy > 0 ? "pos" : "" },
+          { l: "Fee tier", v: `${(pool.fee / 10000).toFixed(2)}%`, cls: "pos" },
+          { l: "Price", v: pool.price > 0 ? `$${fmt(pool.price)}` : "—", cls: "" },
+          { l: "Liquidity", v: BigInt(pool.liquidity) > 0n ? "ACTIVE" : "EMPTY", cls: BigInt(pool.liquidity) > 0n ? "pos" : "neg" },
+        ].map((s) => (
+          <div key={s.l} className="p-card tight">
+            <div className="sm-lbl">{s.l}</div>
+            <div className={`sm-val mono${s.cls ? " " + s.cls : ""}`}>{s.v}</div>
           </div>
         ))}
       </div>
 
       {/* Pooled amounts */}
-      <div className="grid grid-cols-2 gap-2">
+      <div className="p-grid p-2" style={{ marginTop: 14 }}>
         {[{ tok: pool.token0, reserve: pool.reserve0 }, { tok: pool.token1, reserve: pool.reserve1 }].map((item, i) => {
           const poolDisp = getPoolDisplayInfo(item.tok);
           return (
-            <div key={i} className="relative rounded px-3 py-3">
-              <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-              <div className="flex items-center gap-2">
+            <div key={i} className="p-card tight">
+              <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
                 <TokenIcon token={item.tok} size={24} />
-                <span className="font-family-ThaleahFat text-base text-white">{poolDisp.symbol}</span>
+                <b style={{ fontSize: 14.5 }}>{poolDisp.symbol}</b>
                 <Badge chain="Robinhood Chain" />
               </div>
-              <div className="font-family-ThaleahFat mt-1 text-base text-gray-200">POOLED AMOUNT</div>
-              <div className="font-family-ThaleahFat text-peach-300 text-2xl">{item.reserve}</div>
+              <div className="sm-lbl" style={{ marginTop: 14 }}>Pooled amount</div>
+              <div className="sm-val mono">{item.reserve}</div>
             </div>
           );
         })}
       </div>
 
       {/* Liquidity Distribution Graph */}
-      <div className="relative rounded px-3 py-3">
-        <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-        <div className="mb-2 flex items-center justify-between">
-          <span className="font-family-ThaleahFat text-sm text-[#E8A849]">LIQUIDITY DISTRIBUTION</span>
-          <span className="font-family-ThaleahFat text-peach-300 text-sm">1 {pool.token0.symbol} = {priceStr} {pool.token1.symbol}</span>
+      <div className="p-card" style={{ marginTop: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <h3>Liquidity distribution</h3>
+          <span className="p-mini" style={{ color: "var(--clay)", fontWeight: 700 }}>
+            1 {pool.token0.symbol} = {priceStr} {pool.token1.symbol}
+          </span>
         </div>
         <LiquidityGraph currentTick={currentTick} tickLower={-887272} tickUpper={887272} height={80} price={pool.price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
-        <div className="mt-1.5 flex justify-between">
-          <span className="font-family-ThaleahFat text-sm text-gray-400">MIN: 0</span>
-          <span className="font-family-ThaleahFat text-sm text-[#6DBB3E]">● IN RANGE — FULL</span>
-          <span className="font-family-ThaleahFat text-sm text-gray-400">MAX: ∞</span>
+        <div className="lg-foot">
+          <span>MIN: 0</span>
+          <span className="in">● IN RANGE — FULL</span>
+          <span>MAX: ∞</span>
         </div>
       </div>
 
-      {/* Price */}
-      <div className="relative rounded px-3 py-3">
-        <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-        <div className="flex justify-between">
-          <span className="font-family-ThaleahFat text-lg text-gray-200">PRICE</span>
-          <span className="font-family-ThaleahFat text-peach-300 text-lg">1 {pool.token0.symbol} = {priceStr} {pool.token1.symbol}</span>
+      {/* Price + manage */}
+      <div className="p-grid p-2" style={{ marginTop: 14 }}>
+        <div className="p-card">
+          <h3>Price</h3>
+          <div className="dp mono">1 {pool.token0.symbol} = {priceStr} {pool.token1.symbol}</div>
+        </div>
+        <div className="p-card">
+          <h3>Manage liquidity</h3>
+          <div style={{ marginTop: 12 }}>
+            {!isConnected ? (
+              <button onClick={() => walletCtx?.handleConnectWallet?.()} className="p-btn" style={{ marginTop: 0 }}>
+                Connect wallet
+              </button>
+            ) : txDone ? (
+              <div className="center" style={{ padding: "8px 0" }}>
+                <p className="statline ok" style={{ marginTop: 0 }}>Liquidity added ✓</p>
+                {txHash && (
+                  <a href={`https://robinhoodchain.blockscout.com/tx/${txHash}`} target="_blank" rel="noopener noreferrer" className="linkish" style={{ display: "block", marginTop: 6 }}>
+                    View on explorer →
+                  </a>
+                )}
+                <button onClick={() => { setTxDone(false); setActionTab(null); }} className="linkish" style={{ marginTop: 10 }}>
+                  Done
+                </button>
+              </div>
+            ) : txError ? (
+              <div className="center" style={{ padding: "8px 0" }}>
+                <p className="statline err" style={{ marginTop: 0 }}>Transaction failed ✗</p>
+                <p style={{ margin: "6px 0 0", fontSize: 13, color: "var(--ink-2)", wordBreak: "break-word" }}>{txError.slice(0, 150)}</p>
+                <button onClick={() => setTxError(null)} className="linkish" style={{ marginTop: 10 }}>
+                  Try again
+                </button>
+              </div>
+            ) : actionTab === null ? (
+              <>
+                <div className="act-row">
+                  <button className="act-btn add" onClick={() => router.push("/vault")}>
+                    + Add liquidity
+                  </button>
+                  <button className="act-btn rem" onClick={() => router.push("/vault")}>
+                    − Remove liquidity
+                  </button>
+                </div>
+                <p className="d" style={{ marginTop: 12 }}>
+                  WETH/USDG liquidity is auto-managed by the MoleSwap ALM vault — deposit or exit there.
+                </p>
+              </>
+            ) : (
+              /* Unreachable add-liquidity form (nothing sets actionTab to "add") — logic kept
+                 as-is; not ported to Burrow beyond compiling without the pixel-art assets. */
+              <div className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">
+                <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/20 px-4 py-3">
+                  <span className="font-family-ThaleahFat text-xl tracking-wider text-white">+ ADD LIQUIDITY</span>
+                  <button onClick={() => { setActionTab(null); setAmount0(""); setAmount1(""); }} className="font-family-ThaleahFat cursor-pointer text-lg text-gray-300 hover:text-white">✕</button>
+                </div>
+                <div className="px-4 py-3">
+                  {/* Token 0 input */}
+                  <div className="relative mb-2 rounded px-3 py-2.5">
+                    <div className="mb-1 flex justify-between">
+                      <span className="font-family-ThaleahFat text-lg text-gray-200">{pool.token0.symbol}</span>
+                      <span className={`font-family-ThaleahFat text-lg ${insufficientBalance0 ? "text-red-400" : "text-gray-200"}`}>
+                        BAL: {balance0 !== null ? Number(balance0).toFixed(4) : "..."}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <TokenIcon token={pool.token0} size={28} />
+                      <input type="text" value={amount0} onFocus={() => setInputFocused(0)} onChange={e => updateAmount1FromAmount0(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0"
+                        className="font-family-ThaleahFat w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
+                      {[{ l: "25%", v: 0.25 }, { l: "50%", v: 0.5 }, { l: "MAX", v: 1 }].map(p => (
+                        <button key={p.l} onClick={() => setPercentage0(p.v)} className="font-family-ThaleahFat text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
+                      ))}
+                    </div>
+                    {insufficientBalance0 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-family-ThaleahFat text-xs text-red-400">INSUFFICIENT {pool.token0.symbol} BALANCE</span></div>}
+                  </div>
+
+                  <div className="my-1 flex justify-center"><span className="font-family-ThaleahFat text-2xl text-gray-300">+</span></div>
+
+                  {/* Token 1 input */}
+                  <div className="relative mb-3 rounded px-3 py-2.5">
+                    <div className="mb-1 flex justify-between">
+                      <span className="font-family-ThaleahFat text-lg text-gray-200">{pool.token1.symbol}</span>
+                      <span className={`font-family-ThaleahFat text-lg ${insufficientBalance1 ? "text-red-400" : "text-gray-200"}`}>
+                        BAL: {balance1 !== null ? Number(balance1).toFixed(4) : "..."}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <TokenIcon token={pool.token1} size={28} />
+                      <input type="text" value={amount1} onFocus={() => setInputFocused(1)} onChange={e => updateAmount0FromAmount1(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0"
+                        className="font-family-ThaleahFat w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
+                      {[{ l: "25%", v: 0.25 }, { l: "50%", v: 0.5 }, { l: "MAX", v: 1 }].map(p => (
+                        <button key={p.l} onClick={() => setPercentage1(p.v)} className="font-family-ThaleahFat text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
+                      ))}
+                    </div>
+                    {insufficientBalance1 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-family-ThaleahFat text-xs text-red-400">INSUFFICIENT {pool.token1.symbol} BALANCE</span></div>}
+                  </div>
+
+                  {/* Range selector */}
+                  <div className="relative mb-3 rounded px-3 py-2.5">
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="font-family-ThaleahFat text-lg text-gray-200">SELECT RANGE</span>
+                    </div>
+                    <div className="mb-3 grid grid-cols-2 gap-2">
+                      <button onClick={() => { setRangeMode("full"); setMinPrice(""); setMaxPrice(""); }}
+                        className={`font-family-ThaleahFat cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
+                          rangeMode === "full" ? "border-[#6DBB3E] bg-[#6DBB3E]/10 text-[#6DBB3E]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
+                        }`}>FULL RANGE</button>
+                      <button onClick={() => setRangeMode("custom")}
+                        className={`font-family-ThaleahFat cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
+                          rangeMode === "custom" ? "border-[#FFD47A] bg-[#FFD47A]/10 text-[#FFD47A]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
+                        }`}>CUSTOM RANGE</button>
+                    </div>
+
+                    {rangeMode === "custom" && (
+                      <div className="mb-2 grid grid-cols-2 gap-2">
+                        <div className="rounded border-2 border-[#3A1F0E] bg-black/20 px-3 py-2">
+                          <div className="font-family-ThaleahFat mb-1 text-sm text-gray-300">MIN PRICE</div>
+                          <input type="text" value={minPrice} onChange={e => setMinPrice(e.target.value.replace(/[^0-9.]/g, ""))}
+                            placeholder="0" className="font-family-ThaleahFat w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
+                          <div className="font-family-ThaleahFat text-sm text-gray-400">{pool.token1.symbol} per {pool.token0.symbol}</div>
+                        </div>
+                        <div className="rounded border-2 border-[#3A1F0E] bg-black/20 px-3 py-2">
+                          <div className="font-family-ThaleahFat mb-1 text-sm text-gray-300">MAX PRICE</div>
+                          <input type="text" value={maxPrice} onChange={e => setMaxPrice(e.target.value.replace(/[^0-9.]/g, ""))}
+                            placeholder="∞" className="font-family-ThaleahFat w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
+                          <div className="font-family-ThaleahFat text-sm text-gray-400">{pool.token1.symbol} per {pool.token0.symbol}</div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="mb-1.5 flex justify-between">
+                      <span className="font-family-ThaleahFat text-sm text-[#E8A849]">YOUR RANGE</span>
+                      <span className={`font-family-ThaleahFat text-sm ${rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"}`}>
+                        {rangeMode === "full" ? "● FULL RANGE" : "◆ CUSTOM"}
+                      </span>
+                    </div>
+                    <LiquidityGraph currentTick={currentTick} tickLower={selectedTickLower} tickUpper={selectedTickUpper} height={36} price={pool.price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
+                  </div>
+
+                  {/* Info rows */}
+                  <div className="relative mb-3 rounded px-3 py-2">
+                    {[
+                      ["PRICE", `1 ${pool.token0.symbol} = ${pool.price > 0 ? pool.price.toFixed(4) : "N/A"} ${pool.token1.symbol}`, "text-peach-300"],
+                      ["FEE TIER", `${(pool.fee / 10000).toFixed(2)}%`, "text-peach-300"],
+                      ["RANGE", rangeMode === "full" ? "FULL RANGE" : `${minPrice || "0"} — ${maxPrice || "∞"} ${pool.token1.symbol}`, rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"],
+                      ["SLIPPAGE", "0.5%", "text-gray-200"],
+                      ["ON-CHAIN", pool.active ? "LIVE ✓" : "NO LIQUIDITY", pool.active ? "text-[#6DBB3E]" : "text-red-400"],
+                    ].map(([k, v, c]) => (
+                      <div key={k} className="flex justify-between py-0.5">
+                        <span className="font-family-ThaleahFat text-base text-gray-200">{k}</span>
+                        <span className={`font-family-ThaleahFat text-base ${c || "text-peach-300"}`}>{v}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    onClick={missingToken ? () => router.push(getMissingTokenSwapUrl(missingToken)) : handleAddLiquidity}
+                    disabled={!missingToken && !canSubmit}
+                    className={`font-family-ThaleahFat w-full cursor-pointer rounded-lg px-6 py-3 text-xl tracking-wider transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 ${
+                      missingToken
+                        ? "bg-peach-500 text-black shadow-[0px_-4px_0px_0px_#C97E00_inset,0px_4px_0px_0px_rgba(255,212,122,0.6)_inset]"
+                        : "bg-[#6DBB3E] text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset]"
+                    }`}>
+                    {getButtonLabel()}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-
-      {/* Actions */}
-      {!isConnected ? (
-        <button onClick={() => walletCtx?.handleConnectWallet?.()} className="font-family-ThaleahFat bg-peach-500 border-3 w-full cursor-pointer rounded-lg border-[#523525] px-8 py-3 text-xl tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.02]">
-          CONNECT WALLET
-        </button>
-      ) : txDone ? (
-        <div className="py-4 text-center">
-          <p className="font-family-ThaleahFat text-2xl text-[#6DBB3E]">LIQUIDITY ADDED ✓</p>
-          {txHash && <a href={`https://robinhoodchain.blockscout.com/tx/${txHash}`} target="_blank" rel="noopener noreferrer" className="font-family-ThaleahFat text-peach-300 mt-1 block text-base underline">VIEW ON EXPLORER →</a>}
-          <button onClick={() => { setTxDone(false); setActionTab(null); }} className="font-family-ThaleahFat text-peach-300 mt-3 cursor-pointer text-base underline">DONE</button>
-        </div>
-      ) : txError ? (
-        <div className="py-4 text-center">
-          <p className="font-family-ThaleahFat text-xl text-red-400">TRANSACTION FAILED ✗</p>
-          <p className="font-family-ThaleahFat mt-1 break-words text-base text-gray-200">{txError.slice(0, 150)}</p>
-          <button onClick={() => setTxError(null)} className="font-family-ThaleahFat text-peach-300 mt-2 cursor-pointer text-base underline">TRY AGAIN</button>
-        </div>
-      ) : actionTab === null ? (
-        <div className="flex flex-col gap-2">
-          <div className="flex gap-2">
-            <button onClick={() => router.push("/vault")} className="font-family-ThaleahFat flex-1 cursor-pointer rounded-lg bg-[#6DBB3E] px-6 py-3 text-xl tracking-wider text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset] transition-all hover:scale-[1.01]">
-              + ADD LIQUIDITY
-            </button>
-            <button onClick={() => router.push("/vault")} className="font-family-ThaleahFat bg-peach-500 flex-1 cursor-pointer rounded-lg px-6 py-3 text-xl tracking-wider text-black shadow-[0px_-4px_0px_0px_#C97E00_inset,0px_4px_0px_0px_rgba(255,212,122,0.6)_inset] transition-all hover:scale-[1.01]">
-              − REMOVE LIQUIDITY
-            </button>
-          </div>
-          <p className="font-family-ThaleahFat text-center text-xs tracking-wider text-gray-400">
-            WETH/USDG liquidity is auto-managed by the MoleSwap ALM vault — deposit or exit there.
-          </p>
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">
-          <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/20 px-4 py-3">
-            <span className="font-family-ThaleahFat text-xl tracking-wider text-white">+ ADD LIQUIDITY</span>
-            <button onClick={() => { setActionTab(null); setAmount0(""); setAmount1(""); }} className="font-family-ThaleahFat cursor-pointer text-lg text-gray-300 hover:text-white">✕</button>
-          </div>
-          <div className="px-4 py-3">
-            {/* Token 0 input */}
-            <div className="relative mb-2 rounded px-3 py-2.5">
-              <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-              <div className="mb-1 flex justify-between">
-                <span className="font-family-ThaleahFat text-lg text-gray-200">{pool.token0.symbol}</span>
-                <span className={`font-family-ThaleahFat text-lg ${insufficientBalance0 ? "text-red-400" : "text-gray-200"}`}>
-                  BAL: {balance0 !== null ? Number(balance0).toFixed(4) : "..."}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <TokenIcon token={pool.token0} size={28} />
-                <input type="text" value={amount0} onFocus={() => setInputFocused(0)} onChange={e => updateAmount1FromAmount0(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0"
-                  className="font-family-ThaleahFat w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
-                {[{ l: "25%", v: 0.25 }, { l: "50%", v: 0.5 }, { l: "MAX", v: 1 }].map(p => (
-                  <button key={p.l} onClick={() => setPercentage0(p.v)} className="font-family-ThaleahFat text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
-                ))}
-              </div>
-              {insufficientBalance0 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-family-ThaleahFat text-xs text-red-400">INSUFFICIENT {pool.token0.symbol} BALANCE</span></div>}
-            </div>
-
-            <div className="my-1 flex justify-center"><span className="font-family-ThaleahFat text-2xl text-gray-300">+</span></div>
-
-            {/* Token 1 input */}
-            <div className="relative mb-3 rounded px-3 py-2.5">
-              <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-              <div className="mb-1 flex justify-between">
-                <span className="font-family-ThaleahFat text-lg text-gray-200">{pool.token1.symbol}</span>
-                <span className={`font-family-ThaleahFat text-lg ${insufficientBalance1 ? "text-red-400" : "text-gray-200"}`}>
-                  BAL: {balance1 !== null ? Number(balance1).toFixed(4) : "..."}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <TokenIcon token={pool.token1} size={28} />
-                <input type="text" value={amount1} onFocus={() => setInputFocused(1)} onChange={e => updateAmount0FromAmount1(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0"
-                  className="font-family-ThaleahFat w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
-                {[{ l: "25%", v: 0.25 }, { l: "50%", v: 0.5 }, { l: "MAX", v: 1 }].map(p => (
-                  <button key={p.l} onClick={() => setPercentage1(p.v)} className="font-family-ThaleahFat text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
-                ))}
-              </div>
-              {insufficientBalance1 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-family-ThaleahFat text-xs text-red-400">INSUFFICIENT {pool.token1.symbol} BALANCE</span></div>}
-            </div>
-
-            {/* Range selector */}
-            <div className="relative mb-3 rounded px-3 py-2.5">
-              <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-              <div className="mb-2 flex items-center justify-between">
-                <span className="font-family-ThaleahFat text-lg text-gray-200">SELECT RANGE</span>
-              </div>
-              <div className="mb-3 grid grid-cols-2 gap-2">
-                <button onClick={() => { setRangeMode("full"); setMinPrice(""); setMaxPrice(""); }}
-                  className={`font-family-ThaleahFat cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
-                    rangeMode === "full" ? "border-[#6DBB3E] bg-[#6DBB3E]/10 text-[#6DBB3E]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
-                  }`}>FULL RANGE</button>
-                <button onClick={() => setRangeMode("custom")}
-                  className={`font-family-ThaleahFat cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
-                    rangeMode === "custom" ? "border-[#FFD47A] bg-[#FFD47A]/10 text-[#FFD47A]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
-                  }`}>CUSTOM RANGE</button>
-              </div>
-
-              {rangeMode === "custom" && (
-                <div className="mb-2 grid grid-cols-2 gap-2">
-                  <div className="rounded border-2 border-[#3A1F0E] bg-black/20 px-3 py-2">
-                    <div className="font-family-ThaleahFat mb-1 text-sm text-gray-300">MIN PRICE</div>
-                    <input type="text" value={minPrice} onChange={e => setMinPrice(e.target.value.replace(/[^0-9.]/g, ""))}
-                      placeholder="0" className="font-family-ThaleahFat w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
-                    <div className="font-family-ThaleahFat text-sm text-gray-400">{pool.token1.symbol} per {pool.token0.symbol}</div>
-                  </div>
-                  <div className="rounded border-2 border-[#3A1F0E] bg-black/20 px-3 py-2">
-                    <div className="font-family-ThaleahFat mb-1 text-sm text-gray-300">MAX PRICE</div>
-                    <input type="text" value={maxPrice} onChange={e => setMaxPrice(e.target.value.replace(/[^0-9.]/g, ""))}
-                      placeholder="∞" className="font-family-ThaleahFat w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
-                    <div className="font-family-ThaleahFat text-sm text-gray-400">{pool.token1.symbol} per {pool.token0.symbol}</div>
-                  </div>
-                </div>
-              )}
-
-              <div className="mb-1.5 flex justify-between">
-                <span className="font-family-ThaleahFat text-sm text-[#E8A849]">YOUR RANGE</span>
-                <span className={`font-family-ThaleahFat text-sm ${rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"}`}>
-                  {rangeMode === "full" ? "● FULL RANGE" : "◆ CUSTOM"}
-                </span>
-              </div>
-              <LiquidityGraph currentTick={currentTick} tickLower={selectedTickLower} tickUpper={selectedTickUpper} height={36} price={pool.price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
-            </div>
-
-            {/* Info rows */}
-            <div className="relative mb-3 rounded px-3 py-2">
-              <Image src="/quest/header-quest-bg.png" alt="" width={200} height={200} className="absolute inset-0 z-[-1] h-full w-full rounded" />
-              {[
-                ["PRICE", `1 ${pool.token0.symbol} = ${pool.price > 0 ? pool.price.toFixed(4) : "N/A"} ${pool.token1.symbol}`, "text-peach-300"],
-                ["FEE TIER", `${(pool.fee / 10000).toFixed(2)}%`, "text-peach-300"],
-                ["RANGE", rangeMode === "full" ? "FULL RANGE" : `${minPrice || "0"} — ${maxPrice || "∞"} ${pool.token1.symbol}`, rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"],
-                ["SLIPPAGE", "0.5%", "text-gray-200"],
-                ["ON-CHAIN", pool.active ? "LIVE ✓" : "NO LIQUIDITY", pool.active ? "text-[#6DBB3E]" : "text-red-400"],
-              ].map(([k, v, c]) => (
-                <div key={k} className="flex justify-between py-0.5">
-                  <span className="font-family-ThaleahFat text-base text-gray-200">{k}</span>
-                  <span className={`font-family-ThaleahFat text-base ${c || "text-peach-300"}`}>{v}</span>
-                </div>
-              ))}
-            </div>
-
-            <button
-              onClick={missingToken ? () => router.push(getMissingTokenSwapUrl(missingToken)) : handleAddLiquidity}
-              disabled={!missingToken && !canSubmit}
-              className={`font-family-ThaleahFat w-full cursor-pointer rounded-lg px-6 py-3 text-xl tracking-wider transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 ${
-                missingToken
-                  ? "bg-peach-500 text-black shadow-[0px_-4px_0px_0px_#C97E00_inset,0px_4px_0px_0px_rgba(255,212,122,0.6)_inset]"
-                  : "bg-[#6DBB3E] text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset]"
-              }`}>
-              {getButtonLabel()}
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

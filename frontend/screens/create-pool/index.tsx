@@ -2,8 +2,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { createPublicClient, http, type Address } from "viem";
-import { BackgroundImage, NavBar } from "../shared";
-import { ConnectWalletButton } from "@/components/ConnectWalletButton";
+import { BackgroundImage, NavBar, MoleMascot } from "../shared";
 import { useWallet } from "@/lib/chain/provider";
 import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { ROBINHOOD_RPC_URL, MOLE_ADDRESSES } from "@/lib/mole/chain";
@@ -97,92 +96,147 @@ export default function CreatePoolPage() {
   };
 
   return (
-    <div className="relative flex min-h-screen w-full flex-col items-center gap-2 sm:gap-4">
+    <>
       <BackgroundImage isLoading={false} />
-      <div className="relative z-50 mx-auto mt-2 flex w-full flex-col-reverse gap-2 px-2 sm:mt-4 sm:flex-row sm:items-center sm:gap-4 sm:px-4">
-        <div className="flex-1"><NavBar /></div>
-        <div className="bg-peach-500 font-family-ThaleahFat shrink-0 rounded-lg border-3 border-[#523525] px-3 py-2 text-base tracking-wider text-black shadow-[0px_-6px_0px_0px_#C97E00_inset,0px_7.5px_0px_0px_rgba(255,212,122,0.6)_inset] sm:py-3 sm:text-2xl">
-          <ConnectWalletButton />
-        </div>
-      </div>
+      <NavBar />
 
-      <div className="relative z-20 mt-4 mb-[10%] flex w-full max-w-xl flex-1 flex-col items-center gap-4 px-3 sm:mt-10">
-        <h1 className="text-peach-300 text-shadow-header font-family-ThaleahFat text-3xl font-bold tracking-widest uppercase sm:text-5xl">
-          CREATE POOL
-        </h1>
-        <p className="font-family-ThaleahFat text-center text-sm tracking-wider text-gray-200">
-          OPERATOR ONLY — MINT A NEW MOLEHOOK v4 POOL AND ADMIT IT TO THE VAULT
-        </p>
+      <main>
+        <header className="hero">
+          <span className="badge">
+            <span className="dot" />
+            Operator console · MoleHook v4
+          </span>
+          <h1>Create pool.</h1>
+          <p className="sub">Operator only — mint a new MoleHook v4 pool and admit it to the vault.</p>
+          <MoleMascot />
+        </header>
 
-        {!isConnected ? (
-          <div className="bg-ground w-full rounded-2xl border-3 border-[#523525] p-6 text-center">
-            <p className="font-family-ThaleahFat tracking-wider text-gray-200">Connect the poolCreator wallet to create a pool.</p>
-          </div>
-        ) : !isOperator ? (
-          <div className="bg-ground w-full rounded-2xl border-3 border-[#7a2f2f] p-6 text-center">
-            <p className="font-family-ThaleahFat tracking-wider text-red-300">
-              This wallet is not the poolCreator. Pool creation is gated on-chain to {POOL_CREATOR.slice(0, 10)}… — connect that key.
-            </p>
-          </div>
-        ) : (
-          <div className="bg-ground w-full rounded-2xl border-3 border-[#523525] p-5 shadow-[6px_6px_0_#000]">
-            {[
-              { label: "TOKEN A (address)", val: tokenA, set: (v: string) => { setTokenA(v); loadMeta(v, setMetaA); }, meta: metaA },
-              { label: "TOKEN B (address)", val: tokenB, set: (v: string) => { setTokenB(v); loadMeta(v, setMetaB); }, meta: metaB },
-            ].map((f) => (
-              <div key={f.label} className="mb-3">
-                <div className="mb-1 flex justify-between">
-                  <span className="font-family-ThaleahFat text-xs tracking-wider text-peach-300">{f.label}</span>
-                  {f.meta && <span className="font-family-ThaleahFat text-xs tracking-wider text-yellow-200">{f.meta.symbol} · {f.meta.decimals} dec</span>}
-                </div>
-                <input value={f.val} onChange={(e) => f.set(e.target.value.trim())} placeholder="0x…"
-                  className="font-family-ThaleahFat w-full rounded-xl border-2 border-[#523525] bg-[#2a1c12] px-3 py-2 font-mono text-sm text-white outline-none" />
-              </div>
-            ))}
-            <div className="mb-3 grid grid-cols-2 gap-3">
-              <div>
-                <div className="font-family-ThaleahFat mb-1 text-xs tracking-wider text-peach-300">INITIAL PRICE (B per A)</div>
-                <input value={priceBperA} onChange={(e) => setPriceBperA(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0" inputMode="decimal"
-                  className="font-family-ThaleahFat w-full rounded-xl border-2 border-[#523525] bg-[#2a1c12] px-3 py-2 text-lg text-white outline-none" />
-              </div>
-              <div>
-                <div className="font-family-ThaleahFat mb-1 text-xs tracking-wider text-peach-300">TICK SPACING</div>
-                <input value={tickSpacing} onChange={(e) => setTickSpacing(e.target.value.replace(/[^0-9]/g, ""))}
-                  className="font-family-ThaleahFat w-full rounded-xl border-2 border-[#523525] bg-[#2a1c12] px-3 py-2 text-lg text-white outline-none" />
-              </div>
+        <section style={{ maxWidth: 640 }}>
+          {!isConnected ? (
+            /* gate 1: not connected */
+            <div className="p-card">
+              <h3>Operator access</h3>
+              <p className="d">Connect the poolCreator wallet to create a pool.</p>
             </div>
+          ) : !isOperator ? (
+            /* gate 2: connected but wrong wallet */
+            <div className="p-card gate-wrong">
+              <h3>Wrong wallet</h3>
+              <p className="d">
+                This wallet is not the poolCreator. Pool creation is gated on-chain to {POOL_CREATOR.slice(0, 10)}… — connect that key.
+              </p>
+            </div>
+          ) : (
+            /* operator form */
+            <div className="p-card">
+              <h3>New MoleHook v4 pool</h3>
+              <p className="d">Initialize the pool, whitelist it in the vault, and register it with the aggregator — one flow.</p>
 
-            {preview && !(preview as any).error && (
-              <div className="mb-3 rounded-xl border-2 border-[#5a4a2a] bg-[#2a2213] px-4 py-3 font-mono text-xs text-gray-200">
-                <div>currency0: {(preview as any).sym0} ({(preview as any).ord.currency0.slice(0, 10)}…)</div>
-                <div>currency1: {(preview as any).sym1} ({(preview as any).ord.currency1.slice(0, 10)}…)</div>
-                <div>price c1/c0: {(preview as any).price0to1}</div>
-                <div className="break-all">poolId: {(preview as any).poolId}</div>
+              {[
+                { label: "Token A (address)", val: tokenA, set: (v: string) => { setTokenA(v); loadMeta(v, setMetaA); }, meta: metaA },
+                { label: "Token B (address)", val: tokenB, set: (v: string) => { setTokenB(v); loadMeta(v, setMetaB); }, meta: metaB },
+              ].map((f, i) => (
+                <div key={f.label} className="p-field" style={{ marginTop: i === 0 ? 14 : 10 }}>
+                  <div className="lbl">
+                    <span>{f.label}</span>
+                    {f.meta && <span className="meta">{f.meta.symbol} · {f.meta.decimals} dec</span>}
+                  </div>
+                  <div className="amt">
+                    <input
+                      className="big addr-in"
+                      value={f.val}
+                      onChange={(e) => f.set(e.target.value.trim())}
+                      placeholder="0x…"
+                      spellCheck={false}
+                      autoComplete="off"
+                      aria-label={f.label}
+                    />
+                  </div>
+                </div>
+              ))}
+
+              <div className="p-grid p-2" style={{ marginTop: 10 }}>
+                <div className="p-field">
+                  <div className="lbl"><span>Initial price (B per A)</span></div>
+                  <div className="amt">
+                    <input
+                      className="big"
+                      value={priceBperA}
+                      onChange={(e) => setPriceBperA(e.target.value.replace(/[^0-9.]/g, ""))}
+                      placeholder="0.0"
+                      inputMode="decimal"
+                      aria-label="Initial price, B per A"
+                    />
+                  </div>
+                </div>
+                <div className="p-field">
+                  <div className="lbl"><span>Tick spacing</span></div>
+                  <div className="amt">
+                    <input
+                      className="big"
+                      value={tickSpacing}
+                      onChange={(e) => setTickSpacing(e.target.value.replace(/[^0-9]/g, ""))}
+                      inputMode="numeric"
+                      aria-label="Tick spacing"
+                    />
+                  </div>
+                </div>
               </div>
-            )}
-            {preview && (preview as any).error && (preview as any).error.length > 0 && (
-              <p className="font-family-ThaleahFat mb-3 text-sm tracking-wider text-red-300">{(preview as any).error}</p>
-            )}
 
-            <button onClick={onCreate} disabled={busy || !preview || !!(preview as any)?.error || !onRH}
-              className="font-family-ThaleahFat w-full cursor-pointer rounded-xl border-3 border-[#3f7d20] bg-[#4e9d2a] px-4 py-3 text-xl font-bold tracking-wider text-white shadow-[0px_4px_0px_#2f6318] transition-all hover:brightness-110 active:translate-y-0.5 disabled:opacity-60">
-              {!onRH ? "SWITCH TO ROBINHOOD" : busy ? "WORKING…" : "CREATE + WHITELIST POOL"}
-            </button>
+              {preview && !(preview as any).error && (
+                <div className="prev mono">
+                  <div>currency0: {(preview as any).sym0} ({(preview as any).ord.currency0.slice(0, 10)}…)</div>
+                  <div>currency1: {(preview as any).sym1} ({(preview as any).ord.currency1.slice(0, 10)}…)</div>
+                  <div>price c1/c0: {(preview as any).price0to1}</div>
+                  <div style={{ wordBreak: "break-all" }}>poolId: {(preview as any).poolId}</div>
+                </div>
+              )}
+              {preview && (preview as any).error && (preview as any).error.length > 0 && (
+                <div className="statline err" style={{ textAlign: "left" }}>{(preview as any).error}</div>
+              )}
 
-            {status && <div className="font-family-ThaleahFat mt-3 text-center text-sm tracking-wider break-all text-peach-300">{status}</div>}
-            {result?.success && (
-              <div className="mt-3 rounded-xl border-2 border-[#3f7d20] bg-[#1e2a13] px-4 py-3 text-xs text-gray-200">
-                <div className="break-all">pool: {result.poolId}</div>
-                <div>initialize: {result.txInit?.slice(0, 14)}… · whitelist: {result.txWhitelist?.slice(0, 14)}…</div>
-                <div>registered for routing: {result.registered ? "yes" : "no (see status)"}</div>
-                <Link href="/vault" className="font-family-ThaleahFat mt-2 inline-block cursor-pointer rounded-lg border-2 border-[#C97E00] bg-[#523525] px-4 py-2 text-sm tracking-wider text-yellow-200">
-                  SEED LIQUIDITY IN VAULT →
-                </Link>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
+              <button className="p-btn up" onClick={onCreate} disabled={busy || !preview || !!(preview as any)?.error || !onRH}>
+                {!onRH ? "Switch to Robinhood" : busy ? "Working…" : "Create + whitelist pool"}
+              </button>
+
+              {status && <div className="statline">{status}</div>}
+              {result?.success && (
+                <div className="okbox">
+                  <div style={{ wordBreak: "break-all" }}>pool: {result.poolId}</div>
+                  <div style={{ marginTop: 6 }}>initialize: {result.txInit?.slice(0, 14)}… · whitelist: {result.txWhitelist?.slice(0, 14)}…</div>
+                  <div style={{ marginTop: 6 }}>registered for routing: {result.registered ? "yes" : "no (see status)"}</div>
+                  <Link href="/vault" className="seed-btn">
+                    Seed liquidity in vault →
+                  </Link>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      </main>
+
+      {/* page: create-pool — from the Burrow prototype */}
+      <style jsx global>{`
+        .addr-in { font-family: var(--font-num) !important; font-size: 15px !important; letter-spacing: 0 !important; }
+        .p-field .lbl .meta { font-family: var(--font-num); color: var(--moss); font-weight: 700; letter-spacing: 0; text-transform: none; }
+        .prev { margin-top: 12px; padding: 12px 14px; border-radius: var(--r-md);
+          background: rgba(255,255,255,.55); border: 1px solid rgba(44,26,12,.12);
+          font-size: 12px; line-height: 1.8; color: var(--ink-2); }
+        .okbox { margin-top: 14px; padding: 13px 15px; border-radius: var(--r-md);
+          background: rgba(47,125,79,.09); border: 1px solid rgba(47,125,79,.35);
+          font-family: var(--font-num); font-size: 12px; line-height: 1.7; color: var(--ink-2); }
+        .seed-btn { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 12px; height: 44px;
+          border-radius: 13px; text-decoration: none; font-family: var(--font-ui); font-weight: 800; font-size: 12.5px;
+          letter-spacing: .06em; text-transform: uppercase;
+          background: linear-gradient(180deg, #ffcd7d, var(--amber)); color: #3d2410;
+          box-shadow: 0 3px 0 #8c4a14, inset 0 1px 0 rgba(255,255,255,.5); }
+        .seed-btn:active { transform: translateY(1px); box-shadow: 0 1px 0 #8c4a14, inset 0 1px 0 rgba(255,255,255,.5); }
+        .p-btn:disabled { opacity: .6; cursor: default; }
+        .p-btn:disabled:active { transform: none; }
+        .p-btn.up { text-transform: uppercase; letter-spacing: .05em; font-size: 14px; }
+        .gate-wrong { border: 1px solid rgba(184,55,31,.5); }
+        .gate-wrong .d { color: var(--rust); }
+      `}</style>
+    </>
   );
 }

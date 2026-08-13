@@ -1,11 +1,8 @@
 "use client";
-import { Button } from "@/components/ui/button";
-import Image from "next/image";
 import React from "react";
 import { useState, useEffect } from "react";
-import { ArrowLeft, ArrowRight, X } from "lucide-react";
-import { LucideIcon } from "lucide-react";
-import { NavBar } from "../shared";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { NavBar, BackgroundImage, MoleMascot } from "../shared";
 import { getQuests } from "@/lib/supabase/api";
 import { getQuestsWithProgress, progressQuestsForAction, type QuestWithProgress } from "@/lib/supabase/quests";
 import { useWalletContext, useChainClient, WalletUI } from "@/lib/chain/provider";
@@ -66,78 +63,88 @@ const mockQuests = [
   },
 ];
 
-interface QuestCardProps {
-  icon: LucideIcon;
-  title: string;
-  xp: number;
-  completed?: boolean;
-  className?: string;
-  onClick?: () => void;
+/* page-scoped Burrow styles — lifted from the quests.html prototype */
+const PAGE_CSS = `
+.toolbar { margin-top: 34px; }
+.p-quest { position: relative; }
+.q-click { cursor: pointer; transition: transform 160ms ease; }
+.q-click:hover { transform: scale(1.02); }
+.q-click:active { transform: scale(.99); }
+.q-done {
+  position: absolute; inset: 0; z-index: 2; display: grid; place-items: center;
+  border-radius: var(--r-lg); background: rgba(20,10,4,.55); color: #fdf4e6;
+  font-size: 14px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase;
 }
+.p-pill.legendary { background: rgba(213,72,236,.13); color: #b13ac5; }
+.p-quest .prog .p-pill { flex: none; }
+.seg button[aria-selected="true"] {
+  background: linear-gradient(180deg, #ffcd7d, var(--amber));
+  box-shadow: 0 2px 0 rgba(140,74,20,.6), inset 0 1px 0 rgba(255,255,255,.55);
+}
+
+/* fullscreen whack-a-mole overlay — square Burrow panel on a dark scrim */
+.game-scrim {
+  position: fixed; inset: 0; z-index: 300; display: grid; place-items: center; padding: 18px;
+  background: rgba(20,10,4,.7);
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+}
+.game-panel {
+  position: relative; width: min(90vw, 90vh, 640px); aspect-ratio: 1; overflow: hidden;
+  border-radius: var(--r-xl);
+  background: linear-gradient(180deg, var(--cream), #f6e9d3);
+  color: var(--ink); border: 1px solid rgba(255,255,255,.6);
+  box-shadow: var(--sh-3), var(--sh-in);
+  will-change: transform;
+}
+.game-mount { position: absolute; inset: 0; }
+.game-x {
+  position: absolute; top: 12px; right: 12px; z-index: 10; width: 40px; height: 40px;
+  border: 0; border-radius: 50%; cursor: pointer; font: inherit; font-size: 15px; font-weight: 800;
+  background: rgba(44,26,12,.88); color: #ffe6c4;
+  box-shadow: 0 2px 0 rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.18);
+  transition: transform 140ms ease;
+}
+.game-x:hover { transform: scale(1.1); }
+`;
+
+/* per-quest-type emoji — replaces the pixel quest-card PNGs (render-only) */
+const questEmoji = (q: any) => {
+  const title = (q.title || q.alt || "").toLowerCase();
+  const isSocial = q.category === "social" || q.quest_type === "social";
+  const isGame = q.category === "game" || q.quest_type === "game";
+  if (isGame) return "🔨";
+  if (isSocial) {
+    if (q.action_type === "twitter_follow" || title.includes("follow")) return "🐦";
+    if (q.action_type === "twitter_like_rt" || title.includes("like")) return "❤️";
+    if (title.includes("referral") || title.includes("share")) return "📣";
+    return "🕳️";
+  }
+  if (title.includes("swap")) return "🔀";
+  if (title.includes("dca")) return "🔁";
+  if (title.includes("limit")) return "📉";
+  if (title.includes("vault") || title.includes("liquidity")) return "💧";
+  if (title.includes("intent") || title.includes("queue")) return "📦";
+  return "📈";
+};
+
+const DIFF_CLS: Record<string, string> = {
+  easy: " pos",
+  medium: "",
+  hard: " neg",
+  legendary: " legendary",
+};
+
 const QuestPage = () => {
   return (
-    <div className="relative flex min-h-screen w-full flex-col items-center gap-4">
+    <>
       <BackgroundImage />
-
-      <div className="relative z-50 mx-auto mt-2 block w-full px-2 sm:mt-4 sm:px-4">
-        <NavBar />
-      </div>
-      <div className="relative z-20 flex w-full flex-1">
-        <QuestCardComponent />
-      </div>
-    </div>
+      <NavBar />
+      <QuestCardComponent />
+    </>
   );
 };
 
 export default QuestPage;
-
-const BackgroundImage = () => {
-  return (
-    <>
-      {/* Gradient Sky Layers */}
-      <div className="fixed inset-0 flex h-[40vh] flex-col">
-        <div className="h-[25%] bg-[#39BBE3]"></div>
-        <div className="h-[25%] bg-[#6ED2F0]"></div>
-        <div className="h-[25%] bg-[#AEE5F5]"></div>
-        <div className="h-[25%] bg-[#E9F9FE]"></div>
-      </div>
-      <div className="fixed inset-0 z-10 max-md:hidden">
-        {/* clouds right top  */}
-        <Image
-          src="/profile/c2.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="animate-float-left absolute top-5 right-25 w-[120px] object-cover"
-        />
-        {/* clouds Center  */}
-        <Image
-          src="/profile/c3.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="animate-float-right absolute top-[10%] left-[40%] w-[120px] object-cover"
-        />
-      </div>
-      {/*   GRASS  */}
-      <Image
-        src="/profile/Grass.png"
-        alt="Profile"
-        width={200}
-        height={200}
-        className="fixed bottom-[32vh] z-10 h-full max-h-[15vh] w-full object-cover sm:bottom-[35vh] sm:max-h-[20vh]"
-      />
-      {/*   BRICK */}
-      <Image
-        src="/profile/profile-brick.png"
-        alt="Profile"
-        width={200}
-        height={200}
-        className="fixed bottom-0 h-full max-h-[45vh] w-full object-cover sm:max-h-[50vh]"
-      />
-    </>
-  );
-};
 
 export const QuestCardComponent = () => {
   const [currentPage, setCurrentPage] = useState(1);
@@ -175,6 +182,7 @@ export const QuestCardComponent = () => {
         id: q.id,
         image: q.image_url || `/quest/main-quest-${q.sort_order}.png`,
         alt: q.title || `Quest ${q.sort_order}`,
+        description: q.description || "",
         quest_type: q.quest_type,
         category: q.category || q.quest_type,
         progress: q.progress || 0,
@@ -199,6 +207,7 @@ export const QuestCardComponent = () => {
           id: q.id,
           image: q.image_url || `/quest/main-quest-${q.sort_order}.png`,
           alt: q.title || `Quest ${q.sort_order}`,
+          description: q.description || "",
           quest_type: q.quest_type,
         }));
         setAllQuests(mapped);
@@ -282,163 +291,161 @@ export const QuestCardComponent = () => {
       verifySocialQuest(quest.id);
     }
   };
-  const tabClass = (tab: string) =>
-    `font-family-ThaleahFat text-shadow-black px-2 rounded-full text-sm sm:px-4 sm:text-3xl transition-colors duration-150 cursor-pointer ${
-      activeTab === tab
-        ? "bg-ground-button border-4 border-ground-button-border text-peach-400"
-        : "text-gray-400 hover:text-yellow-200"
-    }`;
-  return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-1 sm:px-2 md:p-6">
-      {/* Header */}
-      <div className="relative top-[40px] z-10 mx-auto w-[85%] rounded-lg px-4 py-3 text-center sm:w-[75%] sm:px-6 sm:py-4">
-        <h1 className="text-peach-300 text-shadow-header font-family-ThaleahFat text-2xl font-bold tracking-widest uppercase sm:text-5xl">
-          Quests
-        </h1>
-        <Image
-          src="/quest/header-quest-bg.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="absolute inset-0 left-0 z-[-1] h-full w-full"
-        />
-      </div>
 
-      {/* Main Quests Section */}
-      <div className="relative mb-6 h-full">
-        <Image
-          src="/quest/Quest-BG.png"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="absolute inset-0 z-0 h-full w-full object-fill"
-        />
-        <div className="relative z-50 mt-12 block space-x-4 px-4 pt-3 text-center">
+  return (
+    <div className="w-full">
+      <style>{PAGE_CSS}</style>
+
+      {/* Hero */}
+      <header className="hero">
+        <span className="badge"><span className="dot" />Season 2 · quest board</span>
+        <h1>Quests.</h1>
+        <p className="sub">
+          Social shout-outs, dapp milestones and arcade rounds — every quest pays XP
+          the moment the mole sees you do it. Completed cards stay completed.
+        </p>
+        <MoleMascot />
+      </header>
+
+      {/* Tabs */}
+      <div className="toolbar">
+        <div className="seg" role="tablist" aria-label="Quest categories">
           <button
-            className={tabClass("social")}
+            role="tab"
+            aria-selected={activeTab === "social"}
             onClick={() => setActiveTab("social")}
           >
-            SOCIAL
+            Social
           </button>
           <button
-            className={tabClass("dapp")}
+            role="tab"
+            aria-selected={activeTab === "dapp"}
             onClick={() => setActiveTab("dapp")}
           >
-            DAPP QUESTS
+            Dapp quests
           </button>
           <button
-            className={tabClass("game")}
+            role="tab"
+            aria-selected={activeTab === "game"}
             onClick={() => setActiveTab("game")}
           >
-            GAME QUESTS
+            Game quests
           </button>
         </div>
+      </div>
 
-        {/* Quest Grid */}
-        <div className="relative mb-6 grid grid-cols-1 gap-2 p-2 sm:gap-4 sm:p-4 md:grid-cols-2">
-          {currentQuests.map((quest: any) => {
-            const isSocial = quest.category === "social" || quest.quest_type === "social";
-            const isGame = quest.category === "game" || quest.quest_type === "game";
-            const tweetId = quest.action_params?.tweetId;
-            const getClickUrl = () => {
-              if (quest.is_completed) return null;
-              if (isGame) return null;
-              if (quest.action_type === "twitter_follow") return quest.action_params?.url || `https://x.com/intent/follow?screen_name=${quest.action_params?.handle?.replace("@", "")}`;
-              if (quest.action_type === "twitter_like_rt" && tweetId) return `https://x.com/intent/like?tweet_id=${tweetId}`;
-              if (quest.action_params?.url) return quest.action_params.url;
-              return null;
-            };
-            return (
-              <div
-                key={quest.id}
-                className="group relative cursor-pointer"
-                onClick={() => {
-                  if (isGame && !quest.is_completed) {
-                    setGameXp(0);
-                    gameQuestTriggered.current = false;
-                    setShowGame(true);
-                    return;
-                  }
-                  const url = getClickUrl();
-                  if (url) window.open(url, "_blank", "noopener,noreferrer");
-                  handleQuestClick(quest);
-                }}
-              >
-                <Image
-                  src={quest.image}
-                  alt={quest.alt}
-                  width={403}
-                  height={92}
-                  className="w-full transition-all group-hover:scale-[1.02]"
-                />
-                {quest.is_completed && (
-                  <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/50">
-                    <span className="font-family-ThaleahFat text-peach-300 text-lg tracking-wider sm:text-2xl">COMPLETED</span>
-                  </div>
-                )}
+      {/* Quest Grid */}
+      <div className="p-grid p-2">
+        {currentQuests.map((quest: any) => {
+          const isSocial = quest.category === "social" || quest.quest_type === "social";
+          const isGame = quest.category === "game" || quest.quest_type === "game";
+          const tweetId = quest.action_params?.tweetId;
+          const getClickUrl = () => {
+            if (quest.is_completed) return null;
+            if (isGame) return null;
+            if (quest.action_type === "twitter_follow") return quest.action_params?.url || `https://x.com/intent/follow?screen_name=${quest.action_params?.handle?.replace("@", "")}`;
+            if (quest.action_type === "twitter_like_rt" && tweetId) return `https://x.com/intent/like?tweet_id=${tweetId}`;
+            if (quest.action_params?.url) return quest.action_params.url;
+            return null;
+          };
+          return (
+            <div
+              key={quest.id}
+              className={`p-card p-quest${quest.is_completed ? "" : " q-click"}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => {
+                if (isGame && !quest.is_completed) {
+                  setGameXp(0);
+                  gameQuestTriggered.current = false;
+                  setShowGame(true);
+                  return;
+                }
+                const url = getClickUrl();
+                if (url) window.open(url, "_blank", "noopener,noreferrer");
+                handleQuestClick(quest);
+              }}
+            >
+              <div className="ic" aria-hidden="true">{questEmoji(quest)}</div>
+              <div className="body">
+                <div className="top">
+                  <h3>{quest.title || quest.alt}</h3>
+                  <span className="xp">+{(quest.xp_reward || 0).toLocaleString()} XP</span>
+                </div>
+                {quest.description ? <p className="d">{quest.description}</p> : null}
+                <div className="prog">
+                  <span className={`p-pill${DIFF_CLS[quest.difficulty] ?? ""}`}>
+                    {quest.difficulty || "easy"}
+                  </span>
+                  {(quest.required_count || 1) > 1 && (
+                    <>
+                      <div className="p-bar">
+                        <i
+                          className={quest.is_completed ? "pos" : undefined}
+                          style={{
+                            width: `${Math.min(((quest.progress || 0) / quest.required_count) * 100, 100)}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="n">
+                        {quest.progress || 0} / {quest.required_count}
+                      </span>
+                    </>
+                  )}
+                </div>
               </div>
-            );
-          })}
-        </div>
+              {quest.is_completed && <div className="q-done">Completed</div>}
+            </div>
+          );
+        })}
+      </div>
 
-        {/* Pagination */}
-        <div className="z-30 mb-4 flex flex-col items-center justify-center gap-2 sm:gap-4">
-          <span className="text-peach-400 bg-ground-button z-40 rounded px-3 py-1 text-lg font-bold tracking-wider">
-            {currentPage} of {totalPages}
-          </span>
-          <div className="z-40 flex gap-4">
-            <Button
-              variant="ghost"
-              size="lg"
-              onClick={handlePrevPage}
-              disabled={currentPage === 1}
-              className="text-peach-300 border-ground-button-border bg-ground-button hover:bg-amber-600 hover:text-amber-200"
-            >
-              <ArrowLeft size={20} className="text-2xl font-bold" />
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="lg"
-              onClick={handleNextPage}
-              disabled={currentPage === totalPages}
-              className="text-peach-300 border-ground-button-border bg-ground-button hover:bg-amber-600 hover:text-amber-200"
-            >
-              <ArrowRight size={20} className="text-2xl font-bold" />
-            </Button>
-          </div>
-        </div>
-        <Image
-          src="/quest/mole.gif"
-          alt="Profile"
-          width={200}
-          height={200}
-          className="absolute bottom-[-5%] left-[-5%] w-[150px] object-cover max-sm:hidden"
-        />
+      {/* Pagination */}
+      <div className="pagi">
+        <button
+          onClick={handlePrevPage}
+          disabled={currentPage === 1}
+          aria-label="Previous page"
+        >
+          <ChevronLeft size={15} />
+        </button>
+        <span className="pg">
+          {currentPage} of {totalPages}
+        </span>
+        <button
+          onClick={handleNextPage}
+          disabled={currentPage === totalPages}
+          aria-label="Next page"
+        >
+          <ChevronRight size={15} />
+        </button>
       </div>
 
       {/* Whack-a-Mole Game Modal */}
       {showGame && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/70 p-4">
-          <div className="relative aspect-square w-full max-w-[min(90vw,90vh)] overflow-hidden rounded-2xl border-4 border-[#523525] shadow-[8px_8px_0px_0px_#3E2723]">
+        <div className="game-scrim">
+          <div className="game-panel" role="dialog" aria-label="Whack-a-mole">
             <button
+              className="game-x"
+              aria-label="Close game"
               onClick={() => {
                 setShowGame(false);
                 loadQuests().catch(console.error);
               }}
-              className="absolute top-3 right-3 z-[1000] flex h-10 w-10 cursor-pointer items-center justify-center rounded-full border-2 border-[#523525] bg-[#784834] text-white transition-transform hover:scale-110"
             >
-              <X size={20} />
+              ✕
             </button>
-            <MoleWhack
-              onMoleHit={(xpAmount) => {
-                setGameXp((prev) => prev + xpAmount);
-                if (userId && !gameQuestTriggered.current) {
-                  gameQuestTriggered.current = true;
-                  progressQuestsForAction(userId, "game_play", { game: "whack_a_mole" }).catch(console.error);
-                }
-              }}
-            />
+            <div className="game-mount">
+              <MoleWhack
+                onMoleHit={(xpAmount) => {
+                  setGameXp((prev) => prev + xpAmount);
+                  if (userId && !gameQuestTriggered.current) {
+                    gameQuestTriggered.current = true;
+                    progressQuestsForAction(userId, "game_play", { game: "whack_a_mole" }).catch(console.error);
+                  }
+                }}
+              />
+            </div>
           </div>
         </div>
       )}

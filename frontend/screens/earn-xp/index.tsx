@@ -2,11 +2,9 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { BackgroundImage, NavBar } from "../shared";
-import { ConnectWalletButton } from "@/components/ConnectWalletButton";
+import { BackgroundImage, NavBar, MoleMascot } from "../shared";
 import { FaXTwitter } from "react-icons/fa6";
 import { ChevronLeft, ChevronRight, Gamepad2, Check } from "lucide-react";
-import Image from "next/image";
 import WhackAMoleModal from "@/components/WhackAMoleModal";
 import { authAPI, xpAPI, referralAPI } from "@/lib/api/client";
 
@@ -103,234 +101,121 @@ export default function EarnXpPage() {
   };
 
   return (
-    <div className="relative flex min-h-screen w-full flex-col items-center gap-4">
+    <>
       <BackgroundImage />
+      <NavBar />
 
-      <div className="relative z-20 flex w-full max-w-3xl flex-1 flex-col px-1 sm:p-6 sm:px-2">
-        {/* Header */}
-        <div className="relative top-[20px] z-10 mx-auto flex w-[95%] flex-col items-center justify-center rounded-lg px-2 py-2 text-center sm:top-[40px] sm:w-[85%] sm:px-6 sm:py-4">
-          <h1 className="text-peach-300 font-family-ThaleahFat text-shadow-header text-lg font-bold tracking-widest uppercase sm:text-3xl md:text-5xl">
-            EARN XP
-          </h1>
+      <main>
+        {/* Hero */}
+        <header className="hero">
+          <span className="badge">
+            <span className="dot" />
+            XP program
+          </span>
+          <h1>Earn XP.</h1>
           {user && (
-            <p className="font-family-ThaleahFat mt-2 text-sm text-yellow-300 sm:text-xl md:text-2xl">
-              Total XP: {user.totalXP || 0}
+            <p className="sub">
+              Total XP: <b className="mono">{user.totalXP || 0}</b>
             </p>
           )}
+          <MoleMascot />
+        </header>
 
-          <Image
-            src="/quest/header-quest-bg.png"
-            alt="Header BG"
-            width={200}
-            height={200}
-            className="absolute inset-0 left-0 z-[-1] h-full w-full"
-          />
-        </div>
-
-        {/* Body */}
-        <div className="relative mb-6 block h-full">
-          <Image
-            src="/quest/Quest-BG.png"
-            alt="BG"
-            width={200}
-            height={200}
-            className="absolute inset-0 z-0 h-full w-full object-fill"
-          />
-
-          {/* Earn XP Form */}
-          <div className="relative z-50 mx-auto mt-6 mb-6 grid w-full grid-cols-1 gap-2 p-2 sm:mt-12 sm:w-[85%] sm:gap-4 sm:p-4">
-            <div className="grid grid-cols-1 gap-2 sm:gap-4">
-              {/* Section 1: FOLLOW US ON TWITTER */}
-              <div className="relative z-10 mx-auto w-full rounded-lg px-2 py-2 text-center sm:w-[90%] sm:px-6 sm:py-4">
-                <h2 className="font-family-ThaleahFat mb-2 text-center text-sm text-white sm:mb-3 sm:text-2xl md:text-4xl">
-                  FOLLOW US ON TWITTER
-                </h2>
-                <div className="flex items-center gap-1 sm:gap-3 md:gap-4">
-                  {!xpStats?.stats?.hasFollowed ? (
-                    <>
-                      <button
-                        onClick={handleFollow}
-                        className="relative flex-1 cursor-pointer rounded py-2 text-sm font-bold text-white transition-all hover:scale-105 sm:py-4 sm:text-xl"
-                      >
-                        <div className="font-family-ThaleahFat z-[1] flex items-center justify-center gap-1 text-sm font-thin sm:gap-2 sm:text-xl md:text-2xl">
-                          <FaXTwitter className="z-[1] h-3 w-3 sm:h-5 sm:w-5 md:h-6 md:w-6" />
-                          <span className="z-[1] text-xs text-white sm:text-base">
-                            FOLLOW @MOLESWAP
-                          </span>
-                        </div>
-                        <Image
-                          src="/dapp/connect-wallet.png"
-                          alt="Follow"
-                          width={200}
-                          height={200}
-                          className="absolute inset-0 z-[0] h-full w-full object-fill"
-                        />
-                      </button>
-                      <button
-                        onClick={handleVerifyFollow}
-                        disabled={followLoading || followSuccess}
-                        className="relative flex-1 cursor-pointer rounded py-2 text-sm font-bold text-white transition-all hover:scale-105 disabled:opacity-60 sm:py-4 sm:text-xl"
-                      >
-                        <div className="font-family-ThaleahFat z-[1] flex items-center justify-center gap-1 text-sm font-thin sm:gap-2 sm:text-xl md:text-2xl">
-                          <Check className="z-[1] h-3 w-3 sm:h-5 sm:w-5 md:h-6 md:w-6" />
-                          <span className="z-[1] text-xs text-white sm:text-base">
-                            {followLoading ? "VERIFYING..." : followSuccess ? "VERIFIED!" : "VERIFY"}
-                          </span>
-                        </div>
-                        <Image
-                          src="/dapp/connect-wallet.png"
-                          alt="Verify"
-                          width={200}
-                          height={200}
-                          className="absolute inset-0 z-[0] h-full w-full object-fill"
-                        />
-                      </button>
-                    </>
-                  ) : (
-                    <div className="relative flex-1 rounded py-2 text-sm sm:py-4 sm:text-xl">
-                      <div className="font-family-ThaleahFat z-[1] flex items-center justify-center gap-1 text-sm font-thin text-green-300 sm:gap-2 sm:text-xl md:text-2xl">
-                        <Check className="z-[1] h-3 w-3 sm:h-5 sm:w-5 md:h-6 md:w-6" />
-                        <span className="z-[1] text-xs sm:text-base">
-                          COMPLETED
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  <div className="font-family-ThaleahFat shrink-0 text-xs text-white sm:text-xl md:text-3xl">
-                    +500 XP
-                  </div>
-                </div>
-                {followError && (
-                  <p className="font-family-ThaleahFat mt-2 text-xs text-red-400 sm:text-sm">
-                    {followError}
-                  </p>
-                )}
-                {followSuccess && (
-                  <p className="font-family-ThaleahFat mt-2 text-xs text-green-400 sm:text-sm">
-                    +500 XP earned!
-                  </p>
-                )}
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="BG"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-
-              {/* Section 2: SHARE ON TWITTER */}
-              <div className="relative z-10 mx-auto w-full rounded-lg px-2 py-2 text-center sm:w-[90%] sm:px-6 sm:py-4">
-                <h2 className="font-family-ThaleahFat mb-2 text-center text-sm text-white sm:mb-3 sm:text-2xl md:text-4xl">
-                  SHARE ON TWITTER
-                </h2>
-                <div className="flex items-center gap-1 sm:gap-3 md:gap-4">
-                  <button
-                    onClick={handleShare}
-                    className="relative flex-1 cursor-pointer rounded py-2 text-sm font-bold text-white transition-all hover:scale-105 sm:py-4 sm:text-xl"
-                  >
-                    <div className="font-family-ThaleahFat z-[1] flex items-center justify-center gap-1 text-sm font-thin sm:gap-2 sm:text-xl md:text-2xl">
-                      <FaXTwitter className="z-[1] h-3 w-3 sm:h-5 sm:w-5 md:h-6 md:w-6" />
-                      <span className="z-[1] text-xs text-white sm:text-base">
-                        SHARE TWEET
-                      </span>
-                    </div>
-                    <Image
-                      src="/dapp/connect-wallet.png"
-                      alt="Share"
-                      width={200}
-                      height={200}
-                      className="absolute inset-0 z-[0] h-full w-full object-fill"
-                    />
+        <section className="onb-col">
+          {/* Task 1: Follow us on Twitter */}
+          <div className="p-card task">
+            <div className="task-top">
+              <h3>Follow us on Twitter</h3>
+              <span className="xp">+500 XP</span>
+            </div>
+            <div className="task-btns">
+              {!xpStats?.stats?.hasFollowed ? (
+                <>
+                  <button onClick={handleFollow} className="p-btn">
+                    <FaXTwitter size={15} />
+                    <span>FOLLOW @MOLESWAP</span>
                   </button>
-                  <div className="font-family-ThaleahFat shrink-0 text-xs text-white sm:text-xl md:text-3xl">
-                    +1000 XP
-                  </div>
-                </div>
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="BG"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
-
-              {/* Section 3: PLAY WHACK-A-MOLE */}
-              <div className="relative z-10 mx-auto w-full rounded-lg px-2 py-2 text-center sm:w-[90%] sm:px-6 sm:py-4">
-                <h2 className="font-family-ThaleahFat mb-2 text-center text-sm text-white sm:mb-3 sm:text-2xl md:text-4xl">
-                  PLAY WHACK-A-MOLE
-                </h2>
-                <div className="flex items-center gap-1 sm:gap-3 md:gap-4">
                   <button
-                    onClick={handlePlayWhackAMole}
-                    className="relative flex-1 cursor-pointer rounded py-2 text-sm font-bold text-white transition-all hover:scale-105 sm:py-4 sm:text-xl"
+                    onClick={handleVerifyFollow}
+                    disabled={followLoading || followSuccess}
+                    className="p-btn ghost"
                   >
-                    <div className="font-family-ThaleahFat z-[1] flex items-center justify-center gap-1 text-sm font-thin sm:gap-2 sm:text-xl md:text-2xl">
-                      <Gamepad2 className="z-[1] h-3 w-3 sm:h-5 sm:w-5 md:h-6 md:w-6" />
-                      <span className="z-[1] text-xs text-white sm:text-base">
-                        PLAY GAME
-                      </span>
-                    </div>
-                    <Image
-                      src="/dapp/connect-wallet.png"
-                      alt="Play"
-                      width={200}
-                      height={200}
-                      className="absolute inset-0 z-[0] h-full w-full object-fill"
-                    />
+                    <Check size={16} />
+                    <span>
+                      {followLoading ? "VERIFYING..." : followSuccess ? "VERIFIED!" : "VERIFY"}
+                    </span>
                   </button>
-                  <div className="font-family-ThaleahFat relative flex shrink-0 items-center gap-2 text-xs text-white sm:text-xl md:text-3xl">
-                    {xpStats?.stats?.gameXP >= 1500 ? (
-                      <Image
-                        src="/dapp/Check-mark.svg"
-                        alt="XP"
-                        width={50}
-                        height={50}
-                      />
-                    ) : (
-                      `+${xpStats?.stats?.gameXPRemaining || 1500} XP`
-                    )}
-                  </div>
-                </div>
-                <Image
-                  src="/quest/header-quest-bg.png"
-                  alt="BG"
-                  width={200}
-                  height={200}
-                  className="absolute inset-0 left-0 z-[-1] h-full w-full"
-                />
-              </div>
+                </>
+              ) : (
+                <span className="task-done">
+                  <Check size={16} />
+                  <span>COMPLETED</span>
+                </span>
+              )}
+            </div>
+            {followError && (
+              <p className="statline task-stat err">{followError}</p>
+            )}
+            {followSuccess && (
+              <p className="statline task-stat ok">+500 XP earned!</p>
+            )}
+          </div>
+
+          {/* Task 2: Share on Twitter */}
+          <div className="p-card task">
+            <div className="task-top">
+              <h3>Share on Twitter</h3>
+              <span className="xp">+1000 XP</span>
+            </div>
+            <div className="task-btns">
+              <button onClick={handleShare} className="p-btn">
+                <FaXTwitter size={15} />
+                <span>SHARE TWEET</span>
+              </button>
             </div>
           </div>
 
-          {/* // NAVIGATION ARROWS  */}
-          <button
-            onClick={() => router.push("/waitlist")}
-            className="group absolute bottom-0 left-2 z-50 flex h-6 w-6 cursor-pointer items-center justify-center transition-all hover:scale-110 sm:top-1/2 sm:bottom-auto sm:left-4 sm:h-10 sm:w-10 sm:-translate-y-1/2 md:h-12 md:w-12"
-          >
-            <Image
-              src="/profile/footer-image.svg"
-              alt="Previous"
-              fill
-              className="absolute inset-0 object-contain"
-            />
-            <ChevronLeft className="text-peach-300 group-hover:text-peach-400 relative z-10 h-3 w-3 transition-colors sm:h-5 sm:w-5 md:h-6 md:w-6" />
-          </button>
-          <button
-            onClick={() => router.push("/connect-twitter")}
-            className="group absolute right-2 bottom-0 z-50 flex h-6 w-6 cursor-pointer items-center justify-center transition-all hover:scale-110 sm:top-1/2 sm:right-4 sm:bottom-auto sm:h-10 sm:w-10 sm:-translate-y-1/2 md:h-12 md:w-12"
-          >
-            <Image
-              src="/profile/footer-image.svg"
-              alt="Next"
-              fill
-              className="absolute inset-0 object-contain"
-            />
-            <ChevronRight className="text-peach-300 group-hover:text-peach-400 relative z-10 h-3 w-3 transition-colors sm:h-5 sm:w-5 md:h-6 md:w-6" />
-          </button>
-        </div>
-      </div>
+          {/* Task 3: Play Whack-a-Mole */}
+          <div className="p-card task">
+            <div className="task-top">
+              <h3>Play Whack-a-Mole</h3>
+              <span className="xp">
+                {xpStats?.stats?.gameXP >= 1500 ? (
+                  <span className="maxed">
+                    <Check size={17} />
+                  </span>
+                ) : (
+                  `+${xpStats?.stats?.gameXPRemaining || 1500} XP`
+                )}
+              </span>
+            </div>
+            <div className="task-btns">
+              <button onClick={handlePlayWhackAMole} className="p-btn">
+                <Gamepad2 size={16} />
+                <span>PLAY GAME</span>
+              </button>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      {/* Side navigation arrows */}
+      <button
+        onClick={() => router.push("/waitlist")}
+        className="side-nav left"
+        aria-label="Previous"
+        title="Waitlist"
+      >
+        <ChevronLeft size={20} />
+      </button>
+      <button
+        onClick={() => router.push("/connect-twitter")}
+        className="side-nav right"
+        aria-label="Next"
+        title="Connect Twitter"
+      >
+        <ChevronRight size={20} />
+      </button>
 
       {/* Whack-a-Mole Modal */}
       <WhackAMoleModal
@@ -339,6 +224,38 @@ export default function EarnXpPage() {
         onXpClaimed={handleXpClaimed}
         xpClaimed={xpClaimed}
       />
-    </div>
+
+      <style jsx global>{`
+        .onb-col { max-width: 620px; margin: 0 auto; display: grid; gap: 14px; }
+        .hero .sub b { color: #ffcd7d; font-weight: 700; }
+        .task-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+        .task .xp { font-family: var(--font-num); font-size: 13.5px; font-weight: 700; color: var(--p-accent); flex: none; }
+        .task .xp .maxed { color: var(--moss); display: inline-flex; }
+        .task-btns { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+        .task-btns .p-btn {
+          flex: 1; min-width: 160px; margin-top: 0; height: 48px; font-size: 14px;
+          display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .task-stat { text-align: left; min-height: 0; margin-top: 10px; }
+        .task-done {
+          display: inline-flex; align-items: center; gap: 8px; padding: 12px 2px;
+          color: var(--moss); font-weight: 800; letter-spacing: .05em;
+        }
+        .p-btn:disabled { opacity: .6; cursor: not-allowed; }
+        .side-nav {
+          position: fixed; z-index: 50; top: 50%; width: 46px; height: 46px; margin-top: -23px;
+          border-radius: 50%; display: grid; place-items: center; cursor: pointer; padding: 0; font: inherit;
+          background: linear-gradient(180deg, var(--cream), var(--cream-2)); color: var(--ink-2);
+          border: 1px solid rgba(255,255,255,.6); box-shadow: var(--sh-1), var(--sh-in);
+          transition: transform 150ms ease, color 150ms ease;
+        }
+        .side-nav:hover { transform: scale(1.1); color: var(--clay); }
+        .side-nav.left { left: 14px; }
+        .side-nav.right { right: 14px; }
+        @media (max-width: 760px) {
+          .side-nav { top: auto; margin-top: 0; bottom: 16px; }
+        }
+      `}</style>
+    </>
   );
 }
