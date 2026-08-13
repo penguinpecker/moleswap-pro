@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, POOLS, RH_RPC_URL,
+  CONTRACTS, POOLS, RH_RPC_URL, RH_PUBLIC_RPC_URL,
   POOL_ABI, ERC20_ABI,
   getTokenByAddress,
 } from "@/lib/chain/contracts";
@@ -80,7 +80,7 @@ export async function GET(req: NextRequest) {
     return apiResponse({
       count: pools.length,
       chainId: 4663,
-      rpc: RH_RPC_URL,
+      rpc: RH_PUBLIC_RPC_URL,
       pools,
     });
   } catch (err: any) {

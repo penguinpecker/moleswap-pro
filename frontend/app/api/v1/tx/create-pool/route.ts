@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, RH_RPC_URL, RH_CHAIN_ID,
+  CONTRACTS, RH_RPC_URL, RH_PUBLIC_RPC_URL, RH_CHAIN_ID,
   POSITION_MANAGER_ABI, LIQUIDITY_PROXY_ABI, ERC20_ABI,
   TICK_SPACINGS, MIN_TICK, MAX_TICK,
   getTokenByAddress,
@@ -169,7 +169,7 @@ export async function POST(req: NextRequest) {
       feeTier: `${fee / 10000}%`,
       transactions,
       chainId: RH_CHAIN_ID,
-      rpc: RH_RPC_URL,
+      rpc: RH_PUBLIC_RPC_URL,
       note: "Sign and send transactions sequentially. Wait for each to confirm before sending the next. For new pools, the pool address from createPool must be used in the initialize step.",
     });
   } catch (err: any) {

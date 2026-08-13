@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { encodeFunctionData } from "viem";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import { CONTRACTS, RH_CHAIN_ID, RH_RPC_URL, getTokenByAddress } from "@/lib/chain/contracts";
+import { CONTRACTS, RH_CHAIN_ID, RH_RPC_URL, RH_PUBLIC_RPC_URL, getTokenByAddress } from "@/lib/chain/contracts";
 import { quoteSwap } from "@/lib/aggregator/client";
 import { moleRouterAbi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { loadPoolRowsServer } from "@/lib/aggregator/serverPools";
@@ -118,7 +118,7 @@ export async function POST(req: NextRequest) {
       slippageBps: bps,
       transactions,
       chainId: RH_CHAIN_ID,
-      rpc: RH_RPC_URL,
+      rpc: RH_PUBLIC_RPC_URL,
       note: "Send the approval (if present) first and wait for it to confirm, then send the swap.",
     });
   } catch (err: any) {

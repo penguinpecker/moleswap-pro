@@ -198,9 +198,16 @@ export const TICK_SPACINGS: Record<number, number> = {
 };
 
 // ═══ Chain helpers ═══
+/**
+ * The chain's public endpoint. Safe to hand to anyone.
+ * ALWAYS use this when echoing an RPC back to a caller — never RH_RPC_URL,
+ * which carries our provider key and must not leave the server.
+ */
+export const RH_PUBLIC_RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
+
 export const RH_RPC_URL =
   (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) ||
-  "https://rpc.mainnet.chain.robinhood.com";
+  RH_PUBLIC_RPC_URL;
 export const RH_CHAIN_ID = 4663;
 export const RH_EXPLORER_URL = "https://robinhoodchain.blockscout.com";
 
