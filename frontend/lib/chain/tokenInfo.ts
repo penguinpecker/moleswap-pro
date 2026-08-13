@@ -15,6 +15,14 @@ export interface TokenMarketInfo {
   volume24?: number;
   priceChange24?: number;
   dexUrl?: string;
+  /**
+   * Whether the project has actually filled in its DexScreener listing — a website, socials or a
+   * banner. It proves nothing about the contract, but a token with real backing almost always has
+   * it and a throwaway drainer almost never does, so it is a useful (not sufficient) risk signal.
+   */
+  hasProjectInfo?: boolean;
+  /** Age of the token's deepest pair. Brand-new pairs carry most of the rug risk. */
+  pairCreatedAt?: number;
 }
 
 const DEX = "https://api.dexscreener.com/latest/dex/tokens/";
@@ -65,6 +73,13 @@ export async function fetchTokenInfo(addresses: string[]): Promise<Map<string, T
               volume24: p.volume?.h24,
               priceChange24: p.priceChange?.h24,
               dexUrl: p.url,
+              hasProjectInfo: !!(
+                p.info?.websites?.length ||
+                p.info?.socials?.length ||
+                p.info?.header ||
+                p.info?.openGraph
+              ),
+              pairCreatedAt: p.pairCreatedAt || undefined,
             }
           : null;
         cache.set(a, { at: Date.now(), info });

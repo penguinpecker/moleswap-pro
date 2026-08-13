@@ -703,6 +703,11 @@ nav.tabs { margin-left: auto; margin-right: 4px; }
 @media (max-width: 1150px) {
   nav.tabs { display: none; }
   .burger { display: inline-flex; }
+  /* nav.tabs carries the only `margin-left:auto` in the bar, so hiding it removed the one thing
+     pushing the wallet and burger to the right edge — they collapsed against the brand and left a
+     wide empty gap across the rest of the bar at every width below this breakpoint. The wallet
+     takes over that job whenever the tabs are gone. */
+  #walletSlot { margin-left: auto; }
 }
 .menu-panel[hidden] { display: none; }
 .menu-panel {

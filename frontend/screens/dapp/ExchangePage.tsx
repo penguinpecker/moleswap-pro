@@ -180,9 +180,19 @@ const ExchangeStyles = () => (
     .ctx-row { display: flex; justify-content: space-between; margin: 12px 2px 4px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--p-card-ink-3); }
     .tk-list { max-height: 430px; overflow: auto; margin-top: 4px; }
     .tk-row.sel { background: rgba(240,160,60,.16); }
+    .risk-chip { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+      font-family: var(--font-ui); font-size: 9.5px; font-weight: 800; letter-spacing: .07em;
+      vertical-align: middle; }
+    .risk-chip.caution { background: rgba(240,160,60,.18); color: #8a5a12; border: 1px solid rgba(240,160,60,.45); }
+    .risk-chip.unvetted { background: rgba(200,60,40,.14); color: #a33422; border: 1px solid rgba(200,60,40,.4); }
+    .unvetted-toggle { display: block; width: 100%; margin-top: 8px; padding: 9px; border-radius: 12px;
+      background: rgba(44,26,12,.05); border: 1px dashed rgba(44,26,12,.22); cursor: pointer;
+      font-family: var(--font-ui); font-size: 11.5px; font-weight: 800; letter-spacing: .06em;
+      text-transform: uppercase; color: var(--p-card-ink-3); }
+    .unvetted-toggle:hover { background: rgba(44,26,12,.09); color: var(--p-card-ink-2); }
     .tk-group { padding: 10px 4px 4px; font-size: 10.5px; font-weight: 800; letter-spacing: .1em;
       text-transform: uppercase; color: var(--p-card-ink-3); }
-    .tk-stats { display: flex; gap: 10px; font-size: 10.5px; color: var(--p-card-ink-3); margin-top: 3px; font-family: var(--font-num); flex-wrap: wrap; }
+    .tk-stats { display: flex; gap: 12px; font-size: 12.5px; font-weight: 700; color: var(--p-card-ink-2); margin-top: 5px; font-family: var(--font-num); flex-wrap: wrap; }
     .tk-stats .up { color: var(--moss); } .tk-stats .dn { color: var(--rust); }
     .dexlink { display: inline-block; font-size: 11px; font-weight: 800; color: #2277b8; cursor: pointer; background: none; border: 0; padding: 0; font-family: inherit; }
     .dexlink:hover { text-decoration: underline; }
@@ -282,6 +292,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   const [popularList, setPopularList] = useState<IndexedToken[]>([]);
   // Live market data (logo, mcap, liquidity, dexscreener link) for the visible picker rows.
   const [marketInfo, setMarketInfo] = useState<Map<string, TokenMarketInfo>>(new Map());
+  const [showUnvetted, setShowUnvetted] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -885,6 +896,36 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   // fail with a confusing "no route" instead of telling the user what is actually wrong.
   const sameAsset = !!fromToken && !!toToken && fromToken.toLowerCase() === toToken.toLowerCase();
 
+  /**
+   * Token risk tiering, in the shape Relay and Jumper use: never silently drop a token, but make an
+   * unvetted one look unvetted and make the user opt in to seeing them.
+   *
+   * None of these signals inspect the contract, so none of them prove a token is safe — that is why
+   * the label says "unverified" rather than "safe". What they do reliably catch is the shape of a
+   * throwaway: no pool depth, no project page, minted minutes ago. A real project almost always has
+   * a website or socials on its listing; a drainer deployed to catch one victim almost never does.
+   *
+   * Anything the user already HOLDS is always shown — hiding an asset someone owns would strand it.
+   */
+  const riskOf = (token: any): { tier: "ok" | "caution" | "unvetted"; why: string } => {
+    const mi = marketInfo.get((token.address || "").toLowerCase());
+    const lc = (token.address || "").toLowerCase();
+    const curated = TOKENS.some((t) => t.address?.toLowerCase() === lc);
+    if (curated) return { tier: "ok", why: "" };
+
+    const liq = mi?.liquidityUsd ?? 0;
+    const ageDays = mi?.pairCreatedAt ? (Date.now() - mi.pairCreatedAt) / 86_400_000 : undefined;
+
+    if (!mi) return { tier: "unvetted", why: "No market data — this token has no indexed pair" };
+    if (!mi.hasProjectInfo && liq < 5_000)
+      return { tier: "unvetted", why: "No project info and thin liquidity" };
+    if (liq < 1_000) return { tier: "unvetted", why: "Almost no liquidity — you may not be able to sell" };
+    if (!mi.hasProjectInfo) return { tier: "caution", why: "No website or socials on its listing" };
+    if (ageDays != null && ageDays < 2) return { tier: "caution", why: "Pair is less than 2 days old" };
+    if (liq < 25_000) return { tier: "caution", why: "Low liquidity" };
+    return { tier: "ok", why: "" };
+  };
+
   const handleRecipientAddressBlur = () => {
     if (recipientAddress && !isValidAddress(recipientAddress)) {
       // Reset to wallet address if invalid
@@ -1444,7 +1485,17 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
               <div className="tk-list">
                 {selectedNetwork ? (
                   filteredModalTokens.length > 0 ? (
-                    filteredModalTokens.map((token, idx) => {
+                    filteredModalTokens
+                      .filter((token: any) => {
+                        if (showUnvetted) return true;
+                        const lc = (token.address || "").toLowerCase();
+                        // Held tokens are never hidden: burying an asset someone owns strands it.
+                        if (heldList.some((h) => h.address?.toLowerCase() === lc)) return true;
+                        // A pasted address is an explicit request for that exact token.
+                        if (isAddress(searchQuery.trim())) return true;
+                        return riskOf(token).tier !== "unvetted";
+                      })
+                      .map((token, idx) => {
                       // Token row framing pulls symbol/subtitle from the registry.
                       const tokenInfo = TOKENS.find(
                         (t) => t.address?.toLowerCase() === token.address?.toLowerCase(),
@@ -1473,11 +1524,9 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                       const isHeld = heldSet.has(token.address?.toLowerCase() || "");
                       const prev = filteredModalTokens[idx - 1];
                       const prevHeld = idx > 0 && heldSet.has(prev?.address?.toLowerCase() || "");
-                      const showOwnedHead = isHeld && idx === 0;
                       const showRestHead = !isHeld && (idx === 0 ? false : prevHeld);
                       return (
                         <Fragment key={`${token.address}-${idx}`}>
-                        {showOwnedHead && <div className="tk-group">Your tokens</div>}
                         {showRestHead && <div className="tk-group">All tokens</div>}
                         <button
                           onClick={() => handleSelectToken(token)}
@@ -1487,8 +1536,21 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                           <div style={{ minWidth: 0, flex: 1 }}>
                             <div className="tk-nm">
                               {symbolLabel}{" "}
+                              {(() => {
+                                const r = riskOf(token);
+                                if (r.tier === "ok") return null;
+                                return (
+                                  <span
+                                    className={`risk-chip ${r.tier}`}
+                                    title={r.why}
+                                    aria-label={`Risk: ${r.why}`}
+                                  >
+                                    {r.tier === "unvetted" ? "UNVERIFIED" : "CAUTION"}
+                                  </span>
+                                );
+                              })()}
                               {(token as any).verified && (
-                                <span className="vtick" title="Verified — has real liquidity">✓</span>
+                                <span className="vtick" title="Has real liquidity — not an endorsement">✓</span>
                               )}
                               {searchQuery.trim() && (token as any).verified === false && (
                                 <span style={{ fontSize: "10.5px", color: "#b8860b", fontWeight: 600 }}> · unverified</span>
@@ -1546,6 +1608,14 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                   <div className="p-empty">Select a network first</div>
                 )}
               </div>
+
+              {/* Hidden tokens stay discoverable. Silently dropping them would read as "this token
+                  does not exist", which is worse than showing it behind a deliberate opt-in. */}
+              {selectedNetwork && !isAddress(searchQuery.trim()) && (
+                <button className="unvetted-toggle" onClick={() => setShowUnvetted((v) => !v)}>
+                  {showUnvetted ? "Hide unverified tokens" : "Show unverified tokens"}
+                </button>
+              )}
             </div>
 
             {/* Network panel */}
