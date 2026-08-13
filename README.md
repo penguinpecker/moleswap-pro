@@ -132,26 +132,6 @@ root `LICENSE` scopes itself explicitly and does not purport to relicense them.
 
 ---
 
-## Testing
-
-```bash
-forge test           # Solidity: unit, invariant, accounting
-cd frontend && npx vitest run    # routing math, differential tests, guards
-```
-
-The routing engine's acceptance test is differential: it forks the chain, executes real swaps against
-real pools, and asserts the off-chain implementation reproduces them to the wei. A model checked
-against another model would not catch the rounding differences that matter at `minAmountOut`.
-
----
-
-## Security notes
-
-- The router is immutable and custody-free; it holds no balance between transactions.
-- The aggregator fee is bounded on-chain at 100 bps and is read live at execution, so the quoted
-  minimum-out is built on the post-fee output at the instant of execution.
-- Off-chain XP and quest state is advisory. It is not a trust signal and is not used by any contract.
-
 ## License
 
 MIT for first-party code; see [`LICENSE`](./LICENSE) for the directories it covers and the vendored
