@@ -109,7 +109,7 @@ const TokenIcon = ({
 };
 
 /** Shared hero — the Burrow header above both the exchange and picker views. */
-const ExchangeHero = () => (
+export const ExchangeHero = () => (
   <header className="hero">
     <h1>
       Swap at the <span className="under">best price on chain.</span>
@@ -216,6 +216,9 @@ const ExchangeStyles = () => (
        screens where one line genuinely cannot work. */
     @media (min-width: 901px) {
       .hero h1 { white-space: nowrap; font-size: clamp(2rem, 4.3vw, 3.6rem); }
+      /* The base .sub is capped at 50ch for readability, which split the tagline over two lines.
+         On the wide dapp measure the whole sentence fits one line, so the cap is lifted here only. */
+      .hero .sub { max-width: none; }
     }
     .p-btn:disabled { opacity: .5; cursor: default; }
     .p-btn:disabled:active { transform: none; }

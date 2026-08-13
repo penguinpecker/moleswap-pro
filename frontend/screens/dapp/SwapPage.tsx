@@ -8,6 +8,7 @@ import type { TokenEntry, ChainEntry } from "@/lib/chain/tokenList";
 import { useWallet } from "@/lib/chain/provider";
 import { getSwapQuote } from "@/lib/chain/amm";
 import { diagnostics } from "@/lib/diagnostics";
+import { ExchangeHero } from "./ExchangePage";
 
 // Extract tx hash from a wallet/client response (may be an object)
 const extractHash = (result: any): string => {
@@ -558,19 +559,24 @@ export const SwapPage = ({
     "";
 
   return (
-    <main>
-      <div className="dapp-col" style={{ maxWidth: 620 }}>
-        {/* Header with back button */}
-        <div className="pick-head" style={{ marginBottom: 14 }}>
-          <button onClick={onBack} className="tool-btn" aria-label="Back">
-            <ArrowLeft size={16} />
-          </button>
-          <h2 style={{ margin: 0, fontSize: "1.3rem", fontWeight: 800, color: "var(--p-onbg)" }}>
-            Exchange
-          </h2>
-        </div>
-
+    <main className="swap-main">
+      <ExchangeHero />
+      {/* paddingTop is zeroed because .dapp-col carries 26px that the exchange step's .swap-grid
+          does not — left in, it would drop this card 26px below the one it is meant to replace. */}
+      <div className="dapp-col" style={{ maxWidth: 620, margin: "0 auto", paddingTop: 0 }}>
         <div className="p-card">
+          {/* The back button and title live INSIDE the card, mirroring the exchange card's own
+              header row. Sitting above the card they added ~40px of chrome that the exchange step
+              does not have, so the two widgets landed at different heights on the same journey. */}
+          <div className="pick-head" style={{ marginBottom: 14 }}>
+            <button onClick={onBack} className="tool-btn" aria-label="Back">
+              <ArrowLeft size={16} />
+            </button>
+            <h2 style={{ margin: 0, fontSize: "1.3rem", fontWeight: 800, color: "var(--p-onbg)" }}>
+              Exchange
+            </h2>
+          </div>
+
           {/* From token */}
           <div className="rv-row">
             <TokenCircle
