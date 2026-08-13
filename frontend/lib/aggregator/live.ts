@@ -13,7 +13,7 @@ import { fetchRelevantPoolStates, type PoolRow } from "./client";
 import { getQuote, NATIVE, type Quote } from "./quote";
 import { encodePlan, type EncodedPlan } from "./router";
 import type { PoolState, TickData } from "./venues/v3Pool";
-import { decodeSlot0, decodeUint, decodePopulatedTicks, INDEXER_SELECTORS, DEFAULT_WORD_RADIUS } from "./indexer";
+import { decodeSlot0, decodeUint, decodePopulatedTicks, INDEXER_SELECTORS, DEFAULT_WORD_RADIUS, wordsToFetch } from "./indexer";
 import { fetchV4MolePool } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
 import { PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
@@ -178,7 +178,7 @@ export class LivePairSession {
         calls.push({ target: p.address, callData: INDEXER_SELECTORS.liquidity });
         const centerWord = Math.floor(Math.floor(p.tick / p.tickSpacing) / 256);
         const wordIdxs: number[] = [];
-        for (let w = centerWord - DEFAULT_WORD_RADIUS; w <= centerWord + DEFAULT_WORD_RADIUS; w++) {
+        for (const w of wordsToFetch(centerWord, p.tickSpacing)) {
           wordIdxs.push(calls.length);
           calls.push({
             target: PANCAKE_V3.tickLens,

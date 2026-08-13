@@ -20,6 +20,7 @@ import {
   decodePopulatedTicks,
   INDEXER_SELECTORS,
   DEFAULT_WORD_RADIUS,
+  wordsToFetch,
 } from "./indexer";
 import { PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
 
@@ -182,7 +183,7 @@ export async function fetchV3StatesMulticall(
   for (const b of bases) {
     const centerWord = Math.floor(Math.floor(b.tick / b.pool.tickSpacing) / 256);
     const wordIdxs: number[] = [];
-    for (let w = centerWord - wordRadius; w <= centerWord + wordRadius; w++) {
+    for (const w of wordsToFetch(centerWord, b.pool.tickSpacing, wordRadius)) {
       wordIdxs.push(p2Calls.length);
       p2Calls.push({
         target: tickLens,

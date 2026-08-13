@@ -123,6 +123,35 @@ export function decodePopulatedTicks(hex: string): TickData[] {
  *  quoter price larger swaps without an exhaustion re-fetch. Tuned to the live chain's depth. */
 export const DEFAULT_WORD_RADIUS = 6;
 
+/**
+ * Which tick-bitmap words to read for a pool at `centerWord`.
+ *
+ * A window around spot is not sufficient on its own. A FULL-RANGE position keeps its two
+ * initialised ticks at the extreme ends of tick space — for tickSpacing 200 that is word -18 and
+ * word +17 — which can sit dozens of words from the current price. Through a +/-6 window such a
+ * pool appears to have a tick on one side and nothing on the other, so the quoter concludes there
+ * is no liquidity in the missing direction and returns "no route" for a swap the chain performs
+ * happily.
+ *
+ * This is not an exotic shape: launchpad tokens are seeded full-range, so it silently broke BUYING
+ * (while selling still worked) for most newly launched tokens on this chain. Measured case, a
+ * WETH/SWAPPY pool at tick 204040 whose only ticks were -887200 and 204200 — the lower one 21 words
+ * below centre. On-chain, WETH->SWAPPY returned 7.137 SWAPPY for 1e-8 WETH; the engine refused to
+ * quote it at ANY size, down to 1e-9.
+ *
+ * Two extra reads per pool remove the entire class.
+ */
+export function wordsToFetch(centerWord: number, tickSpacing: number, wordRadius = DEFAULT_WORD_RADIUS): number[] {
+  const MIN_TICK = -887272;
+  const MAX_TICK = 887272;
+  const wordOf = (tick: number) => Math.floor(Math.floor(tick / tickSpacing) / 256);
+  const words = new Set<number>();
+  for (let w = centerWord - wordRadius; w <= centerWord + wordRadius; w++) words.add(w);
+  words.add(wordOf(Math.ceil(MIN_TICK / tickSpacing) * tickSpacing));
+  words.add(wordOf(Math.floor(MAX_TICK / tickSpacing) * tickSpacing));
+  return [...words].sort((a, b) => a - b);
+}
+
 function wordOf(tick: number, tickSpacing: number): number {
   return Math.floor(Math.floor(tick / tickSpacing) / 256);
 }
