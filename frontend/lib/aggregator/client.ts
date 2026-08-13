@@ -10,7 +10,7 @@
 import { getQuote, NATIVE, type Quote } from "./quote";
 import type { PoolState } from "./venues/v3Pool";
 import { fetchV3StatesMulticall } from "./multicall";
-import { fetchV4MolePool, fetchV4Pool } from "./venues/v4Reader";
+import { fetchV4MolePool, fetchV4Pool, fetchV4PoolByKey } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
 import { encodePlan, type EncodedPlan } from "./router";
 import { LIVE_POOL_ID, MOLE_ADDRESSES } from "../mole/chain";
@@ -159,6 +159,34 @@ export async function fetchRelevantPoolStates(
       if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) v3States.push(v4);
     } catch {
       /* skip an unreadable v4 pool */
+    }
+  }
+
+  // ── External Uniswap-v4 pools, from the registry ──────────────────────────────────────────────
+  // A v4 pool has no address, so it can never be found by asking a factory for one; the indexer
+  // discovers them from the PoolManager's Initialize event and records the key. Only EXISTENCE comes
+  // from the registry — state is read live from the chain here, exactly like the v3 multicall path.
+  // Rows the router cannot execute (native-ETH currencies) or cannot honestly price (hooks carrying a
+  // return-delta permission, which move tokens the tick math never sees) are marked inactive by the
+  // indexer and therefore never reach this loop.
+  const externalV4 = pools.filter(
+    (p) =>
+      (p as any).venue === "uniswap_v4" &&
+      p.active &&
+      (isPair(p, inT, outT) || isPair(p, inT, w) || isPair(p, outT, w)),
+  );
+  for (const p of externalV4.slice(0, 4)) {
+    try {
+      const st = await fetchV4PoolByKey({
+        currency0: p.token0 as `0x${string}`,
+        currency1: p.token1 as `0x${string}`,
+        fee: p.fee,
+        tickSpacing: p.tick_spacing,
+        hooks: (p.hooks || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+      });
+      if (st && (st.liquidity > 0n || st.ticks.length > 0)) v3States.push(st);
+    } catch {
+      /* skip an unreadable pool rather than failing the quote */
     }
   }
 

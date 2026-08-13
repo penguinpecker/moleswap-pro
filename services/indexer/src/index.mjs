@@ -40,6 +40,20 @@ const MC3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
 const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
+// The Uniswap-v4 singleton. v4 pools have no factory and no address — a pool is a PoolKey hashed
+// into an id inside this contract — so they are discovered from its Initialize event instead of from
+// a factory's PoolCreated. Measured on this chain: 8,490 external v4 pools, and launchpad tokens are
+// going there, which is why v4-only tokens quoted "no route" while trading fine on-chain.
+const POOL_MANAGER = (process.env.POOL_MANAGER || "0x8366a39CC670B4001A1121B8F6A443A643e40951").toLowerCase();
+// keccak("Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)")
+const V4_INITIALIZE_TOPIC = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438";
+const NATIVE_ADDR = "0x0000000000000000000000000000000000000000";
+// A hook whose address carries either return-delta bit can move tokens the tick math never sees, so
+// such a pool cannot be honestly priced from ticks. Indexed but marked inactive: discoverable and
+// auditable, never routed, until the quote layer can price it by simulation.
+const HOOK_BEFORE_SWAP_RETURNS_DELTA = 0x08;
+const HOOK_AFTER_SWAP_RETURNS_DELTA = 0x04;
+
 const FACTORIES = [
   { f: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa", venue: "uniswap_v3" },
   { f: "0xe51960f1b45f1c9fb6d166e6a884f866fc70433b", venue: "uniswap_v3" },
@@ -190,6 +204,45 @@ async function discover(from, to) {
   return pools;
 }
 
+/** Read v4 Initialize across [from,to]. Same chunking and fail-closed contract as discover(). */
+async function discoverV4(from, to) {
+  const pools = [];
+  for (let lo = from; lo <= to; lo += GETLOGS_CHUNK) {
+    const hi = Math.min(to, lo + GETLOGS_CHUNK - 1);
+    const logs = await rpc("eth_getLogs", [
+      { address: POOL_MANAGER, topics: [V4_INITIALIZE_TOPIC], fromBlock: "0x" + lo.toString(16), toBlock: "0x" + hi.toString(16) },
+    ]); // throws on persistent failure → cycle aborts, cursor stays put
+    if (!Array.isArray(logs)) continue;
+    for (const l of logs) {
+      const currency0 = lc(topicAddr(l.topics[2]));
+      const currency1 = lc(topicAddr(l.topics[3]));
+      const d = (l.data || "0x").slice(2);
+      if (d.length < 192) continue;
+      const fee = parseInt(d.slice(0, 64), 16);
+      let tickSpacing = parseInt(d.slice(64, 128), 16);
+      if (tickSpacing >= 0x800000) tickSpacing -= 0x1000000; // int24, two's complement
+      const hooks = lc("0x" + d.slice(128, 192).slice(-40));
+      const hookLow = Number(BigInt(hooks) & 0x3fffn);
+      const takesDelta = (hookLow & HOOK_BEFORE_SWAP_RETURNS_DELTA) !== 0 || (hookLow & HOOK_AFTER_SWAP_RETURNS_DELTA) !== 0;
+      // MoleRouter settles v4 currencies as ERC-20s; a native currency (address(0)) cannot be paid by
+      // it, so a native pool would only ever produce routes that revert. Indexed inactive.
+      const nativeLeg = currency0 === NATIVE_ADDR || currency1 === NATIVE_ADDR;
+      pools.push({
+        id: l.topics[1], // the PoolId IS the identity; there is no address
+        venue: "uniswap_v4",
+        token0: currency0,
+        token1: currency1,
+        fee,
+        tick_spacing: tickSpacing,
+        hooks,
+        address: "",
+        routable: !nativeLeg && !takesDelta,
+      });
+    }
+  }
+  return pools;
+}
+
 async function registerNewTokens(tokenAddrs) {
   if (tokenAddrs.length === 0) return 0;
   const known = new Set();
@@ -298,6 +351,25 @@ async function refresh() {
         const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: poolRows.slice(i, i + 200) });
         if (error) throw new Error(`upsert_pools: ${error.message}`);
       }
+    }
+
+    // 1b. DISCOVER v4 pools over the SAME range. Kept separate from the factory scan because a v4
+    // pool has no address to read liquidity() from — its state lives in the singleton and is read at
+    // quote time via StateView, so the registry only needs to record the key.
+    const v4 = await discoverV4(from, to);
+    if (v4.length) {
+      newPoolCount += v4.length;
+      const v4Rows = v4.map((p) => ({
+        id: p.id, venue: p.venue, token0: p.token0, token1: p.token1,
+        fee: p.fee, tick_spacing: p.tick_spacing, hooks: p.hooks, address: p.address,
+        // active gates routing: native-currency and value-taking-hook pools stay indexed but unrouted.
+        active: p.routable,
+      }));
+      for (let i = 0; i < v4Rows.length; i += 200) {
+        const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: v4Rows.slice(i, i + 200) });
+        if (error) throw new Error(`upsert_pools(v4): ${error.message}`);
+      }
+      log(`v4: +${v4.length} pools (${v4Rows.filter((r) => r.active).length} routable)`);
       const tokenSet = new Set();
       for (const p of pools) { tokenSet.add(p.token0); tokenSet.add(p.token1); }
       newTokenCount = await registerNewTokens([...tokenSet]);

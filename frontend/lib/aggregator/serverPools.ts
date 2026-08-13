@@ -15,8 +15,22 @@ export async function loadPoolRowsServer(nowMs: number): Promise<PoolRow[]> {
   if (!url || !key) return _cache?.rows ?? [];
   try {
     const sb = createClient(url, key, { auth: { persistSession: false } });
-    const { data } = await sb.from("mp_pools").select("*").eq("active", true);
-    const rows = (data as PoolRow[]) || [];
+    // Supabase REST caps an unranged select at 1000 rows. This registry holds ~13.6k active pools,
+    // so the loader was silently seeing ~7% of it — an arbitrary slice — and any pool outside that
+    // window could only ever be found by the live per-pair discovery probe. Page explicitly.
+    const PAGE = 1000;
+    const rows: PoolRow[] = [];
+    for (let from = 0; from < 20000; from += PAGE) {
+      const { data, error } = await sb
+        .from("mp_pools")
+        .select("*")
+        .eq("active", true)
+        .range(from, from + PAGE - 1);
+      if (error || !data?.length) break;
+      rows.push(...(data as PoolRow[]));
+      if (data.length < PAGE) break;
+    }
+
     _cache = { at: nowMs, rows };
     return rows;
   } catch {

@@ -131,3 +131,74 @@ export async function fetchV4Pool(poolKey: V4PoolKey): Promise<PoolState | null>
     return null;
   }
 }
+
+/**
+ * Read ANY v4 pool by its real key — external pools included.
+ *
+ * fetchV4Pool above is MoleHook-specific: it overwrites the key's fee with the dynamic-fee sentinel
+ * (right for our own pools, which are all created dynamic) and reads MoleHook.hookFeePips. Neither
+ * holds for a foreign pool — external pools carry a real fee tier (2500, 10000, …) or the sentinel,
+ * and their hook is someone else's contract. The key is reproduced EXACTLY as initialised, because
+ * any normalisation hashes to a different id and the pool reads as uninitialised.
+ *
+ * State is read live from the chain on every quote, exactly like the v3 multicall path — only the
+ * pool's EXISTENCE comes from the registry.
+ */
+export async function fetchV4PoolByKey(poolKey: V4PoolKey): Promise<PoolState | null> {
+  try {
+    const c = client();
+    const poolId = poolIdOf(poolKey) as `0x${string}`;
+    const tickSpacing = poolKey.tickSpacing;
+
+    const [slot0, liquidity] = await Promise.all([
+      c.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getSlot0", args: [poolId] }) as Promise<readonly [bigint, number, number, number]>,
+      c.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getLiquidity", args: [poolId] }) as Promise<bigint>,
+    ]);
+
+    const sqrtPriceX96 = slot0[0];
+    const tick = Number(slot0[1]);
+    const lpFee = Number(slot0[3]);
+    if (sqrtPriceX96 === 0n) return null;
+
+    const centerWord = Math.floor(Math.floor(tick / tickSpacing) / 256);
+    const words = wordsToFetch(centerWord, tickSpacing, 3);
+    const bitmaps = (await c.multicall({
+      contracts: words.map((w) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickBitmap" as const, args: [poolId, w] as const })),
+      multicallAddress: MULTICALL3,
+      allowFailure: false,
+    })) as bigint[];
+
+    const tickList: number[] = [];
+    words.forEach((w, i) => {
+      const bm = bitmaps[i]!;
+      if (bm === 0n) return;
+      for (let bit = 0; bit < 256; bit++) {
+        if ((bm >> BigInt(bit)) & 1n) tickList.push((w * 256 + bit) * tickSpacing);
+      }
+    });
+
+    const infos = (await c.multicall({
+      contracts: tickList.map((t) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickInfo" as const, args: [poolId, t] as const })),
+      multicallAddress: MULTICALL3,
+      allowFailure: false,
+    })) as readonly (readonly [bigint, bigint, bigint, bigint])[];
+
+    const ticks: TickData[] = tickList
+      .map((t, i) => ({ index: t, liquidityNet: infos[i]![1] }))
+      .sort((a, b) => a.index - b.index);
+
+    const state = v4PoolState({
+      poolKey: { ...poolKey, fee: lpFee },
+      sqrtPriceX96,
+      tick,
+      liquidity,
+      ticks,
+      hookFeePips: 0, // a foreign hook's fee is not readable through MoleHook's ABI
+    });
+
+    // Execution must target the key as initialised, fee included.
+    return { ...state, poolKey: { ...(state.poolKey as any), fee: poolKey.fee } };
+  } catch {
+    return null;
+  }
+}
