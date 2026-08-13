@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createPublicClient, http, type Address } from "viem";
 import { BackgroundImage, NavBar, MoleMascot } from "../shared";
@@ -9,6 +9,10 @@ import { ROBINHOOD_RPC_URL, MOLE_ADDRESSES } from "@/lib/mole/chain";
 import {
   POOL_CREATOR, createMolePool, poolIdOf, priceToSqrtPriceX96, orderCurrencies,
 } from "@/lib/mole/createPool";
+import { seedNewPool } from "@/lib/mole/seedLiquidity";
+import { searchIndex, popularTokens, type IndexedToken } from "@/lib/chain/tokenSearch";
+import { CONTRACTS } from "@/lib/chain/contracts";
+import { getTickAtSqrtRatio } from "@/lib/aggregator/math/tickMath";
 
 const ZERO = "0x0000000000000000000000000000000000000000";
 const isAddr = (a: string) => /^0x[0-9a-fA-F]{40}$/.test(a.trim());
@@ -31,6 +35,44 @@ export default function CreatePoolPage() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
+
+  // Token picker over the REAL indexed universe — the same list the swap screen searches, so every
+  // entry here is a token that actually exists on this chain with a real pool behind it. Pairing
+  // against WETH is the default because that is the hub almost every memecoin on Robinhood Chain
+  // quotes against.
+  const [picker, setPicker] = useState<null | "A" | "B">(null);
+  const [query, setQuery] = useState("");
+  const [choices, setChoices] = useState<IndexedToken[]>([]);
+  const [seeding, setSeeding] = useState(false);
+  const [seedAmt0, setSeedAmt0] = useState("");
+  const [seedAmt1, setSeedAmt1] = useState("");
+  const [seedResult, setSeedResult] = useState<any>(null);
+
+  useEffect(() => {
+    if (!picker) return;
+    let dead = false;
+    (async () => {
+      const list = query.trim().length >= 1 ? await searchIndex(query.trim(), 30) : await popularTokens(30);
+      if (!dead) setChoices(list);
+    })().catch(() => setChoices([]));
+    return () => { dead = true; };
+  }, [picker, query]);
+
+  const pick = (t: IndexedToken) => {
+    const set = picker === "A" ? setTokenA : setTokenB;
+    const setMeta = picker === "A" ? setMetaA : setMetaB;
+    set(t.address);
+    setMeta({ symbol: t.symbol, decimals: t.decimals });
+    setPicker(null);
+    setQuery("");
+  };
+
+  const useWeth = (side: "A" | "B") => {
+    const set = side === "A" ? setTokenA : setTokenB;
+    const setMeta = side === "A" ? setMetaA : setMetaB;
+    set(CONTRACTS.WETH);
+    setMeta({ symbol: "WETH", decimals: 18 });
+  };
 
   const loadMeta = async (addr: string, set: (m: { symbol: string; decimals: number } | null) => void) => {
     if (!isAddr(addr)) { set(null); return; }
@@ -95,6 +137,30 @@ export default function CreatePoolPage() {
     setBusy(false);
   };
 
+  // A pool that has been initialised but never seeded is untradeable — quotes against it return
+  // nothing. Seeding is therefore part of creating, not a separate errand.
+  const onSeed = async () => {
+    if (!preview || (preview as any).error || seeding) return;
+    const p = preview as any;
+    const a0 = Number(seedAmt0), a1 = Number(seedAmt1);
+    if (!(a0 > 0) || !(a1 > 0)) { setStatus("Enter an amount of each token to seed."); return; }
+    setSeeding(true);
+    setSeedResult(null);
+    const initialTick = getTickAtSqrtRatio(p.sqrtPriceX96);
+    const r = await seedNewPool({
+      currency0: p.ord.currency0,
+      currency1: p.ord.currency1,
+      tickSpacing: p.spacing,
+      initialTick,
+      amount0: BigInt(Math.floor(a0 * 10 ** p.ord.dec0)),
+      amount1: BigInt(Math.floor(a1 * 10 ** p.ord.dec1)),
+      onStep: setStatus,
+    });
+    setSeedResult(r);
+    setStatus(r.success ? "Pool seeded — it is now tradeable." : (r.error || "Seed failed"));
+    setSeeding(false);
+  };
+
   return (
     <>
       <BackgroundImage isLoading={false} />
@@ -129,8 +195,8 @@ export default function CreatePoolPage() {
               <p className="d">Initialize the pool, whitelist it in the vault, and register it with the aggregator — one flow.</p>
 
               {[
-                { label: "Token A (address)", val: tokenA, set: (v: string) => { setTokenA(v); loadMeta(v, setMetaA); }, meta: metaA },
-                { label: "Token B (address)", val: tokenB, set: (v: string) => { setTokenB(v); loadMeta(v, setMetaB); }, meta: metaB },
+                { side: "A" as const, label: "Token A", val: tokenA, set: (v: string) => { setTokenA(v); loadMeta(v, setMetaA); }, meta: metaA },
+                { side: "B" as const, label: "Token B", val: tokenB, set: (v: string) => { setTokenB(v); loadMeta(v, setMetaB); }, meta: metaB },
               ].map((f, i) => (
                 <div key={f.label} className="p-field" style={{ marginTop: i === 0 ? 14 : 10 }}>
                   <div className="lbl">
@@ -142,11 +208,17 @@ export default function CreatePoolPage() {
                       className="big addr-in"
                       value={f.val}
                       onChange={(e) => f.set(e.target.value.trim())}
-                      placeholder="0x…"
+                      placeholder="0x… or pick a token"
                       spellCheck={false}
                       autoComplete="off"
                       aria-label={f.label}
                     />
+                    <button className="p-btn pick" onClick={() => { setPicker(f.side); setQuery(""); }}>
+                      PICK
+                    </button>
+                    <button className="p-btn pick" onClick={() => useWeth(f.side)}>
+                      WETH
+                    </button>
                   </div>
                 </div>
               ))}
@@ -201,9 +273,40 @@ export default function CreatePoolPage() {
                   <div style={{ wordBreak: "break-all" }}>pool: {result.poolId}</div>
                   <div style={{ marginTop: 6 }}>initialize: {result.txInit?.slice(0, 14)}… · whitelist: {result.txWhitelist?.slice(0, 14)}…</div>
                   <div style={{ marginTop: 6 }}>registered for routing: {result.registered ? "yes" : "no (see status)"}</div>
-                  <Link href="/vault" className="seed-btn">
-                    Seed liquidity in vault →
-                  </Link>
+                </div>
+              )}
+
+              {result?.success && !seedResult?.success && (
+                <div className="p-card seedbox">
+                  <h3>Seed the first liquidity</h3>
+                  <p className="d">
+                    The pool exists but is empty, so nothing can trade against it yet. The vault&apos;s
+                    one-tap zap can&apos;t bootstrap it — that swaps half your deposit inside this very
+                    pool, and there is nothing here to swap against. Put in both sides once and it goes live.
+                  </p>
+                  {[
+                    { label: `${(preview as any)?.sym0 ?? "currency0"} amount`, val: seedAmt0, set: setSeedAmt0 },
+                    { label: `${(preview as any)?.sym1 ?? "currency1"} amount`, val: seedAmt1, set: setSeedAmt1 },
+                  ].map((f, i) => (
+                    <div key={f.label} className="p-field" style={{ marginTop: i === 0 ? 12 : 10 }}>
+                      <div className="lbl"><span>{f.label}</span></div>
+                      <div className="amt">
+                        <input className="big" inputMode="decimal" value={f.val} placeholder="0.0"
+                          onChange={(e) => f.set(e.target.value.replace(/[^0-9.]/g, ""))} aria-label={f.label} />
+                      </div>
+                    </div>
+                  ))}
+                  <button className="p-btn up" onClick={onSeed} disabled={seeding || !onRH}>
+                    {seeding ? "Seeding…" : "Seed liquidity"}
+                  </button>
+                </div>
+              )}
+
+              {seedResult?.success && (
+                <div className="okbox">
+                  <div>seeded — position #{seedResult.positionId}, liquidity {seedResult.liquidity}</div>
+                  <div style={{ marginTop: 6, wordBreak: "break-all" }}>tx: {seedResult.txHash}</div>
+                  <Link href="/pools" className="seed-btn">View it in pools →</Link>
                 </div>
               )}
             </div>
@@ -211,8 +314,52 @@ export default function CreatePoolPage() {
         </section>
       </main>
 
+      {picker && (
+        <div className="cm-scrim" onClick={() => setPicker(null)}>
+          <div className="cm-panel" onClick={(e) => e.stopPropagation()}>
+            <h3>Select a token</h3>
+            <input
+              className="big tk-search" autoFocus value={query} placeholder="Search name, symbol or paste an address"
+              onChange={(e) => setQuery(e.target.value)} spellCheck={false} aria-label="Search tokens"
+            />
+            <div className="tk-list">
+              {choices.length === 0 && <div className="tk-empty">No tokens found.</div>}
+              {choices.map((t) => (
+                <button key={t.address} className="tk-row" onClick={() => pick(t)}>
+                  {t.logoURI
+                    ? <img className="tk-logo" src={t.logoURI} alt="" />
+                    : <span className="tk-logo tk-fallback">{t.symbol.slice(0, 2)}</span>}
+                  <span className="tk-txt">
+                    <span className="tk-sym">{t.symbol}</span>
+                    <span className="tk-name">{t.name}</span>
+                  </span>
+                  {t.liquidity != null && t.liquidity > 0 && (
+                    <span className="tk-liq">{t.liquidity.toFixed(2)} WETH</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* page: create-pool — from the Burrow prototype */}
       <style jsx global>{`
+        .p-btn.pick { height: 38px; padding: 0 12px; margin-left: 8px; font-size: 11px; letter-spacing: .05em; flex: 0 0 auto; }
+        .seedbox { margin-top: 14px; }
+        .tk-search { width: 100%; margin-top: 10px; }
+        .tk-list { margin-top: 12px; max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+        .tk-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border-radius: 12px;
+          background: rgba(255,255,255,.5); border: 1px solid rgba(44,26,12,.1); cursor: pointer; text-align: left; }
+        .tk-row:hover { background: rgba(255,255,255,.85); }
+        .tk-logo { width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto; object-fit: cover; }
+        .tk-fallback { display: flex; align-items: center; justify-content: center; background: var(--amber);
+          color: #3d2410; font-family: var(--font-ui); font-weight: 800; font-size: 10px; }
+        .tk-txt { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+        .tk-sym { font-family: var(--font-ui); font-weight: 800; font-size: 13px; color: var(--ink); }
+        .tk-name { font-size: 11px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .tk-liq { font-family: var(--font-num); font-size: 11px; color: var(--moss); flex: 0 0 auto; }
+        .tk-empty { padding: 18px; text-align: center; color: var(--ink-2); font-size: 12px; }
         .addr-in { font-family: var(--font-num) !important; font-size: 15px !important; letter-spacing: 0 !important; }
         .p-field .lbl .meta { font-family: var(--font-num); color: var(--moss); font-weight: 700; letter-spacing: 0; text-transform: none; }
         .prev { margin-top: 12px; padding: 12px 14px; border-radius: var(--r-md);

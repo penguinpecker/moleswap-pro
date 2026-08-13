@@ -7,6 +7,7 @@ import { NavBar, BackgroundImage, MoleMascot } from "../shared";
 import { RefreshCw, Plus, Minus, ArrowUpRight, ChevronDown, AlertTriangle, Loader2 } from "lucide-react";
 import { useWalletContext, useChainClient, WalletUI } from "@/lib/chain/provider";
 import { useWallet } from "@/lib/chain/provider";
+import { loadLivePools, tvlUsd as calcTvlUsd } from "@/lib/chain/livePools";
 import {
   CONTRACTS, TOKENS, POOLS as AMM_POOLS,
   getTokenByAddress, findPool,
@@ -83,6 +84,8 @@ const COIN_COLORS: Record<string, string> = {
 };
 const coinColor = (symbol: string) => COIN_COLORS[symbol?.toUpperCase()] || "#8a5c33";
 
+const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+
 interface PoolDisplay {
   name: string;
   token0: TokenInfo;
@@ -97,6 +100,7 @@ interface PoolDisplay {
   feeApy: number;
   vol24h: number;
   fees24h: number;
+  hubIsUsdg?: boolean;
   active: boolean;
 }
 
@@ -130,13 +134,23 @@ function calcTvl(reserve0: number, reserve1: number, price: number): number {
 async function fetchPoolData(): Promise<PoolDisplay[]> {
   const provider = getProvider();
 
+  // The REAL pool set, ranked by indexed depth — every memecoin/WETH pair with genuine liquidity,
+  // not a hardcoded trio. Falls back to the static list only if the registry is unreachable.
+  const live = await loadLivePools(provider, 24);
+  const entries = live.length
+    ? live.map((l) => ({ pool: l.pool, t0: l.token0, t1: l.token1, hub: l.hub }))
+    : AMM_POOLS.map((pool) => ({
+        pool,
+        t0: TOKENS.find((t) => t.address.toLowerCase() === pool.token0.toLowerCase()),
+        t1: TOKENS.find((t) => t.address.toLowerCase() === pool.token1.toLowerCase()),
+        hub: "usdg" as const,
+      }));
+
   // Real 24h volume/fees for all displayed pools in one read, keyed by address.
-  const volumes = await fetchPoolVolumes(AMM_POOLS.map((p) => p.address));
+  const volumes = await fetchPoolVolumes(entries.map((e) => e.pool.address));
 
   const results = await Promise.allSettled(
-    AMM_POOLS.map(async (pool) => {
-      const t0 = TOKENS.find(t => t.address.toLowerCase() === pool.token0.toLowerCase());
-      const t1 = TOKENS.find(t => t.address.toLowerCase() === pool.token1.toLowerCase());
+    entries.map(async ({ pool, t0, t1, hub }) => {
       if (!t0 || !t1) return null;
 
       const poolContract = new ethers.Contract(pool.address, POOL_ABI, provider);
@@ -157,7 +171,13 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
       const reserve1 = Number(ethers.formatUnits(bal1, t1.decimals));
 
       const price = sqrtPriceToPrice(sqrtPriceX96, t0.decimals, t1.decimals);
-      const tvl = calcTvl(reserve0, reserve1, price);
+      // Hub-denominated for now. Valuing a pool in its own token1 gives unreadable numbers for a
+      // memecoin pair (a WETH/MANCER pool reads as ~166,000,000 of MANCER), so the second pass below
+      // converts every row through its hub into dollars.
+      const hubIsUsdg = hub === "usdg";
+      const hubAddr = hubIsUsdg ? USDG_LC : CONTRACTS.WETH.toLowerCase();
+      const hubIsToken0 = pool.token0.toLowerCase() === hubAddr;
+      const tvl = calcTvlUsd({ reserve0, reserve1, price, hubIsToken0, hubIsUsdg, ethUsd: 1 });
 
       // REAL 24h volume/fees from the swap-event indexer, and APY derived from them: the fees a full-range
       // LP earns over a year as a share of TVL. Both are real on-chain measurements — 0/"—" when a pool had
@@ -181,15 +201,34 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
         feeApy,
         vol24h,
         fees24h,
-        active: hasLiquidity,
+        hubIsUsdg,
+        active: hasLiquidity && reserve0 > 0 && reserve1 > 0,
       } as PoolDisplay;
     })
   );
 
-  return results
+  const rows = results
     .filter((r): r is PromiseFulfilledResult<PoolDisplay | null> => r.status === "fulfilled")
     .map(r => r.value)
     .filter(Boolean) as PoolDisplay[];
+
+  // ETH price from the deepest WETH/USDG pool in this same set — the number the swap engine trades
+  // at, so the page can never disagree with a quote. No external price feed is involved.
+  const wethLc = CONTRACTS.WETH.toLowerCase();
+  const ethRow = rows
+    .filter(r => {
+      const a = r.token0.address.toLowerCase(), b = r.token1.address.toLowerCase();
+      return (a === wethLc && b === USDG_LC) || (a === USDG_LC && b === wethLc);
+    })
+    .sort((a, b) => Number(b.liquidity) - Number(a.liquidity))[0];
+  const ethUsd = ethRow
+    ? ethRow.token0.address.toLowerCase() === wethLc ? ethRow.price : (ethRow.price > 0 ? 1 / ethRow.price : 0)
+    : 0;
+
+  return rows
+    .map(r => ({ ...r, tvl: (r as any).hubIsUsdg ? r.tvl : r.tvl * ethUsd }))
+    .filter(r => r.active && r.tvl >= 100)
+    .sort((a, b) => b.tvl - a.tvl);
 }
 
 const Badge = ({ chain }: { chain: string }) => {
