@@ -9,7 +9,8 @@
     "start": "next start",
     "test": "vitest run",
     "test:watch": "vitest",
-    "ci": "npm run test && npm run build"
+    "ci": "npm run test && npm run build",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

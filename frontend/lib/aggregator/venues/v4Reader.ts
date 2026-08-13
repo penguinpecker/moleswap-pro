@@ -17,6 +17,7 @@ import { v4PoolState } from "./v4Pool";
 import type { PoolState, TickData } from "./v3Pool";
 import { robinhoodChain, LIVE_POOL_KEY, MOLE_ADDRESSES, DYNAMIC_FEE_FLAG, ROBINHOOD_RPC_URL } from "@/lib/mole/chain";
 import { poolIdOf, type V4PoolKey } from "@/lib/mole/poolId";
+import { wordsToFetch } from "../indexer";
 
 const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b" as Address;
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;
@@ -75,8 +76,11 @@ export async function fetchV4Pool(poolKey: V4PoolKey): Promise<PoolState | null>
     // Walk the tick bitmap around the current tick to collect initialised ticks (same layout as v3).
     const compressed = Math.floor(tick / tickSpacing);
     const centerWord = compressed >> 8;
-    const words: number[] = [];
-    for (let w = centerWord - 3; w <= centerWord + 3; w++) words.push(w);
+    // Boundary words included for the same reason as the v3 readers: a full-range position parks
+    // its ticks at the extremes of tick space, far outside any window centred on spot, and reading
+    // only the window makes the pool look one-sided so the quoter refuses one direction entirely.
+    // This is our OWN v4 venue, and MoleSwap pools are seeded full-range by create-pool.
+    const words: number[] = wordsToFetch(centerWord, tickSpacing, 3);
     const bitmapResults = await c.multicall({
       contracts: words.map((w) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickBitmap" as const, args: [poolId, w] as const })),
       multicallAddress: MULTICALL3,

@@ -61,3 +61,36 @@ describe("tick bitmap word selection", () => {
     expect(new Set(words).size).toBe(words.length);
   });
 });
+
+/**
+ * Architectural guard. The original bug shipped in FOUR places because the same window loop had
+ * been copy-pasted into every reader (multicall.ts, live.ts, indexer.ts, venues/v4Reader.ts). Three
+ * were found only after the fourth was fixed. This test fails if a fifth copy appears, so the next
+ * reader is forced through the shared helper instead of rediscovering the bug.
+ */
+describe("no reader may hand-roll its own tick window", () => {
+  it("only wordsToFetch builds a centreWord range", async () => {
+    const { readFileSync, readdirSync, statSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const root = join(process.cwd(), "lib", "aggregator");
+
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir)) {
+        const p = join(dir, e);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (p.endsWith(".ts")) files.push(p);
+      }
+    };
+    walk(root);
+
+    // A raw loop over a centre-word range. Legal exactly once: inside wordsToFetch itself.
+    const rawLoop = /for\s*\(\s*let\s+\w+\s*=\s*centerWord\s*-/;
+    const offenders = files.filter((f) => {
+      if (f.endsWith(join("aggregator", "indexer.ts"))) return false; // holds the one legal copy
+      return rawLoop.test(readFileSync(f, "utf8"));
+    });
+
+    expect(offenders.map((f) => f.replace(process.cwd(), ""))).toEqual([]);
+  });
+});

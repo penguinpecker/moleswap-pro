@@ -185,7 +185,9 @@ export async function fetchV3Pool(
 
   const centerWord = wordOf(slot0.tick, tickSpacing);
   const wordCalls = [];
-  for (let w = centerWord - wordRadius; w <= centerWord + wordRadius; w++) {
+  // Same boundary-word requirement as the batched readers — see wordsToFetch. This path is used by
+  // the single-pool reader and was the third copy of the window loop.
+  for (const w of wordsToFetch(centerWord, tickSpacing, wordRadius)) {
     wordCalls.push({
       to: tickLens,
       data: SEL.getPopulatedTicksInWord + encodeAddress(poolAddress) + encodeInt16(w),
