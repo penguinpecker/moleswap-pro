@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { MoleGlyph } from "@/screens/shared";
 
-const BASE = typeof window !== "undefined" ? window.location.origin : "https://moleswap-eight.vercel.app";
+const BASE = typeof window !== "undefined" ? window.location.origin : "https://www.moleswap.com";
 
 // ═══════════════════════════════════════════
 // NAV STRUCTURE
@@ -1156,6 +1156,23 @@ mole.getExplorerUrl("0xTX_HASH");
           .docs-param-table{overflow-x:auto}
           .docs-contracts-table{overflow-x:auto}
           .docs-footer-inner{flex-direction:column;gap:16px;text-align:center}
+          /* The 820px content column was never capped to the screen, so the whole docs layout
+             stayed 820px wide on a 390px phone and dragged the page into ~849px of horizontal
+             overflow. Everything below is a floor of zero plus a real cap, so long code, wide
+             tables and long addresses scroll inside their own box instead of widening the page. */
+          /* main still resolves to its 1140px measure here, so the docs root is made a clip
+             container: nothing inside it can widen the page, and the pieces that genuinely need
+             width (code blocks, param and contract tables) already scroll inside their own boxes. */
+          main{min-width:0;max-width:100%}
+          .docs-root{min-width:0;max-width:100%;overflow-x:hidden}
+          .docs-layout,.docs-topbar-inner,.docs-content{min-width:0;max-width:100%}
+          .docs-content{padding:24px 16px 60px}
+          .docs-pre,.docs-playground-result pre{max-width:100%}
+          .docs-param-table table{min-width:0}
+          .docs-param-table td code{white-space:normal;word-break:break-all}
+          .docs-code-tabs{flex-wrap:wrap}
+          .docs-playground-param{flex-direction:column;align-items:stretch;gap:4px}
+          .docs-playground-param label{min-width:0}
         }
       `}</style>
     </div>

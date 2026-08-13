@@ -112,9 +112,7 @@ const TokenIcon = ({
 const ExchangeHero = () => (
   <header className="hero">
     <h1>
-      Swap at the
-      <br />
-      <span className="under">best price on chain.</span>
+      Swap at the <span className="under">best price on chain.</span>
     </h1>
     <p className="sub">
       One quote, every live pool. The router splits your order across venues and re-prices it every block.
@@ -182,6 +180,8 @@ const ExchangeStyles = () => (
     .ctx-row { display: flex; justify-content: space-between; margin: 12px 2px 4px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--p-card-ink-3); }
     .tk-list { max-height: 430px; overflow: auto; margin-top: 4px; }
     .tk-row.sel { background: rgba(240,160,60,.16); }
+    .tk-group { padding: 10px 4px 4px; font-size: 10.5px; font-weight: 800; letter-spacing: .1em;
+      text-transform: uppercase; color: var(--p-card-ink-3); }
     .tk-stats { display: flex; gap: 10px; font-size: 10.5px; color: var(--p-card-ink-3); margin-top: 3px; font-family: var(--font-num); flex-wrap: wrap; }
     .tk-stats .up { color: var(--moss); } .tk-stats .dn { color: var(--rust); }
     .dexlink { display: inline-block; font-size: 11px; font-weight: 800; color: #2277b8; cursor: pointer; background: none; border: 0; padding: 0; font-family: inherit; }
@@ -201,9 +201,22 @@ const ExchangeStyles = () => (
        is exactly how it looked at 0.0). Centring the GROUP keeps the card centred when it is
        alone and still lets the panel sit beside it, instead of the card jumping left the moment
        you type an amount. Wrapping is what makes it work on a phone. */
-    .swap-grid { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 14px; }
-    .swap-grid > * { flex: 1 1 420px; min-width: 0; max-width: 560px; }
-    @media (max-width: 900px) { .swap-grid > * { flex-basis: 100%; max-width: 560px; } }
+    .swap-grid { display: flex; flex-wrap: wrap; justify-content: center; align-items: stretch; gap: 16px; }
+    /* Equal basis and an equal cap so the exchange card and the receive panel are the SAME width and
+       sit on one row rather than two mismatched blocks; stretch keeps their tops and bottoms aligned. */
+    .swap-grid > * { flex: 1 1 520px; min-width: 0; max-width: 620px; display: flex; flex-direction: column; }
+    .swap-grid > * > .p-card { flex: 1; }
+    @media (max-width: 1120px) { .swap-grid > * { flex-basis: 100%; max-width: 620px; } }
+
+    /* The dapp page runs wider than the 1140px default so two 620px panels fit side by side. */
+    main.swap-main { max-width: 1300px; }
+
+    /* One line on desktop. The break used to be a hardcoded <br>, which forced two lines at every
+       width; the type is now sized so the full sentence fits the measure, and only wraps on narrow
+       screens where one line genuinely cannot work. */
+    @media (min-width: 901px) {
+      .hero h1 { white-space: nowrap; font-size: clamp(2rem, 4.3vw, 3.6rem); }
+    }
     .p-btn:disabled { opacity: .5; cursor: default; }
     .p-btn:disabled:active { transform: none; }
   `}</style>
@@ -1450,9 +1463,20 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                         selectionMode === "from"
                           ? String(fromToken) === String(token.address)
                           : String(toToken) === String(token.address);
+                      // heldList is merged in first, so the boundary between "owned" and the rest is
+                      // simply the first row that is not held. Labelling it makes the ordering legible
+                      // instead of something the user has to infer.
+                      const heldSet = new Set(heldList.map((h) => h.address?.toLowerCase()));
+                      const isHeld = heldSet.has(token.address?.toLowerCase() || "");
+                      const prev = filteredModalTokens[idx - 1];
+                      const prevHeld = idx > 0 && heldSet.has(prev?.address?.toLowerCase() || "");
+                      const showOwnedHead = isHeld && idx === 0;
+                      const showRestHead = !isHeld && (idx === 0 ? false : prevHeld);
                       return (
+                        <React.Fragment key={`${token.address}-${idx}`}>
+                        {showOwnedHead && <div className="tk-group">Your tokens</div>}
+                        {showRestHead && <div className="tk-group">All tokens</div>}
                         <button
-                          key={`${token.address}-${idx}`}
                           onClick={() => handleSelectToken(token)}
                           className={`tk-row ${isSelected ? "sel" : ""}`}
                         >
@@ -1501,6 +1525,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                             )}
                           </div>
                         </button>
+                        </React.Fragment>
                       );
                     })
                   ) : (
@@ -1579,7 +1604,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         <Settings setShowSettings={setShowSettings} />
       ) : (
         <>
-          <main className="w-full">
+          <main className="w-full swap-main">
             <ExchangeHero />
 
             <section className="swap-grid">
