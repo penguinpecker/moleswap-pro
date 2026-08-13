@@ -16,6 +16,7 @@ import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { createClient as createSupabaseBrowser } from "@/lib/supabase/client";
 import { tokenHasPool } from "@/lib/aggregator/discover";
 import { searchIndex, heldTokens, popularTokens, resolveTokenMetas, type IndexedToken, type HeldToken } from "@/lib/chain/tokenSearch";
+import { looksLikePoolId, resolvePoolId } from "@/lib/chain/poolIdLookup";
 import { fetchTokenInfo, fmtUsd, shortAddr, type TokenMarketInfo } from "@/lib/chain/tokenInfo";
 import Settings from "../settings";
 import { diagnostics } from "@/lib/diagnostics";
@@ -293,6 +294,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   // Live market data (logo, mcap, liquidity, dexscreener link) for the visible picker rows.
   const [marketInfo, setMarketInfo] = useState<Map<string, TokenMarketInfo>>(new Map());
   const [showUnvetted, setShowUnvetted] = useState(false);
+  // A pasted v4 PoolId resolves to a token address, which then flows through the normal import path.
+  const [poolIdToken, setPoolIdToken] = useState<string | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -441,13 +444,40 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     [chains, importedTokens],
   );
 
+  // On a launchpad chain the identifier to hand is often a v4 PoolId, not a token address — it is
+  // what the launch UI and the explorer display. Pasting one used to read "No token found", which
+  // looks like the token does not exist when the pool is real and tradeable. Resolve the id to its
+  // pair and hand the non-hub leg to the normal import path below.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!looksLikePoolId(q)) {
+      setPoolIdToken(null);
+      return;
+    }
+    let cancelled = false;
+    setImporting(true);
+    resolvePoolId(q)
+      .then((r) => {
+        if (cancelled) return;
+        setPoolIdToken(r ? r.token : null);
+      })
+      .finally(() => {
+        if (!cancelled) setImporting(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery]);
+
   // Resolve a pasted contract address into a selectable token: it must (a) be a valid address,
   // (b) have at least one active pool in the indexer so the aggregator can actually route it, and
   // (c) expose ERC-20 symbol/decimals on-chain. This is what makes MoleSwap a real aggregator —
   // any token with liquidity is tradable, not just the three in the default list.
   useEffect(() => {
-    const q = searchQuery.trim();
-    if (!isAddress(q)) return;
+    const typed = searchQuery.trim();
+    // Either the user pasted an address, or they pasted a PoolId that resolved to one.
+    const q = isAddress(typed) ? typed : poolIdToken && isAddress(poolIdToken) ? poolIdToken : "";
+    if (!q) return;
     const lc = q.toLowerCase();
     if (allTokens.some((t) => t.address?.toLowerCase() === lc)) return;
     let cancelled = false;
@@ -456,9 +486,14 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       try {
         // On-chain discovery: does this token have ANY live pool (vs WETH or USDG) across every
         // executable factory? This finds launchpad/un-indexed tokens the moment they have liquidity.
-        const found = await tokenHasPool(lc);
+        // tokenHasPool probes the V3 factories. A token whose only liquidity is in a Uniswap-v4
+        // pool therefore looks poolless to it — which is wrong on a chain where launches happen on
+        // v4. If we got here from a PoolId that StateView confirmed is initialised, the pool's
+        // existence is already established and that gate would reject a perfectly tradeable token.
+        const viaPoolId = !!poolIdToken && poolIdToken.toLowerCase() === lc;
+        const found = viaPoolId ? [] : await tokenHasPool(lc);
         if (cancelled) return;
-        if (found.length === 0) {
+        if (!viaPoolId && found.length === 0) {
           setImporting(false);
           return; // no live pool anywhere → not importable
         }
@@ -496,7 +531,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     return () => {
       cancelled = true;
     };
-  }, [searchQuery, allTokens]);
+  }, [searchQuery, poolIdToken, allTokens]);
 
   // Whole-chain name/symbol search: query the mp_tokens index (debounced). This is what makes the
   // search bar find ANY token on Robinhood Chain by typing its name/symbol — not just the 3 in the
@@ -1233,8 +1268,16 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         add(t);
     }
     for (const t of searchResults) add(t); // whole-chain index matches
+    // A pasted PoolId matches no symbol, name or address, so the text filter above discards the very
+    // token it resolved to. Surface it explicitly.
+    if (poolIdToken) {
+      const lc = poolIdToken.toLowerCase();
+      for (const t of [...modalTokens, ...importedTokens]) {
+        if ((t.address || "").toLowerCase() === lc) add(t);
+      }
+    }
     return out;
-  }, [modalTokens, searchQuery, searchResults]);
+  }, [modalTokens, searchQuery, searchResults, poolIdToken, importedTokens]);
 
   // Enrich the visible picker rows with live market data (logo, mcap, liquidity, dexscreener link).
   useEffect(() => {
@@ -1491,8 +1534,10 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                         const lc = (token.address || "").toLowerCase();
                         // Held tokens are never hidden: burying an asset someone owns strands it.
                         if (heldList.some((h) => h.address?.toLowerCase() === lc)) return true;
-                        // A pasted address is an explicit request for that exact token.
+                        // A pasted address — or a pasted PoolId — is an explicit request for that
+                        // exact token, so it is never filtered out as unvetted.
                         if (isAddress(searchQuery.trim())) return true;
+                        if (poolIdToken && poolIdToken.toLowerCase() === lc) return true;
                         return riskOf(token).tier !== "unvetted";
                       })
                       .map((token, idx) => {
