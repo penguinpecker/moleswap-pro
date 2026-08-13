@@ -195,6 +195,15 @@ const ExchangeStyles = () => (
     .hist-row .h2 { display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 11.5px; color: var(--p-card-ink-3); flex-wrap: wrap; }
     .hist-row .h2 a { color: var(--clay); font-family: var(--font-num); }
     .p-card .search input::placeholder { color: var(--ink-3); }
+
+    /* Swap layout. The receive panel only mounts once there is a quote, so a fixed two-column
+       grid leaves the exchange card stranded in the left ~53% with dead space beside it (which
+       is exactly how it looked at 0.0). Centring the GROUP keeps the card centred when it is
+       alone and still lets the panel sit beside it, instead of the card jumping left the moment
+       you type an amount. Wrapping is what makes it work on a phone. */
+    .swap-grid { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 14px; }
+    .swap-grid > * { flex: 1 1 420px; min-width: 0; max-width: 560px; }
+    @media (max-width: 900px) { .swap-grid > * { flex-basis: 100%; max-width: 560px; } }
     .p-btn:disabled { opacity: .5; cursor: default; }
     .p-btn:disabled:active { transform: none; }
   `}</style>
@@ -855,6 +864,11 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setRecipientAddress(value);
   };
 
+  // Belt and braces for the picker's flip: a pair can also end up identical through a URL, a restored
+  // session or the swap-direction button, and an identical pair has no route — the quote would simply
+  // fail with a confusing "no route" instead of telling the user what is actually wrong.
+  const sameAsset = !!fromToken && !!toToken && fromToken.toLowerCase() === toToken.toLowerCase();
+
   const handleRecipientAddressBlur = () => {
     if (recipientAddress && !isValidAddress(recipientAddress)) {
       // Reset to wallet address if invalid
@@ -1084,11 +1098,11 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setSelectionMode(mode);
     setSearchQuery("");
     setSearchQueryNetwork("");
-    // The app runs on one chain, so the TO picker is fixed to Robinhood Chain.
-    if (mode === "to") {
-      setSelectedNetwork("Robinhood Chain");
-      return;
-    }
+    // The app runs on one chain, so BOTH pickers are fixed to Robinhood Chain. The FROM side used to
+    // wait for a network choice before showing anything, which buried the user's own holdings behind
+    // a step that has exactly one possible answer.
+    setSelectedNetwork("Robinhood Chain");
+    if (mode === "to") return;
     // Find the chain group that contains the currently selected token for this side
     const currentToken = fromToken;
     const matchedChain = chains.find((c) =>
@@ -1347,10 +1361,15 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       }
     }
     // Single chain — always set chainId to 4663 (Robinhood Chain)
+    const lcPick = tokenAddress.toLowerCase();
     if (selectionMode === "from") {
+      // Same asset on both sides is not a swap and has no route. Picking the token already selected
+      // opposite flips the pair, which is what the user meant.
+      if (toToken && toToken.toLowerCase() === lcPick) setToToken(fromToken);
       setFromChainId("4663");
       setFromToken(tokenAddress);
     } else if (selectionMode === "to") {
+      if (fromToken && fromToken.toLowerCase() === lcPick) setFromToken(toToken);
       setToChainId("4663");
       setToToken(tokenAddress);
     }
@@ -1563,7 +1582,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
           <main className="w-full">
             <ExchangeHero />
 
-            <section className="p-grid p-side">
+            <section className="swap-grid">
               <div>
                 <div className="p-card">
                   {/* Header */}
@@ -1680,13 +1699,13 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                     </span>
                   </div>
 
-                  {/* Confirms the exact asset the user receives on Robinhood Chain. */}
-                  {toTokenMeta && (
+                  {/* The "arrives as X on Robinhood Chain" confirmation was removed — it restated the
+                      token already named directly above it on a single-chain deployment. The custom
+                      recipient is NOT restating anything, so it stays: sending someone else's address
+                      the proceeds is the one thing here worth showing back to the user before they sign. */}
+                  {recipientAddress && walletAddress && recipientAddress.toLowerCase() !== walletAddress.toLowerCase() && (
                     <div className="arrive">
-                      ✓ Arrives as {(toTokenMeta as any)?.symbol || displaySymbolOf(toTokenMeta)} on Robinhood Chain
-                      {recipientAddress && walletAddress && recipientAddress.toLowerCase() !== walletAddress.toLowerCase() && (
-                        <> → {recipientAddress.slice(0, 6)}…{recipientAddress.slice(-4)}</>
-                      )}
+                      → Sending to {recipientAddress.slice(0, 6)}…{recipientAddress.slice(-4)}
                     </div>
                   )}
 
@@ -1769,11 +1788,15 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                       <button
                         onClick={handleReviewSwap}
                         disabled={
-                          !quote || !canQuote || !amount || Number(amount) <= 0 || insufficientBalance
+                          !quote || !canQuote || !amount || Number(amount) <= 0 || insufficientBalance || sameAsset
                         }
                         className="p-btn"
                       >
-                        {insufficientBalance ? `Insufficient ${displaySymbolOf(fromTokenMeta)}` : "Review swap"}
+                        {sameAsset
+                          ? "Pick two different tokens"
+                          : insufficientBalance
+                            ? `Insufficient ${displaySymbolOf(fromTokenMeta)}`
+                            : "Review swap"}
                       </button>
                     </>
                   )}

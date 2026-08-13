@@ -103,8 +103,8 @@
 
 @theme inline {
   /* Retired pixel fonts — both aliases now resolve to the Burrow stacks so any
-     straggler `font-family-ThaleahFat` class renders in the new type. */
-  --font-family-ThaleahFat: ui-rounded, "SF Pro Rounded", ui-sans-serif,
+     straggler `font-display` class renders in the new type. */
+  --font-display: ui-rounded, "SF Pro Rounded", ui-sans-serif,
     -apple-system, "Nunito", system-ui, sans-serif;
   --font-family-PixelfySans: ui-monospace, "SF Mono", "JetBrains Mono", Menlo,
     monospace;

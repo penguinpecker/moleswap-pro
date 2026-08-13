@@ -144,7 +144,15 @@ nav.tabs a[aria-current="page"] {
 
 /* ------------------------------- Hero ------------------------------- */
 
-main { max-width: 1140px; margin: 0 auto; padding: 0 20px 130px; position: relative; }
+main {
+  max-width: 1140px; margin: 0 auto; padding: 0 20px 130px; position: relative;
+  /* main is a flex child, and a flex item defaults to min-width:auto — it refuses to shrink below
+     its own min-content. One long unbreakable string anywhere inside (an address, a nowrap chip)
+     therefore widened main past the viewport and pushed the whole page into horizontal overflow on
+     every route. Measured at 390px: main was 403px wide while NO descendant exceeded 391px, which is
+     the signature of a min-content floor rather than an oversized child. */
+  min-width: 0;
+}
 
 header.hero { padding: 26px 0 40px; position: relative; }
 
@@ -882,3 +890,26 @@ nav.tabs { margin-left: auto; margin-right: 4px; }
 .foot-follow { color: rgba(255,230,196,.45); font-size: 12px; }
 .linkish { background: none; border: 0; cursor: pointer; font: inherit; color: var(--clay); font-weight: 700; text-decoration: underline; padding: 0; }
 .center { text-align: center; }
+
+
+/* Count badge inside a filter chip — tells you how many pools a category holds before you click it. */
+.p-chipset button .chip-n {
+  display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 999px;
+  font-size: 10px; font-weight: 800; font-family: var(--font-num);
+  background: rgba(44,26,12,.12); color: inherit; vertical-align: middle;
+}
+.p-chipset button[disabled] { opacity: .4; cursor: default; }
+
+
+/* ---- Mobile: stop the page overflowing sideways ---- */
+/* Same min-width:auto trap one level up: the page shell is a flex column, so it inherits the widest
+   min-content of its children. Both need an explicit floor of zero for the layout to reflow instead
+   of overflowing. Everything long inside is then free to wrap or scroll within its own box. */
+.min-h-screen.flex-col, .flex.min-h-screen { min-width: 0; }
+main > * { min-width: 0; }
+
+@media (max-width: 620px) {
+  main { padding-left: 14px; padding-right: 14px; }
+  h1 { font-size: clamp(1.85rem, 8.6vw, 2.5rem); }
+  .sub { font-size: .98rem; }
+}

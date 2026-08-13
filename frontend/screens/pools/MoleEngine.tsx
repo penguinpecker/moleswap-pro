@@ -78,12 +78,12 @@ export function MoleEngine() {
     <div className="bg-ground relative mx-auto mb-5 w-full max-w-3xl overflow-hidden rounded-2xl border-3 border-[#C97E00] p-5 shadow-[6px_6px_0_#000]">
       {/* header */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-        <div className="font-family-ThaleahFat flex items-center gap-2 text-xl tracking-widest text-yellow-200 sm:text-2xl">
+        <div className="font-display flex items-center gap-2 text-xl tracking-widest text-yellow-200 sm:text-2xl">
           <span className="inline-block animate-spin-slow">⚙</span> MOLESWAP ENGINE · WETH/USDG
         </div>
-        <span className="font-family-ThaleahFat rounded bg-[#4e9d2a] px-2 py-1 text-xs tracking-wider text-white">v4 · ALM-MANAGED</span>
+        <span className="font-display rounded bg-[#4e9d2a] px-2 py-1 text-xs tracking-wider text-white">v4 · ALM-MANAGED</span>
       </div>
-      <p className="font-family-ThaleahFat mb-4 text-xs tracking-wider text-gray-300 sm:text-sm">
+      <p className="font-display mb-4 text-xs tracking-wider text-gray-300 sm:text-sm">
         The machinery under every MoleSwap trade: auto-managed liquidity, and a batch that crosses opposing
         orders at the TWAP before touching the pool.
       </p>
@@ -91,11 +91,11 @@ export function MoleEngine() {
       {/* Batch heartbeat (the queue) */}
       <div className="mb-4 rounded-xl border-2 border-[#523525] bg-[#2a1c12] p-4">
         <div className="flex items-center justify-between">
-          <div className="font-family-ThaleahFat flex items-center gap-2 tracking-widest text-peach-300">
+          <div className="font-display flex items-center gap-2 tracking-widest text-peach-300">
             <span className={`h-3 w-3 rounded-full bg-green-400 ${secLeft > 0 ? "animate-ping-slow" : ""}`} />
             BATCH #{epoch}
           </div>
-          <div className="font-family-ThaleahFat tracking-widest">
+          <div className="font-display tracking-widest">
             <span className="text-xs text-gray-400">CROSSES IN </span>
             <span className={`text-xl ${secLeft <= 10 ? "text-red-400" : "text-yellow-200"}`}>{mmss(secLeft)}</span>
           </div>
@@ -107,7 +107,7 @@ export function MoleEngine() {
             style={{ width: pct(schedule ? (1 - secLeft / Math.max(1, schedule.epochDuration)) * 100 : 0) }}
           />
         </div>
-        <p className="font-family-ThaleahFat mt-2 text-[11px] tracking-wider text-[#7a7]">
+        <p className="font-display mt-2 text-[11px] tracking-wider text-[#7a7]">
           opposing orders net at the TWAP — 0 slippage, 0 LP fee on the crossed part
         </p>
       </div>
@@ -115,8 +115,8 @@ export function MoleEngine() {
       {/* ALM range (the vault) */}
       <div className="mb-4 rounded-xl border-2 border-[#523525] bg-[#2a1c12] p-4">
         <div className="mb-3 flex items-center justify-between">
-          <span className="font-family-ThaleahFat tracking-widest text-peach-300">AUTO-MANAGED RANGE</span>
-          <span className={`font-family-ThaleahFat text-xs tracking-wider ${inRange ? "text-green-400" : "text-red-400"}`}>
+          <span className="font-display tracking-widest text-peach-300">AUTO-MANAGED RANGE</span>
+          <span className={`font-display text-xs tracking-wider ${inRange ? "text-green-400" : "text-red-400"}`}>
             {inRange ? "● IN RANGE — EARNING" : "○ OUT OF RANGE"}
           </span>
         </div>
@@ -132,7 +132,7 @@ export function MoleEngine() {
             <div className="h-full w-[2px] bg-[#5b9bd5] opacity-80" />
           </div>
         </div>
-        <div className="font-family-ThaleahFat mt-2 flex justify-between text-[11px] tracking-wider text-gray-400">
+        <div className="font-display mt-2 flex justify-between text-[11px] tracking-wider text-gray-400">
           <span>lo tick {pool ? pool.lo : "—"}</span>
           <span className="text-yellow-300">▲ spot {pool ? pool.tick : "—"}</span>
           <span className="text-[#5b9bd5]">▲ twap {twap ?? "—"}</span>
@@ -142,14 +142,14 @@ export function MoleEngine() {
 
       {/* stats + actions */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="font-family-ThaleahFat text-xs tracking-wider text-gray-300">
+        <div className="font-display text-xs tracking-wider text-gray-300">
           fee {pool ? (pool.fee / 10000).toFixed(2) : "—"}% · depth {pool ? (Number(pool.liquidity) / 1e12).toFixed(2) : "—"} · settlement every {schedule ? schedule.epochDuration : QUEUE_CONFIG.epochDuration}s
         </div>
         <div className="flex gap-2">
-          <Link href="/vault" className="font-family-ThaleahFat cursor-pointer rounded-lg border-2 border-[#3f7d20] bg-[#4e9d2a] px-3 py-2 text-sm tracking-wider text-white transition-all hover:brightness-110">
+          <Link href="/vault" className="font-display cursor-pointer rounded-lg border-2 border-[#3f7d20] bg-[#4e9d2a] px-3 py-2 text-sm tracking-wider text-white transition-all hover:brightness-110">
             PROVIDE LIQUIDITY
           </Link>
-          <Link href="/queue" className="font-family-ThaleahFat cursor-pointer rounded-lg border-2 border-[#C97E00] bg-[#523525] px-3 py-2 text-sm tracking-wider text-yellow-200 transition-all hover:brightness-110">
+          <Link href="/queue" className="font-display cursor-pointer rounded-lg border-2 border-[#C97E00] bg-[#523525] px-3 py-2 text-sm tracking-wider text-yellow-200 transition-all hover:brightness-110">
             QUEUE A SWAP
           </Link>
         </div>

@@ -62,7 +62,7 @@ export const NavBar = () => {
   const RIGHT = [
     { href: "/quests", label: "Quests" },
     { href: "/profile", label: "Profile" },
-    { href: "/leaderboard", label: "Ranks" },
+    { href: "/leaderboard", label: "Leaderboard" },
   ];
   const ALL = [...LEFT, ...RIGHT, { href: "/queue", label: "Queue" }];
 

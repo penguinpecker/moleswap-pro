@@ -1,97 +1,97 @@
 /**
- * livePools.ts — the REAL pool list, derived from what is actually on-chain.
+ * livePools.ts — the pools MoleSwap itself runs.
  *
- * WHY THIS EXISTS
- * `POOLS` in contracts.ts is a hardcoded array of three PancakeSwap WETH/USDG pools. Measured on
- * 2026-08-13, two of them were effectively empty (~$2 and ~$0.03 of TVL) and were still reported to
- * users as having liquidity, while the pool the aggregator ACTUALLY swaps through — a fee-100
- * WETH/USDG pool holding ~$9.5M — was not in the list at all. So the pools surface was showing ~$85k
- * of depth for a venue that really has ~$9.5M, and listing two dead pools as live.
+ * SCOPE
+ * This lists ONLY pools created on MoleSwap: Uniswap-v4 pools bound to MoleHook, registered in
+ * `mp_pools` under venue `mole_v4`. External PancakeSwap/Uniswap pools are deliberately NOT listed
+ * here even though the aggregator routes through them — the router's job is to trade wherever the
+ * price is best, but this page is about our own venue.
  *
- * The aggregator was never wrong about this: `lib/aggregator/discover.ts` probes six V3 factories
- * across seven fee tiers live on every quote, which is how it finds pools the static list and even
- * the `mp_pools` registry are missing. This module brings the DISPLAY surface up to the same standard.
+ * WHY A v4 POOL CANNOT BE READ LIKE A v3 ONE
+ * A v4 pool is not a contract. It is a key hashed into a PoolId inside the PoolManager singleton, so
+ * there is no per-pool address to call `slot0()` on and no per-pool token balance to read: every v4
+ * pool's tokens sit commingled in the singleton. State comes from StateView keyed by PoolId, and TVL
+ * has to be derived from the positions themselves rather than from a balance lookup.
  *
- * SOURCE OF TRUTH
- * `mp_tokens` — the indexer's per-token registry. Each verified row carries the token's metadata and
- * the address of its DEEPEST pool (`pool`) plus which hub it pairs against (`pool_hub` = weth|usdg),
- * ranked by `liquidity` (denominated in WETH). That gives a real, self-maintaining list: every
- * memecoin/WETH pool with genuine depth appears automatically, and a pool that drains falls off.
- * The pair's fee tier and currency ordering are read from the pool contract itself rather than
- * assumed, because the registry does not always carry them (and `mp_pools` is missing rows that
- * `mp_tokens` has — verified, do not "simplify" this by joining the two).
+ * HOW TVL IS DERIVED
+ * By summing the real token amounts of every open MolePositions position in the pool, using the
+ * standard concentrated-liquidity amount formulas at the pool's current price. That is an exact
+ * measure of what is actually deposited, not an estimate from active liquidity (which only counts
+ * the band straddling spot and would understate a pool with positions parked out of range).
  */
 import { ethers } from "ethers";
 import { createClient } from "@supabase/supabase-js";
 import { CONTRACTS, type TokenInfo, type PoolInfo } from "./contracts";
 
 const USDG_ADDRESS = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b";
+const POSITIONS = CONTRACTS.MOLE_POSITIONS;
 
-/** The two hub legs every listed pool pairs against. Decimals are pinned — USDG is SIX. */
-const HUBS: Record<"weth" | "usdg", TokenInfo> = {
-  weth: {
-    address: CONTRACTS.WETH,
-    symbol: "WETH",
-    name: "Wrapped Ether",
-    decimals: 18,
-    sourceChain: "Robinhood Chain",
-    logoURI: "/tokens/weth.svg",
-    swappable: true,
-  },
-  usdg: {
-    address: USDG_ADDRESS,
-    symbol: "USDG",
-    name: "Global Dollar",
-    decimals: 6,
-    sourceChain: "Robinhood Chain",
-    logoURI: "/tokens/usdg.svg",
-    swappable: true,
-  },
-};
+/** Asset class of a pool, derived from its non-hub leg. Drives the category filter on /pools. */
+export type AssetCategory = "mains" | "stables" | "stocks" | "memes";
 
 export interface LivePool {
   pool: PoolInfo;
   token0: TokenInfo;
   token1: TokenInfo;
-  /** Depth of this token's pool in WETH, as measured by the indexer. Ranking key, not a price. */
-  liquidityWeth: number;
-  /** Which leg is the hub — the other leg is the interesting token. */
+  /** v4 PoolId — the pool's real identity. `pool.address` is empty for these. */
+  poolId: string;
+  tick: number;
+  sqrtPriceX96: bigint;
+  liquidity: bigint;
+  reserve0: number;
+  reserve1: number;
+  tvlUsd: number;
+  category: AssetCategory;
+  /** Which leg is the pricing hub. */
   hub: "weth" | "usdg";
 }
 
-const POOL_META_ABI = [
-  "function token0() view returns (address)",
-  "function token1() view returns (address)",
-  "function fee() view returns (uint24)",
+const stateViewAbi = [
+  "function getSlot0(bytes32) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
+  "function getLiquidity(bytes32) view returns (uint128)",
+];
+const positionsAbi = [
+  "function positionCount() view returns (uint256)",
+  "function getPosition(uint256) view returns (address owner, bytes32 poolId, int24 tickLower, int24 tickUpper, uint128 liquidity, uint64 openedAtL1Block, uint64 lastRebalancedAt)",
 ];
 
+const Q96 = 1n << 96n;
+
+/** sqrt(1.0001^tick) * 2^96, via float — precise enough for display-layer reserve sums. */
+function sqrtRatioAtTick(tick: number): bigint {
+  return BigInt(Math.floor(Math.pow(1.0001, tick / 2) * 2 ** 96));
+}
+
+/** Token amounts a position of `liquidity` holds over [lower, upper] at the current price. */
+function amountsForLiquidity(sqrtP: bigint, sqrtA: bigint, sqrtB: bigint, L: bigint) {
+  if (sqrtA > sqrtB) [sqrtA, sqrtB] = [sqrtB, sqrtA];
+  let a0 = 0n;
+  let a1 = 0n;
+  if (sqrtP <= sqrtA) {
+    a0 = (L * Q96 * (sqrtB - sqrtA)) / (sqrtA * sqrtB);
+  } else if (sqrtP < sqrtB) {
+    a0 = (L * Q96 * (sqrtB - sqrtP)) / (sqrtP * sqrtB);
+    a1 = (L * (sqrtP - sqrtA)) / Q96;
+  } else {
+    a1 = (L * (sqrtB - sqrtA)) / Q96;
+  }
+  return { a0, a1 };
+}
+
 /**
- * TVL in DOLLARS, not in "whatever token1 happens to be".
- *
- * Valuing a pool in its own token1 produces numbers that cannot be compared or even read — a
- * WETH/MANCER pool comes out as "166,416,858", which is memecoin units, not money. Every listed pool
- * pairs against a hub (WETH or USDG), so both legs are priced into the HUB leg using the pool's own
- * price, then the hub is converted once: USDG is a dollar, WETH uses the live ETH price.
- *
- * `price` is token1-per-token0, as read from the pool's own sqrtPriceX96 — no external feed.
+ * Classify a pool by its non-hub leg. Data-driven where the data allows it: Robinhood's tokenised
+ * equities all carry "Robinhood Token" in their name, and the indexer already flags stablecoins.
+ * Everything else that is not a hub asset is a memecoin, which on this chain is overwhelmingly true.
  */
-export function tvlUsd(args: {
-  reserve0: number;
-  reserve1: number;
-  price: number;
-  hubIsToken0: boolean;
-  hubIsUsdg: boolean;
-  ethUsd: number;
-}): number {
-  const { reserve0, reserve1, price, hubIsToken0, hubIsUsdg, ethUsd } = args;
-  if (!Number.isFinite(price) || price <= 0) return 0;
-  // Value the non-hub leg into hub units, then add the hub leg.
-  const inHub = hubIsToken0
-    ? reserve0 + reserve1 / price // token1 -> token0(hub)
-    : reserve0 * price + reserve1; // token0 -> token1(hub)
-  if (!Number.isFinite(inHub) || inHub <= 0) return 0;
-  const usd = hubIsUsdg ? inHub : inHub * ethUsd;
-  return Number.isFinite(usd) && usd > 0 ? usd : 0;
+function classify(token: TokenInfo, isHubPair: boolean): AssetCategory {
+  const sym = token.symbol.toUpperCase();
+  const name = (token.name || "").toLowerCase();
+  if (isHubPair) return "mains";
+  if ((token as any).isStable || sym === "USDG" || sym === "USDC" || sym === "USDT") return "stables";
+  if (name.includes("robinhood token") || name.includes("• robi")) return "stocks";
+  if (sym === "WETH" || sym === "ETH") return "mains";
+  return "memes";
 }
 
 function sb() {
@@ -103,15 +103,9 @@ function sb() {
 
 let _cache: { at: number; rows: LivePool[] } | null = null;
 
-/**
- * Load the top `limit` pools by real indexed depth, newest metadata first.
- *
- * Fails SOFT: if the registry is unreachable the caller still gets the flagship WETH/USDG pool via
- * `fallback`, so the pools surface degrades to "fewer pools" and never to "a wrong pool".
- */
 export async function loadLivePools(
   provider: ethers.Provider,
-  limit = 24,
+  _limit = 24,
   ttlMs = 60_000,
 ): Promise<LivePool[]> {
   const now = Date.now();
@@ -120,80 +114,172 @@ export async function loadLivePools(
   const client = sb();
   if (!client) return _cache?.rows ?? [];
 
-  const { data, error } = await client
+  const { data: poolRows, error } = await client
+    .from("mp_pools")
+    .select("id,token0,token1,fee,tick_spacing,hooks")
+    .eq("venue", "mole_v4")
+    .eq("active", true);
+  if (error || !poolRows?.length) return _cache?.rows ?? [];
+
+  // Token metadata for every leg in one round trip.
+  const addrs = Array.from(
+    new Set(poolRows.flatMap((r: any) => [String(r.token0).toLowerCase(), String(r.token1).toLowerCase()])),
+  );
+  const { data: tokenRows } = await client
     .from("mp_tokens")
-    .select("address,symbol,name,decimals,logo_url,liquidity,pool,pool_hub")
-    .eq("verified", true)
-    .not("pool", "is", null)
-    .not("liquidity", "is", null)
-    .order("liquidity", { ascending: false })
-    .limit(limit);
+    .select("address,symbol,name,decimals,logo_url,is_stable")
+    .in("address", addrs);
+  const metaOf = new Map<string, any>((tokenRows || []).map((t: any) => [String(t.address).toLowerCase(), t]));
 
-  if (error || !data?.length) return _cache?.rows ?? [];
+  const toToken = (addr: string): TokenInfo => {
+    const m = metaOf.get(addr.toLowerCase());
+    return {
+      address: ethers.getAddress(addr),
+      symbol: m?.symbol || "???",
+      name: m?.name || m?.symbol || "Unknown",
+      decimals: Number(m?.decimals ?? 18),
+      sourceChain: "Robinhood Chain",
+      logoURI: m?.logo_url || "",
+      swappable: true,
+      ...(m?.is_stable ? { isStable: true } : {}),
+    } as TokenInfo;
+  };
 
-  // One pool can be the deepest pool for more than one token (USDG and WETH both point at the
-  // flagship pair). Keep the first — the list is already ordered by depth.
-  const seen = new Set<string>();
-  const candidates = data.filter((r: any) => {
-    const p = String(r.pool || "").toLowerCase();
-    if (!p || seen.has(p)) return false;
-    seen.add(p);
-    return true;
-  });
+  const sv = new ethers.Contract(STATE_VIEW, stateViewAbi, provider);
+  const pm = new ethers.Contract(POSITIONS, positionsAbi, provider);
+
+  // All open positions once, then bucketed by pool — one pass instead of a scan per pool.
+  const byPool = new Map<string, { lower: number; upper: number; L: bigint }[]>();
+  try {
+    const count = Number(await pm.positionCount());
+    const positions = await Promise.all(
+      Array.from({ length: count }, (_, i) =>
+        pm.getPosition(i + 1).catch(() => null),
+      ),
+    );
+    for (const p of positions) {
+      if (!p) continue;
+      const L = BigInt(p[4]);
+      if (L <= 0n) continue;
+      const id = String(p[1]).toLowerCase();
+      if (!byPool.has(id)) byPool.set(id, []);
+      byPool.get(id)!.push({ lower: Number(p[2]), upper: Number(p[3]), L });
+    }
+  } catch {
+    /* positions unreadable — pools still list, with zero derived TVL */
+  }
 
   const settled = await Promise.allSettled(
-    candidates.map(async (row: any) => {
-      const poolAddr = String(row.pool);
-      const c = new ethers.Contract(poolAddr, POOL_META_ABI, provider);
-      // Read ordering and fee from the POOL, never assume them.
-      const [t0, t1, fee] = await Promise.all([c.token0(), c.token1(), c.fee()]);
+    poolRows.map(async (row: any) => {
+      const poolId = String(row.id);
+      const [slot0, liquidity] = await Promise.all([sv.getSlot0(poolId), sv.getLiquidity(poolId)]);
+      const sqrtPriceX96 = BigInt(slot0[0]);
+      if (sqrtPriceX96 === 0n) return null; // never initialised
 
-      const hubKey: "weth" | "usdg" = String(row.pool_hub || "weth").toLowerCase() === "usdg" ? "usdg" : "weth";
-      const hub = HUBS[hubKey];
+      const token0 = toToken(String(row.token0));
+      const token1 = toToken(String(row.token1));
+      const tick = Number(slot0[1]);
 
-      const token: TokenInfo = {
-        address: ethers.getAddress(String(row.address)),
-        symbol: row.symbol || "???",
-        name: row.name || row.symbol || "Unknown",
-        decimals: Number(row.decimals ?? 18),
-        sourceChain: "Robinhood Chain",
-        logoURI: row.logo_url || "",
-        swappable: true,
-      };
+      // Sum every open position's real token amounts at the current price.
+      let a0 = 0n;
+      let a1 = 0n;
+      for (const pos of byPool.get(poolId.toLowerCase()) || []) {
+        const r = amountsForLiquidity(
+          sqrtPriceX96, sqrtRatioAtTick(pos.lower), sqrtRatioAtTick(pos.upper), pos.L,
+        );
+        a0 += r.a0;
+        a1 += r.a1;
+      }
+      const reserve0 = Number(ethers.formatUnits(a0, token0.decimals));
+      const reserve1 = Number(ethers.formatUnits(a1, token1.decimals));
 
-      // Whichever of the two legs matches token0 on-chain becomes token0 here.
-      const t0lc = String(t0).toLowerCase();
-      const isTokenFirst = token.address.toLowerCase() === t0lc;
-      const hubMatches = hub.address.toLowerCase() === t0lc || hub.address.toLowerCase() === String(t1).toLowerCase();
-      if (!hubMatches) return null; // pool is not actually against the hub we were told — drop it
+      // price = token1 per token0, decimal-adjusted from the pool's own sqrt price.
+      const sqr = sqrtPriceX96 * sqrtPriceX96;
+      const raw = Number((sqr * 10n ** 18n) / (1n << 192n)) / 1e18;
+      const price = raw * 10 ** (token0.decimals - token1.decimals);
 
-      const token0 = isTokenFirst ? token : hub;
-      const token1 = isTokenFirst ? hub : token;
+      const usdgLc = USDG_ADDRESS.toLowerCase();
+      const wethLc = CONTRACTS.WETH.toLowerCase();
+      const legs = [token0.address.toLowerCase(), token1.address.toLowerCase()];
+      const hub: "weth" | "usdg" = legs.includes(usdgLc) ? "usdg" : "weth";
+      const isHubPair = legs.includes(usdgLc) && legs.includes(wethLc);
+      const other = legs[0] === (hub === "usdg" ? usdgLc : wethLc) ? token1 : token0;
 
       const pool: PoolInfo = {
-        address: poolAddr,
+        address: "",
         token0: token0.address,
         token1: token1.address,
-        fee: Number(fee),
+        fee: Number(row.fee),
         name: `${token0.symbol}/${token1.symbol}`,
       };
 
       return {
-        pool,
-        token0,
-        token1,
-        liquidityWeth: Number(row.liquidity) || 0,
-        hub: hubKey,
-      } as LivePool;
+        pool, token0, token1, poolId, tick, sqrtPriceX96,
+        liquidity: BigInt(liquidity),
+        reserve0, reserve1,
+        tvlUsd: 0, // filled in below, once the ETH price is known
+        category: classify(other, isHubPair),
+        hub,
+        _price: price,
+      } as any;
     }),
   );
 
   const rows = settled
-    .filter((r): r is PromiseFulfilledResult<LivePool | null> => r.status === "fulfilled")
+    .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
     .map((r) => r.value)
-    .filter(Boolean) as LivePool[];
-
+    .filter(Boolean);
   if (!rows.length) return _cache?.rows ?? [];
-  _cache = { at: now, rows };
-  return rows;
+
+  // ETH price from our own deepest WETH/USDG pool, so the page agrees with the swap engine.
+  const wethLc = CONTRACTS.WETH.toLowerCase();
+  const usdgLc = USDG_ADDRESS.toLowerCase();
+  const ethRow = rows
+    .filter((r: any) => {
+      const l = [r.token0.address.toLowerCase(), r.token1.address.toLowerCase()];
+      return l.includes(wethLc) && l.includes(usdgLc);
+    })
+    .sort((a: any, b: any) => Number(b.liquidity) - Number(a.liquidity))[0];
+  const ethUsd = ethRow
+    ? ethRow.token0.address.toLowerCase() === wethLc
+      ? ethRow._price
+      : ethRow._price > 0 ? 1 / ethRow._price : 0
+    : 0;
+
+  const priced: LivePool[] = rows.map((r: any) => {
+    const t0IsUsdg = r.token0.address.toLowerCase() === usdgLc;
+    const t1IsUsdg = r.token1.address.toLowerCase() === usdgLc;
+    const t0IsWeth = r.token0.address.toLowerCase() === wethLc;
+    const t1IsWeth = r.token1.address.toLowerCase() === wethLc;
+    // Value the hub leg directly and double it: a two-sided position holds matched value on each
+    // side at spot, and the non-hub leg has no independent dollar price on this chain.
+    let hubValue = 0;
+    if (t0IsUsdg) hubValue = r.reserve0;
+    else if (t1IsUsdg) hubValue = r.reserve1;
+    else if (t0IsWeth) hubValue = r.reserve0 * ethUsd;
+    else if (t1IsWeth) hubValue = r.reserve1 * ethUsd;
+    const isHubPair = (t0IsWeth && t1IsUsdg) || (t0IsUsdg && t1IsWeth);
+    const tvlUsd = isHubPair
+      ? (t0IsUsdg ? r.reserve0 : r.reserve1) + (t0IsWeth ? r.reserve0 : r.reserve1) * ethUsd
+      : hubValue * 2;
+    const { _price, ...rest } = r;
+    return { ...rest, tvlUsd: Number.isFinite(tvlUsd) && tvlUsd > 0 ? tvlUsd : 0 } as LivePool;
+  });
+
+  priced.sort((a, b) => b.tvlUsd - a.tvlUsd);
+  _cache = { at: now, rows: priced };
+  return priced;
+}
+
+/** Kept for the API route, which prices external fallbacks in hub terms. */
+export function tvlUsd(args: {
+  reserve0: number; reserve1: number; price: number;
+  hubIsToken0: boolean; hubIsUsdg: boolean; ethUsd: number;
+}): number {
+  const { reserve0, reserve1, price, hubIsToken0, hubIsUsdg, ethUsd } = args;
+  if (!Number.isFinite(price) || price <= 0) return 0;
+  const inHub = hubIsToken0 ? reserve0 + reserve1 / price : reserve0 * price + reserve1;
+  if (!Number.isFinite(inHub) || inHub <= 0) return 0;
+  const usd = hubIsUsdg ? inHub : inHub * ethUsd;
+  return Number.isFinite(usd) && usd > 0 ? usd : 0;
 }

@@ -86,6 +86,18 @@ const coinColor = (symbol: string) => COIN_COLORS[symbol?.toUpperCase()] || "#8a
 
 const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
+/* Annualising a day of fees over a pool holding a few dollars produces numbers like 838% that are
+   arithmetic, not yield. Below this the APY column shows "—". */
+const APY_MIN_TVL_USD = 1000;
+
+const CATEGORIES = [
+  { key: "all", label: "All" },
+  { key: "mains", label: "Mains" },
+  { key: "memes", label: "Memes" },
+  { key: "stocks", label: "Stocks" },
+  { key: "stables", label: "Stables" },
+] as const;
+
 interface PoolDisplay {
   name: string;
   token0: TokenInfo;
@@ -100,7 +112,7 @@ interface PoolDisplay {
   feeApy: number;
   vol24h: number;
   fees24h: number;
-  hubIsUsdg?: boolean;
+  category?: string;
   active: boolean;
 }
 
@@ -132,103 +144,55 @@ function calcTvl(reserve0: number, reserve1: number, price: number): number {
 }
 
 async function fetchPoolData(): Promise<PoolDisplay[]> {
-  const provider = getProvider();
+  // MoleSwap's own v4 pools, priced server-side. A v4 pool has no address to call slot0() on and no
+  // per-pool token balance — its state lives in the PoolManager singleton keyed by PoolId, and its
+  // TVL is derived from the open positions. That work belongs in one place, so this page consumes
+  // /api/v1/pools rather than reimplementing it against a pool address that does not exist.
+  const res = await fetch("/api/v1/pools", { cache: "no-store" });
+  if (!res.ok) return [];
+  const json = await res.json();
+  const pools: any[] = json?.data?.pools || [];
+  if (!pools.length) return [];
 
-  // The REAL pool set, ranked by indexed depth — every memecoin/WETH pair with genuine liquidity,
-  // not a hardcoded trio. Falls back to the static list only if the registry is unreachable.
-  const live = await loadLivePools(provider, 24);
-  const entries = live.length
-    ? live.map((l) => ({ pool: l.pool, t0: l.token0, t1: l.token1, hub: l.hub }))
-    : AMM_POOLS.map((pool) => ({
-        pool,
-        t0: TOKENS.find((t) => t.address.toLowerCase() === pool.token0.toLowerCase()),
-        t1: TOKENS.find((t) => t.address.toLowerCase() === pool.token1.toLowerCase()),
-        hub: "usdg" as const,
-      }));
+  // Real 24h volume/fees where the indexer has them, keyed by pool id.
+  let volumes = new Map<string, { vol: number; fees: number }>();
+  try {
+    volumes = await fetchPoolVolumes(pools.map((p) => p.poolId));
+  } catch { /* volume is optional — a pool with no indexed swaps shows "—", never a made-up number */ }
 
-  // Real 24h volume/fees for all displayed pools in one read, keyed by address.
-  const volumes = await fetchPoolVolumes(entries.map((e) => e.pool.address));
+  return pools.map((p) => {
+    const t0: TokenInfo = {
+      address: p.token0.address, symbol: p.token0.symbol, name: p.token0.name,
+      decimals: p.token0.decimals, sourceChain: "Robinhood Chain", logoURI: p.token0.logoURI || "",
+    } as TokenInfo;
+    const t1: TokenInfo = {
+      address: p.token1.address, symbol: p.token1.symbol, name: p.token1.name,
+      decimals: p.token1.decimals, sourceChain: "Robinhood Chain", logoURI: p.token1.logoURI || "",
+    } as TokenInfo;
 
-  const results = await Promise.allSettled(
-    entries.map(async ({ pool, t0, t1, hub }) => {
-      if (!t0 || !t1) return null;
+    const vlm = volumes.get(String(p.poolId).toLowerCase());
+    const vol24h = vlm?.vol ?? 0;
+    const fees24h = vlm?.fees ?? 0;
+    const tvl = Number(p.tvlUsd) || 0;
 
-      const poolContract = new ethers.Contract(pool.address, POOL_ABI, provider);
-      const token0Contract = new ethers.Contract(pool.token0, ERC20_BAL_ABI, provider);
-      const token1Contract = new ethers.Contract(pool.token1, ERC20_BAL_ABI, provider);
-
-      const [slot0, liquidity, bal0, bal1] = await Promise.all([
-        poolContract.slot0(),
-        poolContract.liquidity(),
-        token0Contract.balanceOf(pool.address),
-        token1Contract.balanceOf(pool.address),
-      ]);
-
-      const sqrtPriceX96 = slot0[0];
-      const hasLiquidity = liquidity > 0n;
-
-      const reserve0 = Number(ethers.formatUnits(bal0, t0.decimals));
-      const reserve1 = Number(ethers.formatUnits(bal1, t1.decimals));
-
-      const price = sqrtPriceToPrice(sqrtPriceX96, t0.decimals, t1.decimals);
-      // Hub-denominated for now. Valuing a pool in its own token1 gives unreadable numbers for a
-      // memecoin pair (a WETH/MANCER pool reads as ~166,000,000 of MANCER), so the second pass below
-      // converts every row through its hub into dollars.
-      const hubIsUsdg = hub === "usdg";
-      const hubAddr = hubIsUsdg ? USDG_LC : CONTRACTS.WETH.toLowerCase();
-      const hubIsToken0 = pool.token0.toLowerCase() === hubAddr;
-      const tvl = calcTvlUsd({ reserve0, reserve1, price, hubIsToken0, hubIsUsdg, ethUsd: 1 });
-
-      // REAL 24h volume/fees from the swap-event indexer, and APY derived from them: the fees a full-range
-      // LP earns over a year as a share of TVL. Both are real on-chain measurements — 0/"—" when a pool had
-      // no swaps in the window, never a fabricated number.
-      const vlm = volumes.get(pool.address.toLowerCase());
-      const vol24h = vlm?.vol ?? 0;
-      const fees24h = vlm?.fees ?? 0;
-      const feeApy = tvl > 0 && fees24h > 0 ? (fees24h / tvl) * 365 * 100 : 0;
-
-      return {
-        name: pool.name,
-        token0: t0,
-        token1: t1,
-        pool,
-        fee: pool.fee,
-        tvl,
-        reserve0: reserve0.toFixed(4),
-        reserve1: reserve1.toFixed(4),
-        price,
-        liquidity: liquidity.toString(),
-        feeApy,
-        vol24h,
-        fees24h,
-        hubIsUsdg,
-        active: hasLiquidity && reserve0 > 0 && reserve1 > 0,
-      } as PoolDisplay;
-    })
-  );
-
-  const rows = results
-    .filter((r): r is PromiseFulfilledResult<PoolDisplay | null> => r.status === "fulfilled")
-    .map(r => r.value)
-    .filter(Boolean) as PoolDisplay[];
-
-  // ETH price from the deepest WETH/USDG pool in this same set — the number the swap engine trades
-  // at, so the page can never disagree with a quote. No external price feed is involved.
-  const wethLc = CONTRACTS.WETH.toLowerCase();
-  const ethRow = rows
-    .filter(r => {
-      const a = r.token0.address.toLowerCase(), b = r.token1.address.toLowerCase();
-      return (a === wethLc && b === USDG_LC) || (a === USDG_LC && b === wethLc);
-    })
-    .sort((a, b) => Number(b.liquidity) - Number(a.liquidity))[0];
-  const ethUsd = ethRow
-    ? ethRow.token0.address.toLowerCase() === wethLc ? ethRow.price : (ethRow.price > 0 ? 1 / ethRow.price : 0)
-    : 0;
-
-  return rows
-    .map(r => ({ ...r, tvl: (r as any).hubIsUsdg ? r.tvl : r.tvl * ethUsd }))
-    .filter(r => r.active && r.tvl >= 100)
-    .sort((a, b) => b.tvl - a.tvl);
+    return {
+      name: p.name,
+      token0: t0,
+      token1: t1,
+      pool: { address: p.poolId, token0: t0.address, token1: t1.address, fee: p.fee, name: p.name },
+      fee: p.fee,
+      category: p.category,
+      tvl,
+      reserve0: Number(p.reserve0).toFixed(6),
+      reserve1: Number(p.reserve1).toFixed(6),
+      price: 0,
+      liquidity: String(p.liquidity),
+      feeApy: tvl >= APY_MIN_TVL_USD && fees24h > 0 ? (fees24h / tvl) * 365 * 100 : 0,
+      vol24h,
+      fees24h,
+      active: !!p.hasLiquidity,
+    } as PoolDisplay;
+  });
 }
 
 const Badge = ({ chain }: { chain: string }) => {
@@ -327,6 +291,16 @@ const POOLS_CSS = `
   .thead { display: none; }
   .thead, .row { grid-template-columns: minmax(120px, 1.5fr) 1fr 96px; }
 }
+/* Below ~560px the three-column row cannot hold the pair, the numbers and the button side by side:
+   measured at 390px the pair cell had 120px for 218px of content. Stack it instead of squeezing —
+   the pair gets the full width and the numbers sit under it as a labelled row. */
+@media (max-width: 560px) {
+  .thead, .row { grid-template-columns: 1fr; gap: 10px; }
+  .row .nums { display: flex; flex-wrap: wrap; gap: 14px; }
+  .row .liq-btn { justify-self: stretch; justify-content: center; }
+  .pair .pnames { min-width: 0; }
+  .pair .pnames b, .pair .pnames span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+}
 
 /* pool detail */
 .backlink { background: none; border: 0; cursor: pointer; font: inherit; padding: 0;
@@ -415,7 +389,7 @@ const PoolsContent = () => {
   const [tab, setTab] = useState<"markets" | "positions">("markets");
   const [selectedPool, setSelectedPool] = useState<PoolDisplay | null>(null);
   const [sort, setSort] = useState<"tvl" | "apy" | "vol">("tvl");
-  const [chainFilter, setChainFilter] = useState("all");
+  const [category, setCategory] = useState("all");
   const [loading, setLoading] = useState(true);
   const [pools, setPools] = useState<PoolDisplay[]>([]);
   const [positions, setPositions] = useState<LiquidityPosition[]>([]);
@@ -469,7 +443,7 @@ const PoolsContent = () => {
   useEffect(() => { if (tab === "positions" && address) loadPositions(); }, [tab, address, loadPositions]);
 
   const chains = useMemo(() => ["all", ...new Set(pools.map(p => p.token0.sourceChain))], [pools]);
-  const filtered = pools.filter(p => chainFilter === "all" || p.token0.sourceChain === chainFilter);
+  const filtered = pools.filter(p => category === "all" || p.category === category);
   const sorted = [...filtered].sort((a, b) =>
     sort === "tvl" ? b.tvl - a.tvl : sort === "apy" ? b.feeApy - a.feeApy : b.vol24h - a.vol24h
   );
@@ -484,7 +458,7 @@ const PoolsContent = () => {
 
       <header className="hero">
         <h1>Liquidity pools.</h1>
-        <p className="sub">Robinhood Chain — aggregated across every venue.</p>
+        <p className="sub">Pools created on MoleSwap — Uniswap v4, hook-enforced fees and a built-in TWAP oracle.</p>
         <MoleMascot />
       </header>
 
@@ -524,21 +498,20 @@ const PoolsContent = () => {
           </div>
 
           <div className="toolbar">
-            <div className="p-chipset">
-              {chains.map(ch => (
-                <button
-                  key={ch}
-                  onClick={() => setChainFilter(ch)}
-                  data-on={chainFilter === ch ? "true" : "false"}
-                  style={chainFilter === ch && ch !== "all" ? {
-                    borderColor: (chainColors[ch] || "#D548EC") + "55",
-                    color: chainColors[ch] || "#D548EC",
-                    background: (chainColors[ch] || "#D548EC") + "18",
-                  } : {}}
-                >
-                  {ch === "all" ? "All chains" : ch}
-                </button>
-              ))}
+            <div className="p-chipset" aria-label="Filter by asset type">
+              {CATEGORIES.map(c => {
+                const n = c.key === "all" ? pools.length : pools.filter(p => p.category === c.key).length;
+                return (
+                  <button
+                    key={c.key}
+                    onClick={() => setCategory(c.key)}
+                    data-on={category === c.key ? "true" : "false"}
+                    disabled={n === 0 && c.key !== "all"}
+                  >
+                    {c.label}{n > 0 && <span className="chip-n">{n}</span>}
+                  </button>
+                );
+              })}
             </div>
             <span className="spacer" style={{ marginLeft: "auto" }} />
             <div className="p-chipset" aria-label="Sort pools">
@@ -1425,62 +1398,62 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                  as-is; not ported to Burrow beyond compiling without the pixel-art assets. */
               <div className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">
                 <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/20 px-4 py-3">
-                  <span className="font-family-ThaleahFat text-xl tracking-wider text-white">+ ADD LIQUIDITY</span>
-                  <button onClick={() => { setActionTab(null); setAmount0(""); setAmount1(""); }} className="font-family-ThaleahFat cursor-pointer text-lg text-gray-300 hover:text-white">✕</button>
+                  <span className="font-display text-xl tracking-wider text-white">+ ADD LIQUIDITY</span>
+                  <button onClick={() => { setActionTab(null); setAmount0(""); setAmount1(""); }} className="font-display cursor-pointer text-lg text-gray-300 hover:text-white">✕</button>
                 </div>
                 <div className="px-4 py-3">
                   {/* Token 0 input */}
                   <div className="relative mb-2 rounded px-3 py-2.5">
                     <div className="mb-1 flex justify-between">
-                      <span className="font-family-ThaleahFat text-lg text-gray-200">{pool.token0.symbol}</span>
-                      <span className={`font-family-ThaleahFat text-lg ${insufficientBalance0 ? "text-red-400" : "text-gray-200"}`}>
+                      <span className="font-display text-lg text-gray-200">{pool.token0.symbol}</span>
+                      <span className={`font-display text-lg ${insufficientBalance0 ? "text-red-400" : "text-gray-200"}`}>
                         BAL: {balance0 !== null ? Number(balance0).toFixed(4) : "..."}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
                       <TokenIcon token={pool.token0} size={28} />
                       <input type="text" value={amount0} onFocus={() => setInputFocused(0)} onChange={e => updateAmount1FromAmount0(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0"
-                        className="font-family-ThaleahFat w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
+                        className="font-display w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
                       {[{ l: "25%", v: 0.25 }, { l: "50%", v: 0.5 }, { l: "MAX", v: 1 }].map(p => (
-                        <button key={p.l} onClick={() => setPercentage0(p.v)} className="font-family-ThaleahFat text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
+                        <button key={p.l} onClick={() => setPercentage0(p.v)} className="font-display text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
                       ))}
                     </div>
-                    {insufficientBalance0 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-family-ThaleahFat text-xs text-red-400">INSUFFICIENT {pool.token0.symbol} BALANCE</span></div>}
+                    {insufficientBalance0 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-display text-xs text-red-400">INSUFFICIENT {pool.token0.symbol} BALANCE</span></div>}
                   </div>
 
-                  <div className="my-1 flex justify-center"><span className="font-family-ThaleahFat text-2xl text-gray-300">+</span></div>
+                  <div className="my-1 flex justify-center"><span className="font-display text-2xl text-gray-300">+</span></div>
 
                   {/* Token 1 input */}
                   <div className="relative mb-3 rounded px-3 py-2.5">
                     <div className="mb-1 flex justify-between">
-                      <span className="font-family-ThaleahFat text-lg text-gray-200">{pool.token1.symbol}</span>
-                      <span className={`font-family-ThaleahFat text-lg ${insufficientBalance1 ? "text-red-400" : "text-gray-200"}`}>
+                      <span className="font-display text-lg text-gray-200">{pool.token1.symbol}</span>
+                      <span className={`font-display text-lg ${insufficientBalance1 ? "text-red-400" : "text-gray-200"}`}>
                         BAL: {balance1 !== null ? Number(balance1).toFixed(4) : "..."}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
                       <TokenIcon token={pool.token1} size={28} />
                       <input type="text" value={amount1} onFocus={() => setInputFocused(1)} onChange={e => updateAmount0FromAmount1(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0"
-                        className="font-family-ThaleahFat w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
+                        className="font-display w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
                       {[{ l: "25%", v: 0.25 }, { l: "50%", v: 0.5 }, { l: "MAX", v: 1 }].map(p => (
-                        <button key={p.l} onClick={() => setPercentage1(p.v)} className="font-family-ThaleahFat text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
+                        <button key={p.l} onClick={() => setPercentage1(p.v)} className="font-display text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
                       ))}
                     </div>
-                    {insufficientBalance1 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-family-ThaleahFat text-xs text-red-400">INSUFFICIENT {pool.token1.symbol} BALANCE</span></div>}
+                    {insufficientBalance1 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-display text-xs text-red-400">INSUFFICIENT {pool.token1.symbol} BALANCE</span></div>}
                   </div>
 
                   {/* Range selector */}
                   <div className="relative mb-3 rounded px-3 py-2.5">
                     <div className="mb-2 flex items-center justify-between">
-                      <span className="font-family-ThaleahFat text-lg text-gray-200">SELECT RANGE</span>
+                      <span className="font-display text-lg text-gray-200">SELECT RANGE</span>
                     </div>
                     <div className="mb-3 grid grid-cols-2 gap-2">
                       <button onClick={() => { setRangeMode("full"); setMinPrice(""); setMaxPrice(""); }}
-                        className={`font-family-ThaleahFat cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
+                        className={`font-display cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
                           rangeMode === "full" ? "border-[#6DBB3E] bg-[#6DBB3E]/10 text-[#6DBB3E]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
                         }`}>FULL RANGE</button>
                       <button onClick={() => setRangeMode("custom")}
-                        className={`font-family-ThaleahFat cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
+                        className={`font-display cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
                           rangeMode === "custom" ? "border-[#FFD47A] bg-[#FFD47A]/10 text-[#FFD47A]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
                         }`}>CUSTOM RANGE</button>
                     </div>
@@ -1488,23 +1461,23 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                     {rangeMode === "custom" && (
                       <div className="mb-2 grid grid-cols-2 gap-2">
                         <div className="rounded border-2 border-[#3A1F0E] bg-black/20 px-3 py-2">
-                          <div className="font-family-ThaleahFat mb-1 text-sm text-gray-300">MIN PRICE</div>
+                          <div className="font-display mb-1 text-sm text-gray-300">MIN PRICE</div>
                           <input type="text" value={minPrice} onChange={e => setMinPrice(e.target.value.replace(/[^0-9.]/g, ""))}
-                            placeholder="0" className="font-family-ThaleahFat w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
-                          <div className="font-family-ThaleahFat text-sm text-gray-400">{pool.token1.symbol} per {pool.token0.symbol}</div>
+                            placeholder="0" className="font-display w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
+                          <div className="font-display text-sm text-gray-400">{pool.token1.symbol} per {pool.token0.symbol}</div>
                         </div>
                         <div className="rounded border-2 border-[#3A1F0E] bg-black/20 px-3 py-2">
-                          <div className="font-family-ThaleahFat mb-1 text-sm text-gray-300">MAX PRICE</div>
+                          <div className="font-display mb-1 text-sm text-gray-300">MAX PRICE</div>
                           <input type="text" value={maxPrice} onChange={e => setMaxPrice(e.target.value.replace(/[^0-9.]/g, ""))}
-                            placeholder="∞" className="font-family-ThaleahFat w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
-                          <div className="font-family-ThaleahFat text-sm text-gray-400">{pool.token1.symbol} per {pool.token0.symbol}</div>
+                            placeholder="∞" className="font-display w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
+                          <div className="font-display text-sm text-gray-400">{pool.token1.symbol} per {pool.token0.symbol}</div>
                         </div>
                       </div>
                     )}
 
                     <div className="mb-1.5 flex justify-between">
-                      <span className="font-family-ThaleahFat text-sm text-[#E8A849]">YOUR RANGE</span>
-                      <span className={`font-family-ThaleahFat text-sm ${rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"}`}>
+                      <span className="font-display text-sm text-[#E8A849]">YOUR RANGE</span>
+                      <span className={`font-display text-sm ${rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"}`}>
                         {rangeMode === "full" ? "● FULL RANGE" : "◆ CUSTOM"}
                       </span>
                     </div>
@@ -1521,8 +1494,8 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                       ["ON-CHAIN", pool.active ? "LIVE ✓" : "NO LIQUIDITY", pool.active ? "text-[#6DBB3E]" : "text-red-400"],
                     ].map(([k, v, c]) => (
                       <div key={k} className="flex justify-between py-0.5">
-                        <span className="font-family-ThaleahFat text-base text-gray-200">{k}</span>
-                        <span className={`font-family-ThaleahFat text-base ${c || "text-peach-300"}`}>{v}</span>
+                        <span className="font-display text-base text-gray-200">{k}</span>
+                        <span className={`font-display text-base ${c || "text-peach-300"}`}>{v}</span>
                       </div>
                     ))}
                   </div>
@@ -1530,7 +1503,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                   <button
                     onClick={missingToken ? () => router.push(getMissingTokenSwapUrl(missingToken)) : handleAddLiquidity}
                     disabled={!missingToken && !canSubmit}
-                    className={`font-family-ThaleahFat w-full cursor-pointer rounded-lg px-6 py-3 text-xl tracking-wider transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 ${
+                    className={`font-display w-full cursor-pointer rounded-lg px-6 py-3 text-xl tracking-wider transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 ${
                       missingToken
                         ? "bg-peach-500 text-black shadow-[0px_-4px_0px_0px_#C97E00_inset,0px_4px_0px_0px_rgba(255,212,122,0.6)_inset]"
                         : "bg-[#6DBB3E] text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset]"
