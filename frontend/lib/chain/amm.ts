@@ -199,9 +199,22 @@ export async function loadPoolRows(pair?: PoolPair): Promise<PoolRow[]> {
   try {
     const sb = createClient();
     if (pair && key) {
-      const rows = await fetchPoolRowsByPair(sb, pair);
-      _pairRowsCache.set(key, { at: now, rows, complete: true });
-      return rows;
+      try {
+        const rows = await fetchPoolRowsByPair(sb, pair);
+        _pairRowsCache.set(key, { at: now, rows, complete: true });
+        return rows;
+      } catch (pairErr) {
+        // The pair query is the correct one, but it runs against the `anon` role's 3s statement_timeout
+        // and a cold miss (after its own retry) must not take the swap card down with it: throwing here
+        // aborts the session init, and the card then renders "No route with live liquidity for this
+        // pair", which is a statement about the market that we have no evidence for. Degrade to the
+        // bounded window instead — the same answer this loader gave before pair scoping existed — and
+        // say, loudly, that this quote is built on a truncated registry.
+        console.error(
+          `[MoleSwap] pair-scoped registry read failed for ${pair.tokenIn} -> ${pair.tokenOut}; falling back to the first ${PAIRLESS_WINDOW_ROWS} rows, which may not contain this pair's pools:`,
+          pairErr instanceof Error ? `${pairErr.name}: ${pairErr.message}` : pairErr,
+        );
+      }
     }
     const win = await fetchPoolRowsWindow(sb, PAIRLESS_WINDOW_ROWS);
     if (!win.complete) {

@@ -15,7 +15,6 @@ import { fetchV3StatesMulticall, PoolStateReadError } from "../../lib/aggregator
 import { quoteExactInput } from "../../lib/aggregator/venues/v3Pool";
 import type { PoolState } from "../../lib/aggregator/venues/v3Pool";
 import {
-  poolPairOrFilter,
   poolPairTokens,
   fetchPoolRowsByPair,
   fetchPoolRowsWindow,
@@ -206,18 +205,15 @@ const TOK_A = "0x00000000000000000000000000000000000000aa";
 const TOK_B = "0x00000000000000000000000000000000000000bb";
 
 describe("the registry is queried by token pair, not downloaded whole", () => {
-  it("covers the direct pair, both WETH hub legs and the USDG legs, in both column orders", () => {
-    const f = poolPairOrFilter({ tokenIn: TOK_A, tokenOut: TOK_B, weth: WETH });
-    const wlc = WETH.toLowerCase();
-    for (const [x, y] of [
-      [TOK_A, TOK_B],
-      [TOK_A, wlc],
-      [TOK_B, wlc],
-      [TOK_A, USDG_LC],
-      [TOK_B, USDG_LC],
-    ]) {
-      expect(f).toContain(`and(token0.eq.${x},token1.eq.${y})`);
-      expect(f).toContain(`and(token0.eq.${y},token1.eq.${x})`);
+  it("covers the direct pair, both WETH hub legs and the USDG legs, in both column orders", async () => {
+    const db = stubDb([{ data: [] }]);
+    await fetchPoolRowsByPair(db.client, { tokenIn: TOK_A, tokenOut: TOK_B, weth: WETH });
+    const f = db.calls[0]!.filters!;
+    // BOTH columns are constrained to the same token set, which is what makes every ordering of every
+    // pair drawn from it match — and nothing that merely touches one of these tokens.
+    for (const col of ["token0", "token1"]) {
+      expect(f[col]).toBeDefined();
+      for (const t of [TOK_A, TOK_B, WETH.toLowerCase(), USDG_LC]) expect(f[col]).toContain(t);
     }
   });
 
@@ -230,18 +226,18 @@ describe("the registry is queried by token pair, not downloaded whole", () => {
 
 /** Minimal PostgREST builder stub: one queued response per `.range()` call. */
 function stubDb(pages: ({ data: any[] } | { error: { message: string } })[]) {
-  const calls: { from: number; to: number; or?: string }[] = [];
+  const calls: { from: number; to: number; filters?: Record<string, string[]> }[] = [];
   let i = 0;
-  let or: string | undefined;
+  const filters: Record<string, string[]> = {};
   const builder: any = {
     select: () => builder,
     eq: () => builder,
-    or: (expr: string) => {
-      or = expr;
+    in: (column: string, values: string[]) => {
+      filters[column] = values;
       return builder;
     },
     range: async (from: number, to: number) => {
-      calls.push({ from, to, or });
+      calls.push({ from, to, filters: { ...filters } });
       const p = pages[i++] ?? { data: [] };
       return { data: (p as any).data ?? null, error: (p as any).error ?? null };
     },
@@ -260,7 +256,9 @@ describe("a registry read that did not finish is never passed off as complete", 
     const rows = await fetchPoolRowsByPair(db.client, { tokenIn: TOK_A, tokenOut: TOK_B, weth: WETH });
     expect(rows).toHaveLength(1001);
     expect(db.calls.map((c) => c.from)).toEqual([0, 1000]);
-    expect(db.calls[0]!.or).toContain("token0.eq.");
+    // Pair-scoped, not a whole-table select: a missing column filter is exactly that bug.
+    expect(db.calls[0]!.filters!.token0).toContain(TOK_A);
+    expect(db.calls[0]!.filters!.token1).toContain(TOK_B);
   });
 
   it("throws rather than returning a short list when the pair query errors", async () => {
@@ -322,17 +320,17 @@ describe("the browser quote path asks for the traded pair", () => {
 
   it("getSwapQuote scopes the registry read to the pair instead of selecting the whole table", async () => {
     vi.resetModules();
-    const filters: (string | undefined)[] = [];
-    let or: string | undefined;
+    const filters: Record<string, string[]>[] = [];
+    const cols: Record<string, string[]> = {};
     const builder: any = {
       select: () => builder,
       eq: () => builder,
-      or: (expr: string) => {
-        or = expr;
+      in: (column: string, values: string[]) => {
+        cols[column] = values;
         return builder;
       },
       range: async () => {
-        filters.push(or);
+        filters.push({ ...cols });
         return { data: [{ id: "p1", venue: "uniswap_v4", active: true }], error: null };
       },
     };
@@ -350,10 +348,11 @@ describe("the browser quote path asks for the traded pair", () => {
     await getSwapQuote({ tokenIn: TOK_A, tokenOut: TOK_B, amountIn: "1000000000000000000" });
 
     expect(filters).toHaveLength(1);
-    // A whole-table select would leave this undefined — that is the exact bug being locked out.
-    expect(filters[0]).toBeDefined();
-    expect(filters[0]).toContain(TOK_A);
-    expect(filters[0]).toContain(TOK_B);
+    // A whole-table select would leave these undefined — that is the exact bug being locked out.
+    expect(filters[0]!.token0).toBeDefined();
+    expect(filters[0]!.token1).toBeDefined();
+    expect(filters[0]!.token0).toContain(TOK_A);
+    expect(filters[0]!.token1).toContain(TOK_B);
   });
 });
 

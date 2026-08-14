@@ -57,26 +57,25 @@ export function poolPairTokens(pair: PoolPair): string[] {
 }
 
 /**
- * A PostgREST `or()` expression matching every pool whose two tokens are both drawn from
- * {tokenIn, tokenOut, WETH, USDG} — i.e. every pool that could carry this route, and nothing else.
+ * HOW THE PAIR IS SELECTED, AND WHY IT IS NOT AN `or()` ANY MORE.
  *
- * Written as explicit `and(token0.eq.X,token1.eq.Y)` pairs in both column orders rather than two `in.()`
- * filters: the pair form is what the planner handles best on this table (no index on token0/token1 yet),
- * and it cannot accidentally match a pool that merely touches one of these tokens.
+ * The set wanted is "every pool whose two tokens are BOTH drawn from {tokenIn, tokenOut, WETH, USDG}",
+ * and it used to be expressed as an `or()` of explicit `and(token0.eq.X,token1.eq.Y)` pairs in both
+ * column orders. That expression is correct and it does not run: measured against this database, on the
+ * `anon` role's 3s statement_timeout, it returned `57014 canceling statement due to statement timeout`
+ * on EVERY attempt including the retry — the planner will not use the token0/token1 indexes through an
+ * or-of-ands, so it sequentially scans ~94k rows evaluating twelve composite clauses per row.
+ *
+ * That is not a slow path, it is a dead one, and it is the browser's only path: `fetchPoolRowsByPair`
+ * throws on a database error (by design — see below), so the swap card's session init threw, no pool
+ * state was loaded, and EVERY pair — not just the v4-only tokens this scoping was added for — showed
+ * "No route with live liquidity for this pair".
+ *
+ * `token0 IN (...) AND token1 IN (...)` selects exactly the same rows (a pool can never have
+ * token0 == token1, so the "both columns from the set" form admits nothing the pair form excluded) and
+ * the planner does use the indexes for it: measured 43 rows in ~0.3s warm for ETH -> BENK, against the
+ * same query timing out 100% of the time in the or form.
  */
-export function poolPairOrFilter(pair: PoolPair): string {
-  const tokens = poolPairTokens(pair);
-  const clauses: string[] = [];
-  for (let i = 0; i < tokens.length; i++) {
-    for (let j = i + 1; j < tokens.length; j++) {
-      const a = tokens[i]!;
-      const b = tokens[j]!;
-      clauses.push(`and(token0.eq.${a},token1.eq.${b})`);
-      clauses.push(`and(token0.eq.${b},token1.eq.${a})`);
-    }
-  }
-  return clauses.join(",");
-}
 
 /** Page size; PostgREST caps a single response at 1000 rows regardless of what we ask for. */
 const PAGE = 1000;
@@ -94,12 +93,12 @@ export async function fetchPoolRowsByPair(
   sb: PoolRegistryClient,
   pair: PoolPair,
 ): Promise<PoolRow[]> {
-  const or = poolPairOrFilter(pair);
+  const tokens = poolPairTokens(pair);
   const rows: PoolRow[] = [];
   for (let from = 0; from < MAX_PAIR_ROWS; from += PAGE) {
-    // mp_pools has no index on token0/token1 yet, so this is a sequential scan against the `anon` role's
-    // 3s statement_timeout: warm it is ~150-600ms, cold it can just miss. Measured behaviour is that the
-    // immediate retry lands, so retry once before declaring the registry unreadable.
+    // Warm this is ~200-600ms against the `anon` role's 3s statement_timeout; cold it can still just
+    // miss. Measured behaviour is that the immediate retry lands, so retry once before declaring the
+    // registry unreadable.
     let data: unknown[] | null = null;
     let error: { message?: string } | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -107,7 +106,8 @@ export async function fetchPoolRowsByPair(
         .from("mp_pools")
         .select("*")
         .eq("active", true)
-        .or(or)
+        .in("token0", tokens)
+        .in("token1", tokens)
         .range(from, from + PAGE - 1);
       data = res.data;
       error = res.error;

@@ -14,9 +14,10 @@ import { getQuote, NATIVE, type Quote } from "./quote";
 import { encodePlan, type EncodedPlan } from "./router";
 import type { PoolState, TickData } from "./venues/v3Pool";
 import { decodeSlot0, decodeUint, decodePopulatedTicks, INDEXER_SELECTORS, DEFAULT_WORD_RADIUS, wordsToFetch } from "./indexer";
-import { fetchV4MolePool } from "./venues/v4Reader";
+import { fetchV4Pool, fetchV4PoolByKey } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
-import { PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
+import { MOLE_ADDRESSES, PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
+import type { V4PoolKey } from "../mole/poolId";
 import { getAggFeeBps, cachedAggFeeBps } from "../mole/aggFee";
 // The aggregate3 machinery lives in ./multicall — one implementation, shared with the cold quote path.
 import { MULTICALL3, encAddress, encInt16, encodeAggregate3, decodeAggregate3, rpcCall, type RawCall } from "./multicall";
@@ -155,9 +156,12 @@ export class LivePairSession {
 
   /**
    * Refresh the dynamic state of every known pool — ONE Multicall3 eth_call for all v3 pools
-   * (slot0 + liquidity + the tick window), plus the v4 StateView read when the v4 pool is in the set.
+   * (slot0 + liquidity + the tick window), plus one StateView read per v4 pool in the set, in parallel.
    * Immutables (tokens, fee, spacing) are kept from init; ticks re-read around the LAST known tick,
    * which self-heals next tick if price moves a whole word between refreshes.
+   *
+   * The pool SET itself is invariant across a refresh: a tick may update or keep a pool's state, never
+   * add or remove a venue. init() is the only thing that decides which pools are in play.
    */
   async refresh(): Promise<void> {
     if (this.refreshing || this.states.length === 0) return;
@@ -167,7 +171,7 @@ export class LivePairSession {
     void getAggFeeBps(Date.now()).then((b) => { this.feeBps = b; }).catch(() => {});
     try {
       const v3 = this.states.filter((s) => s.venue !== "UniswapV4");
-      const hasV4 = this.states.some((s) => s.venue === "UniswapV4");
+      const v4Stale = this.states.filter((s) => s.venue === "UniswapV4");
 
       const calls: RawCall[] = [];
       const layout: { pool: PoolState; slot0Idx: number; liqIdx: number; wordIdxs: number[] }[] = [];
@@ -222,19 +226,46 @@ export class LivePairSession {
         }
       }
 
-      if (hasV4) {
-        try {
-          const v4 = await fetchV4MolePool();
-          if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) next.push(v4);
-          else {
-            const stale = this.states.find((s) => s.venue === "UniswapV4");
-            if (stale) next.push(stale);
+      // EVERY v4 pool in the set is re-read BY ITS OWN KEY, not just the MoleHook WETH/USDG pool.
+      //
+      // This used to be `if (hasV4) fetchV4MolePool()`: whatever v4 pools init had loaded were thrown
+      // away each tick and replaced with the single hard-coded WETH/USDG pool. init() loads external
+      // Uniswap-v4 pools too (client.ts → fetchV4PoolByKey) and extra MoleHook pools (fetchV4Pool), and
+      // a v4 pool has no address, so `refresh` could not recover one it had discarded. The visible
+      // effect was a card that priced a v4-only token correctly for exactly one second and then said
+      // "No route with live liquidity for this pair" forever — measured on WETH -> BENK
+      // (0x00077886…1E66, fee 3000, spacing 60), which /api/v1/quote priced fine the whole time
+      // because the server path never runs this loop.
+      //
+      // Each key goes back to the reader that understands it: a MoleHook pool through fetchV4Pool
+      // (which re-reads hookFeePips, the check that decides whether the pool is still quotable at all),
+      // any other hook through fetchV4PoolByKey (real key fee + protocol fee). Both use the widened
+      // tick reader, so the refreshed state is read exactly the way init read it.
+      const v4Fresh = await Promise.all(
+        v4Stale.map(async (stale) => {
+          const key = stale.poolKey;
+          if (!key) return stale;
+          const v4Key: V4PoolKey = {
+            currency0: key.currency0 as `0x${string}`,
+            currency1: key.currency1 as `0x${string}`,
+            fee: key.fee,
+            tickSpacing: key.tickSpacing,
+            hooks: key.hooks as `0x${string}`,
+          };
+          try {
+            const fresh =
+              lc(key.hooks) === lc(MOLE_ADDRESSES.moleHook)
+                ? await fetchV4Pool(v4Key)
+                : await fetchV4PoolByKey(v4Key);
+            // A read that comes back empty is a degraded RPC far more often than a drained pool; keep
+            // the last good snapshot rather than deleting the venue mid-quote.
+            return fresh && (fresh.liquidity > 0n || fresh.ticks.length > 0) ? fresh : stale;
+          } catch {
+            return stale;
           }
-        } catch {
-          const stale = this.states.find((s) => s.venue === "UniswapV4");
-          if (stale) next.push(stale);
-        }
-      }
+        }),
+      );
+      next.push(...v4Fresh);
 
       this.states = next;
       if (Date.now() - this.gasPriceAge > 30_000) await this.refreshGasPrice();
