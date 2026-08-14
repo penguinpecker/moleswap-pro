@@ -369,7 +369,7 @@ async function refresh() {
         const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: v4Rows.slice(i, i + 200) });
         if (error) throw new Error(`upsert_pools(v4): ${error.message}`);
       }
-      log(`v4: +${v4.length} pools (${v4Rows.filter((r) => r.active).length} routable)`);
+      console.log(`v4: +${v4.length} pools (${v4Rows.filter((r) => r.active).length} routable)`);
       const tokenSet = new Set();
       for (const p of pools) { tokenSet.add(p.token0); tokenSet.add(p.token1); }
       newTokenCount = await registerNewTokens([...tokenSet]);
