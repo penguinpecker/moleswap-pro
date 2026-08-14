@@ -7,9 +7,32 @@ import {
   TICK_SPACINGS, MIN_TICK, MAX_TICK,
   getTokenByAddress,
 } from "@/lib/chain/contracts";
+import { assertValidDecimals, formatUnitsDisplay } from "@/lib/mole/format";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * Decimals for one leg of the pool, resolved STRICTLY.
+ *
+ * There is no `|| 18`. Formatting — or worse, pricing — a 6-decimal token as an 18-decimal one is a
+ * 10^12 error (see the banner in lib/mole/format.ts and the USDG warning in lib/chain/contracts.ts),
+ * and `initialPrice` feeds priceToSqrtPriceX96 below, so a wrong decimal count here mis-initializes a
+ * real pool's price by twelve orders of magnitude. An unknown token is asked on-chain; a token that
+ * will not answer `decimals()` is an ERROR, never a guess.
+ */
+async function resolveDecimals(provider: ethers.Provider, address: string): Promise<number> {
+  const known = getTokenByAddress(address);
+  if (known) {
+    assertValidDecimals(known.decimals);
+    return known.decimals;
+  }
+  const erc20 = new ethers.Contract(address, ERC20_ABI, provider);
+  const raw = await erc20.decimals();
+  const decimals = Number(raw);
+  assertValidDecimals(decimals); // throws RangeError on a non-integer / out-of-range answer
+  return decimals;
+}
 
 const FACTORY_ABI = [
   "function createPool(address tokenA, address tokenB, uint24 fee) returns (address pool)",
@@ -91,15 +114,34 @@ export async function POST(req: NextRequest) {
         ? [actualA, actualB]
         : [actualB, actualA];
 
-    const token0Info = getTokenByAddress(tokenA) || getTokenByAddress(token0);
-    const token1Info = getTokenByAddress(tokenB) || getTokenByAddress(token1);
-    const dec0 = token0Info?.decimals || 18;
-    const dec1 = token1Info?.decimals || 18;
+    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
+
+    // Metadata is looked up by the SORTED addresses, never by the caller's tokenA/tokenB order: pass
+    // (USDG, WETH) and WETH still sorts to token0, so keying off tokenA would have paired token0=WETH
+    // with USDG's 6 decimals and inverted the 10^12 scale inside priceToSqrtPriceX96.
+    const token0Info = getTokenByAddress(token0);
+    const token1Info = getTokenByAddress(token1);
+
+    let dec0: number;
+    let dec1: number;
+    try {
+      [dec0, dec1] = await Promise.all([
+        resolveDecimals(provider, token0),
+        resolveDecimals(provider, token1),
+      ]);
+    } catch (e: any) {
+      return apiError(
+        "Could not determine token decimals on-chain, and this API never assumes 18 — a 6-decimal token " +
+          "priced as an 18-decimal one mis-initializes the pool by 10^12. Verify both addresses are " +
+          `ERC-20s on Robinhood Chain (chain ${RH_CHAIN_ID}) that answer decimals(). Underlying error: ` +
+          (e?.shortMessage || e?.message || "unknown"),
+        422,
+      );
+    }
 
     const txDeadline = deadline || Math.floor(Date.now() / 1000) + 3600;
     const transactions: any[] = [];
 
-    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
     const factory = new ethers.Contract(CONTRACTS.FACTORY, FACTORY_ABI, provider);
     let existingPool: string;
     try {
@@ -148,12 +190,40 @@ export async function POST(req: NextRequest) {
           `Provide liquidity to the canonical WETH/USDG pool via the ALM vault (MolePositions ${CONTRACTS.MOLE_POSITIONS}, zapOpen) at /vault.`
         : undefined;
 
+    // Echo the requested seed amounts back in HUMAN units, using the decimals resolved above, so a
+    // caller can see immediately whether they sized the legs against the right token. amount0Desired
+    // belongs to token0 = the LOWER-sorting address, which is not necessarily the tokenA they sent.
+    let requestedSeed: Record<string, string> | undefined;
+    if (amount0Desired !== undefined || amount1Desired !== undefined) {
+      const wei = (label: string, v: unknown): bigint => {
+        const s = String(v ?? "0").trim();
+        if (!/^\d+$/.test(s)) throw new Error(`${label} must be an unsigned integer string in wei`);
+        return BigInt(s);
+      };
+      let raw0: bigint;
+      let raw1: bigint;
+      try {
+        raw0 = wei("amount0Desired", amount0Desired);
+        raw1 = wei("amount1Desired", amount1Desired);
+      } catch (e: any) {
+        return apiError(e.message, 400);
+      }
+      requestedSeed = {
+        amount0Desired: raw0.toString(),
+        amount1Desired: raw1.toString(),
+        amount0Display: `${formatUnitsDisplay(raw0, dec0, dec0)} ${token0Info?.symbol || "token0"}`,
+        amount1Display: `${formatUnitsDisplay(raw1, dec1, dec1)} ${token1Info?.symbol || "token1"}`,
+        ordering: `amount0Desired is read against token0 ${token0} (${dec0} decimals); amount1Desired against token1 ${token1} (${dec1} decimals).`,
+      };
+    }
+
     return apiResponse({
       type: poolExists ? "pool_exists" : "create_pool",
       description: poolExists
         ? `Pool already exists at ${existingPool}.`
         : `Create new pool${initialPrice ? " and initialize its price" : ""}`,
       seedNote,
+      requestedSeed,
       pool: poolExists ? existingPool : null,
       token0: {
         address: token0,

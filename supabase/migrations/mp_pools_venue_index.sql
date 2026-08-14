@@ -1,0 +1,27 @@
+-- mp_pools_venue_index — stop /pools randomly rendering "No pools found".
+--
+-- NOT YET APPLIED. Run this against project pgraqmnsabnatyzmlycx (SQL editor / service role) and then
+-- record the date here, the same way mp_indexer_timeout_and_index.sql does.
+--
+-- SYMPTOM: https://www.moleswap.com/pools intermittently lists nothing at all, and /api/v1/pools answers
+-- `{"count":0,"pools":[]}` — indistinguishable from "MoleSwap runs no pools" — then a reload shows the
+-- three real pools again.
+--
+-- ROOT CAUSE (measured, not inferred). lib/chain/livePools.ts reads MoleSwap's own pools with
+--   select id,token0,token1,fee,tick_spacing,hooks from mp_pools where venue = 'mole_v4'
+-- as `anon` (statement_timeout = 3s). mp_pools has ~390k rows and no index on `venue`, so that filter is
+-- a sequential scan whose runtime straddles the 3s cap: repeated identical calls came back in 0.79s,
+-- 0.80s, 2.94s and 5.19s, and roughly one call in three was killed with
+--   "canceling statement due to statement timeout"
+-- Only 3 of those ~390k rows are venue='mole_v4' — the scan cost is entirely wasted work.
+--
+-- The application already retries the query twice and logs both failures, but two 3s timeouts back to
+-- back cost 8.5s and still end in an empty pool list. The index is the actual fix: a handful of index
+-- tuples instead of a 390k-row scan.
+--
+-- CONCURRENTLY so the live indexer's writes to mp_pools are never blocked. It cannot run inside a
+-- transaction block — execute this statement on its own.
+create index concurrently if not exists mp_pools_venue on public.mp_pools (venue);
+
+-- Verify (should report an Index Scan, single-digit milliseconds):
+--   explain analyze select id from public.mp_pools where venue = 'mole_v4';

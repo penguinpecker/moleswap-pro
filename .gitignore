@@ -59,3 +59,7 @@ frontend/tsconfig.tsbuildinfo
 router/node_modules/
 services/keeper/.env
 services/keeper/node_modules
+
+# local-only audit artefact
+dead-code-audit-*.json
+web3-repair-*.json

@@ -68,13 +68,66 @@ describe("/api/v1/tx/swap validation + wrap paths", () => {
   });
 });
 
-describe("/api/v1/tx/add-liquidity honest failure", () => {
-  it("returns 501 pointing to the ALM vault instead of 500 on an empty ABI", async () => {
-    const r = await addLiqPOST(
-      new NextRequest("http://t/api/v1/tx/add-liquidity", { method: "POST", body: "{}", headers: { "content-type": "application/json" } })
-    );
-    expect(r.status).toBe(501);
+// The route now BUILDS the two-sided MolePositions.open calldata (there is no v3 position manager on
+// this chain, so `open` is the mint). Everything asserted here runs before the first RPC call.
+function addLiq(body: any) {
+  return addLiqPOST(
+    new NextRequest("http://t/api/v1/tx/add-liquidity", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+    })
+  );
+}
+const OK_BODY = {
+  token0: WETH,
+  token1: USDG,
+  amount0Desired: "1000000000000000",
+  amount1Desired: "4000000",
+  recipient: REC,
+  fee: 500,
+};
+
+describe("/api/v1/tx/add-liquidity validation", () => {
+  it("400 on missing fields, naming every documented required parameter", async () => {
+    const r = await addLiq({});
+    expect(r.status).toBe(400);
     const j = await r.json();
-    expect(j.error).toMatch(/vault/i);
+    for (const f of ["token0", "token1", "amount0Desired", "amount1Desired", "recipient"]) {
+      expect(j.error).toContain(f);
+    }
   });
+  it("400 on a bad recipient", async () => {
+    const r = await addLiq({ ...OK_BODY, recipient: "nope" });
+    expect(r.status).toBe(400);
+  });
+  it("400 when an amount is a JS number instead of a wei string", async () => {
+    const r = await addLiq({ ...OK_BODY, amount1Desired: 4000000 });
+    expect(r.status).toBe(400);
+    expect((await r.json()).error).toMatch(/STRING in wei/);
+  });
+  it("400 on a zero leg, pointing at the one-sided zap instead", async () => {
+    const r = await addLiq({ ...OK_BODY, amount1Desired: "0" });
+    expect(r.status).toBe(400);
+    expect((await r.json()).error).toMatch(/zapOpen/);
+  });
+  it("400 on a fee tier that is not the live dynamic-fee pool", async () => {
+    const r = await addLiq({ ...OK_BODY, fee: 3000 });
+    expect(r.status).toBe(400);
+    expect((await r.json()).error).toMatch(/0x800000/);
+  });
+  it("400 on a pair the vault has not whitelisted, naming the real pair", async () => {
+    const r = await addLiq({ ...OK_BODY, token1: "0xE17DD2E0509f99E9ee9469Cf6634048Ec5a3ADe9" });
+    expect(r.status).toBe(400);
+    const j = await r.json();
+    expect(j.error).toMatch(/WETH/);
+    expect(j.error).toMatch(/USDG/);
+  });
+  it("400 on slippageBps out of range", async () => {
+    const r = await addLiq({ ...OK_BODY, slippageBps: 10001 });
+    expect(r.status).toBe(400);
+  });
+  // NOTE: the happy path (and the reversed-leg-order path) needs a live eth_call for slot0 and the
+  // vault's range bounds, so it is exercised out-of-band rather than pinned here — this file stays
+  // RPC-free on purpose.
 });

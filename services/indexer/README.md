@@ -27,7 +27,11 @@ stale registry can at worst miss a route, never mis-settle.
 | `REFRESH_SECONDS` | no | `60` | cycle interval |
 | `MAX_BLOCKS_PER_CYCLE` | no | `300000` | caps discovery work per cycle; a backlog drains over several cycles |
 | `UNVERIFIED_REFRESH_BATCH` | no | `4000` | rotating unverified tokens re-measured per cycle |
-| `PRICE_USDG_PER_ETH` | no | `1900` | for converting USDG reserves to WETH-equivalent |
+| `PRICE_USDG_PER_ETH` | no | *(unset — price is read live)* | **pin** the USDG/WETH price. Leave unset in production: the price is read from `PRICE_POOL`'s `slot0` every `PRICE_TTL_SECONDS`. Setting it freezes the number that decides `verified`. |
+| `PRICE_POOL` | no | `0x88a8e96e…7061e` | the WETH/USDG pool the live price is read from; the orientation is checked against `token0()`/`token1()` and a non-WETH/USDG pool is refused |
+| `PRICE_TTL_SECONDS` | no | `300` | how long a live price read is cached |
+| `PRICE_USDG_PER_ETH_FALLBACK` | no | `1900` | used only if the very first live read fails; a failure is logged, never silent |
+| `VOLUME_POOLS` | no | live MoleSwap v4 PoolId + 3 V3 addresses | pools tracked for 24h volume, **as their `mp_pools.id`** — a 42-char V3 address or a 66-char v4 PoolId. The id is also the storage key, because that is what the pools page joins on. |
 | `PORT` | no | `8080` | health endpoint |
 
 `GET /health` → `{ ok, lastRun, cursor, latest, newTokens, refreshed, verified, error }`.

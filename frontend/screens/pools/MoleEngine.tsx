@@ -38,13 +38,20 @@ export function MoleEngine() {
     try {
       const [p, sch] = await Promise.all([fetchV4MolePool().catch(() => null), getQueueSchedule().catch(() => null)]);
       if (p) {
-        const ticks = [...p.ticks].map((t) => t.tick).sort((a, b) => a - b);
+        // TickData keys the tick by `index` (v3Pool.ts) — reading `.tick` yielded undefined for every
+        // element, so lo/hi always fell through to a synthetic ±600 window that pinned spot at dead centre.
+        const ticks = [...p.ticks].map((t) => t.index).sort((a, b) => a - b);
+        // The band shown is the CURRENTLY ACTIVE one: the initialised ticks either side of spot. The
+        // outermost ticks would just be tick space's own bounds (MoleSwap pools are seeded full-range),
+        // which again pins spot at 50% and says nothing about where liquidity actually sits.
+        const below = ticks.filter((t) => t <= p.tick);
+        const above = ticks.filter((t) => t > p.tick);
         setPool({
           tick: p.tick,
           liquidity: p.liquidity,
           fee: p.fee,
-          lo: ticks[0] ?? p.tick - 600,
-          hi: ticks[ticks.length - 1] ?? p.tick + 600,
+          lo: below.length ? below[below.length - 1]! : p.tick - 600,
+          hi: above.length ? above[0]! : p.tick + 600,
         });
       }
       if (sch) setSchedule(sch);
@@ -66,12 +73,18 @@ export function MoleEngine() {
   const secLeft = schedule ? secondsUntilCutoff(schedule, BigInt(now)) : 0;
   const epoch = schedule ? schedule.currentEpoch.toString() : "—";
 
+  /**
+   * `inRange` is null until the pool reads — with lo/hi derived from the ticks that bracket spot, a
+   * "is spot between lo and hi" test is true by construction and would claim "EARNING" on no data at
+   * all. The honest signal is the pool's own in-range liquidity: > 0 means there is liquidity active
+   * at the current tick, which is exactly what "in range, earning fees" means.
+   */
   const { spotPos, twapPos, inRange } = useMemo(() => {
-    if (!pool) return { spotPos: 50, twapPos: 50, inRange: true };
+    if (!pool) return { spotPos: 50, twapPos: 50, inRange: null as boolean | null };
     const span = Math.max(1, pool.hi - pool.lo);
     const sp = ((pool.tick - pool.lo) / span) * 100;
     const tw = twap != null ? ((twap - pool.lo) / span) * 100 : sp;
-    return { spotPos: sp, twapPos: tw, inRange: pool.tick >= pool.lo && pool.tick <= pool.hi };
+    return { spotPos: sp, twapPos: tw, inRange: pool.liquidity > 0n };
   }, [pool, twap]);
 
   return (
@@ -116,9 +129,11 @@ export function MoleEngine() {
       <div className="mb-4 rounded-xl border-2 border-[#523525] bg-[#2a1c12] p-4">
         <div className="mb-3 flex items-center justify-between">
           <span className="font-display tracking-widest text-peach-300">AUTO-MANAGED RANGE</span>
-          <span className={`font-display text-xs tracking-wider ${inRange ? "text-green-400" : "text-red-400"}`}>
-            {inRange ? "● IN RANGE — EARNING" : "○ OUT OF RANGE"}
-          </span>
+          {inRange !== null && (
+            <span className={`font-display text-xs tracking-wider ${inRange ? "text-green-400" : "text-red-400"}`}>
+              {inRange ? "● IN RANGE — EARNING" : "○ OUT OF RANGE"}
+            </span>
+          )}
         </div>
         <div className="relative h-8 w-full rounded-lg bg-[#1a110a]">
           {/* the vault's active band */}

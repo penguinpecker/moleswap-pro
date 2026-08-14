@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { parseUnits, formatUnits } from "viem";
 import { BackgroundImage, NavBar, MoleMascot } from "../shared";
@@ -100,7 +100,7 @@ function StrategyBand({ tick, positions }: { tick: number | null; positions: Alm
 }
 
 export default function VaultPage() {
-  const { address, isConnected, onRH } = useWallet();
+  const { address, isConnected, onRH, connect, switchToRH } = useWallet();
   const [tokenIdx, setTokenIdx] = useState(0); // 0 = WETH, 1 = USDG
   const [amount, setAmount] = useState("");
   const [positions, setPositions] = useState<AlmPosition[]>([]);
@@ -109,6 +109,10 @@ export default function VaultPage() {
   const [loadingPos, setLoadingPos] = useState(false);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Always the freshest connection state, readable from inside an awaited handler (see onPrimary).
+  const connectedRef = useRef(isConnected);
+  connectedRef.current = isConnected;
 
   const token = DEPOSIT_TOKENS[tokenIdx];
   const isNative = token.native;
@@ -179,6 +183,51 @@ export default function VaultPage() {
       setStatus(r.error || "Deposit failed");
     }
     setBusy(false);
+  };
+
+  // Primary CTA dispatcher. The button's label already promises "Connect wallet" /
+  // "Switch to Robinhood" in those states, so it has to actually do that — previously it
+  // called onDeposit, whose guard returned on the first line when disconnected or on the
+  // wrong chain, giving no modal and no feedback. Uses the same mechanism as the swap
+  // screens: useWallet()'s connect / switchToRH.
+  const onPrimary = async () => {
+    if (!isConnected) {
+      setStatus("Connecting wallet…");
+      setBusy(true);
+      try {
+        await connect();
+        // useWallet().connect swallows a rejected/absent connector (provider.tsx) and resolves with
+        // nothing, so "did it work" can only be answered by whether an account actually arrived. Read
+        // it from a ref — wagmi updates the rendered value while this call is awaited, the captured
+        // `isConnected` above never changes. Without this the no-wallet case is silent, which is the
+        // exact complaint this button already had.
+        await new Promise((r) => setTimeout(r, 300));
+        setStatus(
+          connectedRef.current
+            ? ""
+            : "No wallet connected. Install or unlock a browser wallet, then try again.",
+        );
+      } catch {
+        setStatus("Wallet connection failed");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (!onRH) {
+      setStatus("Switching to Robinhood Chain…");
+      setBusy(true);
+      try {
+        const switched = await switchToRH();
+        setStatus(switched ? "" : "Network switch declined");
+      } catch {
+        setStatus("Network switch failed");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    return onDeposit();
   };
 
   const onWithdraw = async (id: string) => {
@@ -346,7 +395,7 @@ export default function VaultPage() {
 
               <button
                 className="p-btn"
-                onClick={onDeposit}
+                onClick={onPrimary}
                 disabled={busy || (isConnected && onRH && (amountWei <= 0n || insufficient))}
               >
                 {cta}

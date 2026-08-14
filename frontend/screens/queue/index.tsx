@@ -40,7 +40,7 @@ function outputToken(zeroForOne: boolean) {
 }
 
 export default function QueuePage() {
-  const { address, isConnected, onRH } = useWallet();
+  const { address, isConnected, onRH, connect, switchToRH } = useWallet();
   const [schedule, setSchedule] = useState<(QueueSchedule & { maxResidualSlippageBps: number }) | null>(null);
   const [epoch, setEpochState] = useState<EpochState | null>(null);
   const [orders, setOrders] = useState<UserOrderView[]>([]);
@@ -53,6 +53,10 @@ export default function QueuePage() {
 
   const nowRef = useRef(nowTick);
   nowRef.current = nowTick;
+
+  // Always the freshest connection state, readable from inside an awaited handler (see onPrimary).
+  const connectedRef = useRef(isConnected);
+  connectedRef.current = isConnected;
 
   const load = useCallback(async () => {
     try {
@@ -109,6 +113,50 @@ export default function QueuePage() {
       if (r.success) setAmount("");
       return r;
     });
+
+  // Primary CTA dispatcher. The label promises "Connect wallet" / "Switch to Robinhood" in
+  // those states, so the click has to do exactly that — it used to call onPlace regardless,
+  // which hit placeOrder's "Enter an amount" guard (or a raw wallet error with an amount
+  // typed) and never opened a wallet. Same mechanism the swap screens use: useWallet()'s
+  // connect / switchToRH.
+  const onPrimary = async () => {
+    if (!isConnected) {
+      setStatus("Connecting wallet…");
+      setBusy(true);
+      try {
+        await connect();
+        // connect() swallows a rejected/absent connector (provider.tsx) and resolves with nothing, so
+        // the only honest signal is whether an account actually arrived. Read it from a ref: wagmi
+        // updates the rendered value while this call is awaited; the captured `isConnected` cannot.
+        // Without this, a visitor with no wallet installed clicks and sees nothing happen at all.
+        await new Promise((r) => setTimeout(r, 300));
+        setStatus(
+          connectedRef.current
+            ? ""
+            : "No wallet connected. Install or unlock a browser wallet, then try again.",
+        );
+      } catch {
+        setStatus("Wallet connection failed");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (!onRH) {
+      setStatus("Switching to Robinhood Chain…");
+      setBusy(true);
+      try {
+        const switched = await switchToRH();
+        setStatus(switched ? "" : "Network switch declined");
+      } catch {
+        setStatus("Network switch failed");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    return onPlace();
+  };
 
   const cta = !isConnected
     ? "Connect wallet"
@@ -187,7 +235,7 @@ export default function QueuePage() {
             </p>
             <button
               className="p-btn"
-              onClick={onPlace}
+              onClick={onPrimary}
               disabled={busy || (isConnected && onRH && amountWei <= 0n)}
             >
               {cta}

@@ -18,20 +18,32 @@ import {
 } from "@/lib/chain/amm";
 import { ethers } from "ethers";
 import { createClient } from "@/lib/supabase/client";
+import { MoleEngine } from "./MoleEngine";
 
 /**
  * Real 24h volume + fees per pool from the swap-event indexer (mp_pool_volume_24h, read with the anon
- * key — public data). Returns a map keyed by lowercased pool address. Empty on any error, so the pools
- * page still renders (volume just shows as "—" rather than a fabricated number).
+ * key — public data).
+ *
+ * KEY CONTRACT (this used to be wrong, and silently zeroed volume/fees/APY for every pool). The one key
+ * shared by writer and reader is `mp_pools.id`, lowercased:
+ *   - v3 pools: `id` IS the 20-byte pool address, which is what the indexer writes
+ *     (`pool: lc(l.address)` in services/indexer/src/index.mjs refreshVolume).
+ *   - v4 pools: `id` IS the 32-byte PoolId; a v4 pool has no address at all.
+ * So the caller must pass every identity a pool has — its PoolId AND its address where it has one — and
+ * look the result up under either. Passing only one of the two is what made the join impossible.
+ *
+ * Empty on any error, so the pools page still renders (volume shows as "—", never a fabricated number).
  */
-async function fetchPoolVolumes(addresses: string[]): Promise<Map<string, { vol: number; fees: number; swaps: number }>> {
+async function fetchPoolVolumes(poolKeys: string[]): Promise<Map<string, { vol: number; fees: number; swaps: number }>> {
   const out = new Map<string, { vol: number; fees: number; swaps: number }>();
+  const keys = Array.from(new Set(poolKeys.filter(Boolean).map((k) => k.toLowerCase())));
+  if (!keys.length) return out;
   try {
     const sb = createClient();
     const { data } = await sb
       .from("mp_pool_volume_24h")
       .select("pool,volume_usd,fees_usd,swaps")
-      .in("pool", addresses.map((a) => a.toLowerCase()));
+      .in("pool", keys);
     for (const r of (data as any[]) || []) {
       out.set((r.pool as string).toLowerCase(), {
         vol: Number(r.volume_usd) || 0,
@@ -60,6 +72,19 @@ const fmtFee = (n: number): string => {
   if (n === 0) return "0.00";
   return n.toFixed(20).replace(/\.?0+$/, "");
 };
+
+/**
+ * A pool's fee, as a label.
+ *
+ * Every MoleSwap v4 pool is created with the DYNAMIC-FEE SENTINEL in its key (0x800000, the top bit of
+ * the uint24 fee field) — the LP fee is set by MoleHook per swap, not fixed in the pool key. Dividing
+ * that sentinel by 10 000 like a static fee tier prints "838.86%", which is what every pool row and the
+ * pool detail header showed. It is not a fee, it is a flag. /api/v1/pools already reports these pools as
+ * `feeTier: "dynamic"`; this says the same thing in the UI. Static-fee pools are unaffected.
+ */
+const DYNAMIC_FEE_FLAG = 0x800000;
+const feeLabel = (fee: number): string =>
+  (Number(fee) & DYNAMIC_FEE_FLAG) !== 0 ? "DYNAMIC" : `${(Number(fee) / 10000).toFixed(2)}%`;
 
 const fmt = (n: number) => {
   if (!Number.isFinite(n) || isNaN(n)) return "0.00";
@@ -107,7 +132,10 @@ interface PoolDisplay {
   tvl: number;
   reserve0: string;
   reserve1: string;
+  /** token1 per token0, decimal-adjusted. 0 only when the pool has no usable sqrt price. */
   price: number;
+  /** Current tick from the pool's own slot0 — seeds the liquidity chart before the live read lands. */
+  tick: number;
   liquidity: string;
   feeApy: number;
   vol24h: number;
@@ -125,14 +153,67 @@ const ERC20_BAL_ABI = [
   "function balanceOf(address account) view returns (uint256)",
 ];
 
+/**
+ * price = how many whole token1 one whole token0 buys, from the pool's own sqrt price.
+ *
+ * (sqrtPriceX96 / 2^96)^2 is token1 BASE UNITS per token0 base unit, so it has to be rescaled by
+ * 10^(decimals0 - decimals1) to become a human price. Skipping that on a 6-vs-18 pair is a 10^12 error,
+ * so the adjustment is not optional. PRECISION is 1e36 rather than 1e18 because the base-unit ratio of
+ * an 18-dec token0 against a 6-dec token1 is ~1e-9 for a $3k asset — 1e18 of headroom is thin, and
+ * anything under 1e-18 would truncate to a flat zero, which is exactly the bug this replaces.
+ */
 function sqrtPriceToPrice(sqrtPriceX96: bigint, decimals0: number, decimals1: number): number {
-  const PRECISION = 10n ** 18n;
+  if (sqrtPriceX96 <= 0n) return 0;
+  const PRECISION = 10n ** 36n;
   const Q192 = 2n ** 192n;
   const sqr = sqrtPriceX96 * sqrtPriceX96;
-  const rawPrice = (sqr * PRECISION) / Q192;
+  const rawPrice = (sqr * PRECISION) / Q192; // token1 base units per token0 base unit, × 1e36
   const decimalAdj = decimals0 - decimals1;
-  const price = Number(rawPrice) / 1e18 * (10 ** decimalAdj);
-  return price;
+  const price = (Number(rawPrice) / 1e36) * (10 ** decimalAdj);
+  return Number.isFinite(price) && price > 0 ? price : 0;
+}
+
+/** JSON carries uint160 as a decimal string; a malformed one must not take the whole page down. */
+function safeBigInt(v: unknown): bigint {
+  try {
+    if (typeof v === "bigint") return v;
+    if (v === null || v === undefined || v === "") return 0n;
+    return BigInt(v as string | number);
+  } catch {
+    return 0n;
+  }
+}
+
+/** v4 periphery: a v4 pool has no address, its slot0 is read from the singleton by PoolId. */
+const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b";
+const STATE_VIEW_ABI = [
+  "function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
+];
+
+/**
+ * Live slot0 for either flavour of pool, keyed on the shape of its identity:
+ *   - 32-byte PoolId  → v4, read StateView.getSlot0(poolId)
+ *   - 20-byte address → v3, read the pool contract's own slot0()
+ * The old code called `new ethers.Contract(<bytes32>).slot0()` unconditionally, which ethers rejects as
+ * a non-address (it tries to ENS-resolve it) — the throw was swallowed and the tick stayed 0 forever.
+ */
+async function readPoolSlot0(id: string): Promise<{ sqrtPriceX96: bigint; tick: number } | null> {
+  try {
+    const provider = getProvider();
+    if (/^0x[0-9a-fA-F]{64}$/.test(id)) {
+      const sv = new ethers.Contract(STATE_VIEW, STATE_VIEW_ABI, provider);
+      const s = await sv.getSlot0(id);
+      return { sqrtPriceX96: BigInt(s[0]), tick: Number(s[1]) };
+    }
+    if (ethers.isAddress(id)) {
+      const c = new ethers.Contract(id, POOL_ABI, provider);
+      const s = await c.slot0();
+      return { sqrtPriceX96: BigInt(s[0]), tick: Number(s[1]) };
+    }
+  } catch (err) {
+    console.error("Failed to read pool slot0:", err);
+  }
+  return null;
 }
 
 function calcTvl(reserve0: number, reserve1: number, price: number): number {
@@ -149,15 +230,20 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
   // TVL is derived from the open positions. That work belongs in one place, so this page consumes
   // /api/v1/pools rather than reimplementing it against a pool address that does not exist.
   const res = await fetch("/api/v1/pools", { cache: "no-store" });
-  if (!res.ok) return [];
+  // Throw rather than return []: an empty array is the caller's "this venue has no pools" answer, and a
+  // 429/500 must not be dressed up as that. loadPools() catches, logs, and keeps whatever list is
+  // already on screen instead of blanking it.
+  if (!res.ok) throw new Error(`/api/v1/pools responded ${res.status}`);
   const json = await res.json();
   const pools: any[] = json?.data?.pools || [];
   if (!pools.length) return [];
 
-  // Real 24h volume/fees where the indexer has them, keyed by pool id.
+  // Real 24h volume/fees where the indexer has them, keyed by mp_pools.id (see fetchPoolVolumes). Pass
+  // both identities a pool can carry — the v4 PoolId and, for an address-backed pool, its address —
+  // because the indexer keys its rows on whichever of the two is that pool's `id`.
   let volumes = new Map<string, { vol: number; fees: number }>();
   try {
-    volumes = await fetchPoolVolumes(pools.map((p) => p.poolId));
+    volumes = await fetchPoolVolumes(pools.flatMap((p) => [p.poolId, p.address].filter(Boolean)));
   } catch { /* volume is optional — a pool with no indexed swaps shows "—", never a made-up number */ }
 
   return pools.map((p) => {
@@ -170,10 +256,17 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
       decimals: p.token1.decimals, sourceChain: "Robinhood Chain", logoURI: p.token1.logoURI || "",
     } as TokenInfo;
 
-    const vlm = volumes.get(String(p.poolId).toLowerCase());
+    const vlm =
+      volumes.get(String(p.poolId).toLowerCase()) ??
+      (p.address ? volumes.get(String(p.address).toLowerCase()) : undefined);
     const vol24h = vlm?.vol ?? 0;
     const fees24h = vlm?.fees ?? 0;
     const tvl = Number(p.tvlUsd) || 0;
+
+    // The single most important number on a pool page. /api/v1/pools already carries the pool's own
+    // sqrtPriceX96 (livePools.ts reads it from StateView), so the price is derivable here exactly —
+    // it was being thrown away and replaced with a hardcoded 0.
+    const price = sqrtPriceToPrice(safeBigInt(p.sqrtPriceX96), t0.decimals, t1.decimals);
 
     return {
       name: p.name,
@@ -185,7 +278,8 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
       tvl,
       reserve0: Number(p.reserve0).toFixed(6),
       reserve1: Number(p.reserve1).toFixed(6),
-      price: 0,
+      price,
+      tick: Number(p.tick) || 0,
       liquidity: String(p.liquidity),
       feeApy: tvl >= APY_MIN_TVL_USD && fees24h > 0 ? (fees24h / tvl) * 365 * 100 : 0,
       vol24h,
@@ -483,6 +577,10 @@ const PoolsContent = () => {
         <PoolDetail pool={selectedPool} onBack={() => setSelectedPool(null)} address={address} isConnected={isConnected} walletCtx={walletCtx} chainClient={chainClient} />
       ) : tab === "markets" ? (
         <>
+          {/* The ALM vault and the MoleQueue are how a MoleSwap pool works, not separate products — so
+              the engine panel sits at the head of the markets list, above the pools it drives. */}
+          <MoleEngine />
+
           <div className="stats" style={{ marginTop: 0 }}>
             {[
               { l: "Total value locked", v: loading ? "..." : `$${fmt(totalTvl)}` },
@@ -555,7 +653,7 @@ const PoolsContent = () => {
                       <div className="nm">{p.name}</div>
                       <div className="tag">
                         <Badge chain="Robinhood Chain" />
-                        <span className="fee">{(p.fee / 10000).toFixed(2)}%</span>
+                        <span className="fee">{feeLabel(p.fee)}</span>
                       </div>
                     </div>
                   </div>
@@ -1165,7 +1263,8 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   const [txError, setTxError] = useState<string | null>(null);
   const [stepLabel, setStepLabel] = useState("");
   const [inputFocused, setInputFocused] = useState<0 | 1>(0);
-  const [currentTick, setCurrentTick] = useState(0);
+  const [currentTick, setCurrentTick] = useState(pool.tick || 0);
+  const [livePrice, setLivePrice] = useState<number | null>(null);
   const [rangeMode, setRangeMode] = useState<"full" | "custom">("full");
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
@@ -1188,28 +1287,36 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
     fetchBalances();
   }, [address, pool]);
 
+  // Refresh tick AND price straight from the pool's slot0. The list already carries both (they come from
+  // the same StateView read the API does), so this is a top-up, not the only source — a failed read
+  // leaves the list values standing instead of collapsing the page to zeros.
   useEffect(() => {
+    let cancelled = false;
+    setCurrentTick(pool.tick || 0);
+    setLivePrice(null);
     (async () => {
-      try {
-        const provider = getProvider();
-        const poolContract = new ethers.Contract(pool.pool.address, POOL_ABI, provider);
-        const slot0 = await poolContract.slot0();
-        setCurrentTick(Number(slot0[1]));
-      } catch {}
+      const s = await readPoolSlot0(pool.pool.address);
+      if (!s || cancelled) return;
+      setCurrentTick(s.tick);
+      const px = sqrtPriceToPrice(s.sqrtPriceX96, pool.token0.decimals, pool.token1.decimals);
+      if (px > 0) setLivePrice(px);
     })();
+    return () => { cancelled = true; };
   }, [pool]);
 
-  const priceUsable = Number.isFinite(pool.price) && pool.price > 0;
+  // One price for the whole detail view: the live slot0 read when it lands, else the list's value.
+  const price = livePrice ?? pool.price;
+  const priceUsable = Number.isFinite(price) && price > 0;
   const updateAmount1FromAmount0 = (val: string) => {
     setAmount0(val);
     if (inputFocused === 0 && priceUsable && val && !isNaN(Number(val)) && Number(val) > 0) {
-      setAmount1((Number(val) * pool.price).toFixed(Math.min(pool.token1.decimals, 8)));
+      setAmount1((Number(val) * price).toFixed(Math.min(pool.token1.decimals, 8)));
     } else if (!val) setAmount1("");
   };
   const updateAmount0FromAmount1 = (val: string) => {
     setAmount1(val);
     if (inputFocused === 1 && priceUsable && val && !isNaN(Number(val)) && Number(val) > 0) {
-      setAmount0((Number(val) / pool.price).toFixed(Math.min(pool.token0.decimals, 8)));
+      setAmount0((Number(val) / price).toFixed(Math.min(pool.token0.decimals, 8)));
     } else if (!val) setAmount0("");
   };
   const setPercentage0 = (pct: number) => { if (!balance0) return; setInputFocused(0); updateAmount1FromAmount0((Number(balance0) * pct).toFixed(Math.min(pool.token0.decimals, 8))); };
@@ -1277,7 +1384,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
     return "ADD LIQUIDITY";
   };
 
-  const priceStr = Number.isFinite(pool.price) ? (pool.price > 1000 ? fmt(pool.price) : pool.price < 0.001 ? pool.price.toExponential(2) : pool.price.toFixed(4)) : "N/A";
+  const priceStr = priceUsable ? (price > 1000 ? fmt(price) : price < 0.001 ? price.toExponential(2) : price.toFixed(4)) : "N/A";
 
   return (
     <div>
@@ -1292,7 +1399,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
         {pool.token0.sourceChain !== "Robinhood Chain" && (
           <span className="badge2">bridged from {pool.token0.sourceChain}</span>
         )}
-        <span className="badge2">Fee {(pool.fee / 10000).toFixed(2)}%</span>
+        <span className="badge2">Fee {feeLabel(pool.fee)}</span>
       </div>
 
       {/* Stats row */}
@@ -1301,8 +1408,8 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
           { l: "TVL", v: `$${fmt(pool.tvl)}`, cls: "" },
           { l: "24h vol", v: pool.vol24h > 0 ? `$${fmt(pool.vol24h)}` : "—", cls: "" },
           { l: "APY", v: pool.feeApy > 0 ? `${pool.feeApy.toFixed(pool.feeApy >= 100 ? 0 : 1)}%` : "—", cls: pool.feeApy > 0 ? "pos" : "" },
-          { l: "Fee tier", v: `${(pool.fee / 10000).toFixed(2)}%`, cls: "pos" },
-          { l: "Price", v: pool.price > 0 ? `$${fmt(pool.price)}` : "—", cls: "" },
+          { l: "Fee tier", v: feeLabel(pool.fee), cls: "pos" },
+          { l: "Price", v: priceUsable ? `$${fmt(price)}` : "—", cls: "" },
           { l: "Liquidity", v: BigInt(pool.liquidity) > 0n ? "ACTIVE" : "EMPTY", cls: BigInt(pool.liquidity) > 0n ? "pos" : "neg" },
         ].map((s) => (
           <div key={s.l} className="p-card tight">
@@ -1338,7 +1445,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
             1 {pool.token0.symbol} = {priceStr} {pool.token1.symbol}
           </span>
         </div>
-        <LiquidityGraph currentTick={currentTick} tickLower={-887272} tickUpper={887272} height={80} price={pool.price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
+        <LiquidityGraph currentTick={currentTick} tickLower={-887272} tickUpper={887272} height={80} price={price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
         <div className="lg-foot">
           <span>MIN: 0</span>
           <span className="in">● IN RANGE — FULL</span>
@@ -1481,14 +1588,14 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                         {rangeMode === "full" ? "● FULL RANGE" : "◆ CUSTOM"}
                       </span>
                     </div>
-                    <LiquidityGraph currentTick={currentTick} tickLower={selectedTickLower} tickUpper={selectedTickUpper} height={36} price={pool.price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
+                    <LiquidityGraph currentTick={currentTick} tickLower={selectedTickLower} tickUpper={selectedTickUpper} height={36} price={price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
                   </div>
 
                   {/* Info rows */}
                   <div className="relative mb-3 rounded px-3 py-2">
                     {[
-                      ["PRICE", `1 ${pool.token0.symbol} = ${pool.price > 0 ? pool.price.toFixed(4) : "N/A"} ${pool.token1.symbol}`, "text-peach-300"],
-                      ["FEE TIER", `${(pool.fee / 10000).toFixed(2)}%`, "text-peach-300"],
+                      ["PRICE", `1 ${pool.token0.symbol} = ${priceUsable ? price.toFixed(4) : "N/A"} ${pool.token1.symbol}`, "text-peach-300"],
+                      ["FEE TIER", feeLabel(pool.fee), "text-peach-300"],
                       ["RANGE", rangeMode === "full" ? "FULL RANGE" : `${minPrice || "0"} — ${maxPrice || "∞"} ${pool.token1.symbol}`, rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"],
                       ["SLIPPAGE", "0.5%", "text-gray-200"],
                       ["ON-CHAIN", pool.active ? "LIVE ✓" : "NO LIQUIDITY", pool.active ? "text-[#6DBB3E]" : "text-red-400"],

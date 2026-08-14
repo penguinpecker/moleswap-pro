@@ -33,8 +33,26 @@ const GETLOGS_CHUNK = Number(process.env.GETLOGS_CHUNK) || 5_000; // block span 
 const MAX_BLOCKS_PER_CYCLE = Number(process.env.MAX_BLOCKS_PER_CYCLE) || 200_000; // discovery work per cycle
 const CONFIRMATIONS = Number(process.env.CONFIRMATIONS) || 5; // finality lag so the cursor never rides the tip
 const UNVERIFIED_REFRESH_BATCH = Number(process.env.UNVERIFIED_REFRESH_BATCH) || 4000;
-const PRICE_USDG_PER_ETH = Number(process.env.PRICE_USDG_PER_ETH) || 1900;
 const STALE_MULTIPLIER = Number(process.env.STALE_MULTIPLIER) || 5; // /health = 503 after this × REFRESH_MS
+
+/* ---- USDG per WETH ----------------------------------------------------------------------------
+ * This number converts a USDG-hub reserve into WETH-equivalent depth (measureDeepest) and a WETH-side
+ * swap notional into USD (refreshVolume). Depth then decides `verified` (>= 0.05) inside
+ * mp_refresh_tokens — i.e. whether a token is offered in the picker at all — so a frozen price is a
+ * frozen threshold: it was a hardcoded 1900 read from an env var that is set NOWHERE, ~1.8% above the
+ * live pool, with no mechanism to track the market. An ETH move of any size would silently redraw the
+ * verified list with no code change and a green /health.
+ *
+ * It is now READ FROM THE CHAIN (the WETH/USDG pool's slot0) and re-read every PRICE_TTL_SECONDS.
+ * PRICE_USDG_PER_ETH still works, but now as an explicit PIN: set it and the live read is skipped.
+ * The old 1900 survives only as the last-resort fallback if the very first read fails, and any read
+ * outside [PRICE_MIN, PRICE_MAX] is refused rather than allowed to re-verify the whole token list. */
+const PRICE_POOL = (process.env.PRICE_POOL || "0x88a8e96e7785d378825e8b5d7fc0e6f62487061e").toLowerCase();
+const PRICE_PIN = Number(process.env.PRICE_USDG_PER_ETH) || 0; // 0 = read live
+const PRICE_FALLBACK = Number(process.env.PRICE_USDG_PER_ETH_FALLBACK) || 1900;
+const PRICE_TTL_MS = (Number(process.env.PRICE_TTL_SECONDS) || 300) * 1000;
+const PRICE_MIN = 50;
+const PRICE_MAX = 500_000;
 
 const MC3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
 const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
@@ -71,10 +89,26 @@ const SPACING = { 80: 1, 100: 1, 250: 5, 500: 10, 2500: 50, 3000: 60, 10000: 200
  * model. The tracked set is the pools the app displays (WETH/USDG tiers) — extend via VOLUME_POOLS. */
 const UNI_V3_SWAP = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
 const PANCAKE_V3_SWAP = "0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83";
+// keccak("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)") — the v4 PoolManager's Swap
+// (IPoolManager.sol:91). A v4 pool has NO ADDRESS, so it can never appear in an address-filtered V3-shaped
+// scan: the swap is emitted by the singleton with the PoolId in topic1. Verified against the live chain.
+const V4_SWAP = "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f";
 const BLOCKS_PER_BUCKET = Number(process.env.VOL_BLOCKS_PER_BUCKET) || 36000; // ~1h at RH's ~0.0999s/block
 const BLOCKS_24H = Number(process.env.VOL_BLOCKS_24H) || 864000; // measured 864,691 blocks / 24h
 const MAX_VOL_BLOCKS_PER_CYCLE = Number(process.env.MAX_VOL_BLOCKS_PER_CYCLE) || 900000; // backfill the full 24h in the first cycle (~173 getLogs for 3 pools, ~11s); tiny incremental reads after
+/**
+ * The tracked set, as ids in `mp_pools`. Two SHAPES live here and the difference is load-bearing:
+ *   - a 42-char string is a V3 pool ADDRESS  (venue pancake_v3 / uniswap_v3)
+ *   - a 66-char string is a v4 bytes32 PoolId (venue mole_v4 / uniswap_v4 — those rows have no address)
+ * Volume is stored under the SAME id, because that is the key the reader joins on: /pools renders
+ * venue='mole_v4' rows (lib/chain/livePools.ts) and looks their volume up by `poolId`. The default used
+ * to be three V3 addresses ONLY, so every row the page rendered missed the lookup and the 24h volume /
+ * fees columns and the fee-APY were structurally 0 — real indexed volume that nothing could ever render.
+ * The MoleSwap WETH/USDG pool id (LIVE_POOL_ID in lib/mole/chain.ts) is therefore tracked by default.
+ * The three V3 addresses are kept: they hold real, already-indexed volume and cost nothing to maintain.
+ */
 const VOLUME_POOLS = (process.env.VOLUME_POOLS ||
+  "0x9aca9d2f4bb68ef41e6928bbe080a4b076b167e2d4b7fdebf4b4fd5d6dadd029," +
   "0x88a8e96e7785d378825e8b5d7fc0e6f62487061e,0x4520f3f932ae530c58cc332b532951e5814e6cb8,0x0ff6bdd6ac5db3426c3c2c922f93a5749887e28d")
   .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 
@@ -176,7 +210,50 @@ function decodeStr(hex) {
 }
 const sanitize = (s, max) => (s ? s.replace(CTRL, "").replace(/[<>]/g, "").trim().slice(0, max) || null : null);
 const SEL = { symbol: "0x95d89b41", name: "0x06fdde03", decimals: "0x313ce567" };
+const POOL_SEL = { slot0: "0x3850c7bd", token0: "0x0dfe1681", token1: "0xd21220a7" };
 const balanceOf = (holder) => "0x70a08231" + pad32(holder);
+
+/* -------------------------------------------------------------------------------------- eth price */
+let _price = { at: 0, value: 0 };
+
+/**
+ * USDG per WETH, read live from PRICE_POOL's slot0 and cached for PRICE_TTL_MS.
+ *
+ * Never throws: a failed read reuses the last good value, or PRICE_FALLBACK if there has never been one,
+ * and says so — a silent fallback here would mis-measure every USDG-hub token's depth and quietly move
+ * the verified/unverified line.
+ */
+async function usdgPerEth() {
+  if (PRICE_PIN > 0) return PRICE_PIN;
+  if (_price.value > 0 && Date.now() - _price.at < PRICE_TTL_MS) return _price.value;
+  try {
+    const [t0, t1, s0] = await Promise.all([
+      rpc("eth_call", [{ to: PRICE_POOL, data: POOL_SEL.token0 }, "latest"]),
+      rpc("eth_call", [{ to: PRICE_POOL, data: POOL_SEL.token1 }, "latest"]),
+      rpc("eth_call", [{ to: PRICE_POOL, data: POOL_SEL.slot0 }, "latest"]),
+    ]);
+    const a0 = "0x" + String(t0).slice(-40).toLowerCase();
+    const a1 = "0x" + String(t1).slice(-40).toLowerCase();
+    // The orientation is PROVEN, not assumed: WETH has 18 decimals and USDG 6, so reading the pair the
+    // wrong way round is a 1e24 error, not a rounding one.
+    const wethFirst = a0 === WETH && a1 === USDG;
+    const usdgFirst = a0 === USDG && a1 === WETH;
+    if (!wethFirst && !usdgFirst) throw new Error(`PRICE_POOL ${PRICE_POOL} is not WETH/USDG (${a0}/${a1})`);
+    const sqrt = Number(BigInt("0x" + String(s0).replace(/^0x/, "").slice(0, 64))) / 2 ** 96;
+    const ratio = sqrt * sqrt; // raw token1 per raw token0
+    // human price = ratio * 10^(dec0 - dec1); WETH=18, USDG=6.
+    const price = wethFirst ? ratio * 1e12 : 1e12 / ratio;
+    if (!Number.isFinite(price) || price < PRICE_MIN || price > PRICE_MAX) {
+      throw new Error(`implausible USDG/WETH price ${price} from ${PRICE_POOL}`);
+    }
+    _price = { at: Date.now(), value: price };
+    return price;
+  } catch (e) {
+    const fallback = _price.value > 0 ? _price.value : PRICE_FALLBACK;
+    console.warn(`price read failed (${e instanceof Error ? e.message : String(e)}); using ${fallback}`);
+    return fallback;
+  }
+}
 
 /* ---------------------------------------------------------------------------------------- discovery */
 /** Read PoolCreated across all factories for [from,to], sub-chunked and FAIL-CLOSED: any failure throws
@@ -284,12 +361,13 @@ async function measureDeepest(candidates) {
   if (flat.length === 0) return [];
   const calls = flat.map((r) => ({ target: r.hub === "usdg" ? USDG : WETH, callData: balanceOf(r.pool) }));
   const res = await multicall(calls);
+  const price = await usdgPerEth(); // one live read per cycle, shared by every USDG-hub row below
   const best = new Map(); // address -> {liquidity, pool, hub}
   flat.forEach((r, i) => {
     let bal = 0n;
     const x = res[i];
     if (x?.success && x.data && x.data !== "0x") { try { bal = BigInt(x.data); } catch {} }
-    const weth = r.hub === "usdg" ? Number(bal) / 1e6 / PRICE_USDG_PER_ETH : Number(bal) / 1e18;
+    const weth = r.hub === "usdg" ? Number(bal) / 1e6 / price : Number(bal) / 1e18;
     const prev = best.get(r.address);
     if (!prev || weth > prev.liquidity) best.set(r.address, { liquidity: Number(weth.toFixed(9)), pool: r.pool, hub: r.hub });
   });
@@ -450,18 +528,26 @@ async function refreshVolume() {
 
   // Resolve immutables (token0/token1/fee) for the tracked pools from the registry we already maintain.
   const { data: poolRows, error: pErr } = await supabase
-    .from("mp_pools").select("address,token0,token1,fee").in("id", VOLUME_POOLS);
+    .from("mp_pools").select("id,venue,address,token0,token1,fee").in("id", VOLUME_POOLS);
   if (pErr) throw new Error(`vol pools: ${pErr.message}`);
-  const metaByAddr = new Map();
+  // Keyed by the id the READER joins on, which is the row's own id: a V3 pool's address, a v4 pool's
+  // 66-char PoolId. Writing a v4 pool's volume under anything else is unjoinable by construction.
+  const metaById = new Map();
   for (const r of poolRows || []) {
     const t0 = lc(r.token0), t1 = lc(r.token1);
     let hub = null, hubIsToken0 = false;
     if (t0 === USDG || t1 === USDG) { hub = "usdg"; hubIsToken0 = t0 === USDG; }
     else if (t0 === WETH || t1 === WETH) { hub = "weth"; hubIsToken0 = t0 === WETH; }
-    if (hub) metaByAddr.set(lc(r.address), { hub, hubIsToken0, fee: Number(r.fee) });
+    if (!hub) continue;
+    const isV4 = !r.address || r.venue === "mole_v4" || r.venue === "uniswap_v4";
+    // A V3 row's id IS its address (see the discover writer), so keying by the address keeps every
+    // already-indexed bucket accumulating under exactly the key it has today; a v4 row has no address,
+    // so its 66-char PoolId is both the identity and the key the page looks it up by.
+    metaById.set(lc(isV4 ? r.id : r.address || r.id), { hub, hubIsToken0, fee: Number(r.fee), isV4 });
   }
-  const addrs = [...metaByAddr.keys()];
-  if (addrs.length === 0) return { from: 0, to: 0, swaps: 0 };
+  const addrs = [...metaById.entries()].filter(([, m]) => !m.isV4).map(([k]) => k);
+  const v4Ids = [...metaById.entries()].filter(([, m]) => m.isV4).map(([k]) => k);
+  if (addrs.length === 0 && v4Ids.length === 0) return { from: 0, to: 0, swaps: 0 };
 
   const curRaw = await supabase.rpc("mp_volume_cursor", { p_secret: WRITE_SECRET });
   if (curRaw.error) throw new Error(`vol cursor: ${curRaw.error.message}`);
@@ -471,16 +557,35 @@ async function refreshVolume() {
   if (to < from) return { from, to, swaps: 0 };
 
   const byBucket = new Map(); // `${pool}|${bucket}` -> {pool,bucket,volume_usd,fees_usd,swaps}
+  const price = await usdgPerEth();
   let swapCount = 0;
   for (let lo = from; lo <= to; lo += GETLOGS_CHUNK) {
     const hi = Math.min(to, lo + GETLOGS_CHUNK - 1);
-    const logs = await rpc("eth_getLogs", [
-      { address: addrs, topics: [[UNI_V3_SWAP, PANCAKE_V3_SWAP]], fromBlock: hexnum(lo), toBlock: hexnum(hi) },
-    ]); // throws on persistent failure → cursor not advanced, range re-read next cycle (idempotent)
-    if (!Array.isArray(logs)) continue;
-    for (const l of logs) {
-      const meta = metaByAddr.get(lc(l.address));
-      if (!meta || !l.data || l.data.length < 2 + 128) continue;
+    // Two scans, because the two venues emit the same economic event in structurally different places.
+    // Both throw on persistent failure → cursor not advanced, range re-read next cycle (idempotent).
+    const hits = [];
+    if (addrs.length > 0) {
+      const logs = await rpc("eth_getLogs", [
+        { address: addrs, topics: [[UNI_V3_SWAP, PANCAKE_V3_SWAP]], fromBlock: hexnum(lo), toBlock: hexnum(hi) },
+      ]);
+      if (Array.isArray(logs)) for (const l of logs) hits.push({ key: lc(l.address), l, isV4: false });
+    }
+    // v4 has no per-pool contract: the PoolManager singleton emits every pool's Swap with the PoolId in
+    // topic1, so it is filtered by TOPIC, not by address. Skipped entirely when nothing v4 is tracked —
+    // an empty topic list is read by the node as "any pool" and would sweep in all 8k+ foreign pools.
+    if (v4Ids.length > 0) {
+      const logs = await rpc("eth_getLogs", [
+        { address: POOL_MANAGER, topics: [V4_SWAP, v4Ids], fromBlock: hexnum(lo), toBlock: hexnum(hi) },
+      ]);
+      if (Array.isArray(logs)) for (const l of logs) hits.push({ key: lc(l.topics?.[1] || ""), l, isV4: true });
+    }
+    for (const { key, l, isV4 } of hits) {
+      const meta = metaById.get(key);
+      // v3 data = (amount0 int256, amount1 int256, …); v4 data = (amount0 int128, amount1 int128,
+      // sqrtPriceX96, liquidity, tick, fee). The first two words hold the amounts in BOTH layouts — the
+      // ABI sign-extends an int128 across the full word — so one decoder serves both. v4 needs all six.
+      const minLen = 2 + (isV4 ? 384 : 128);
+      if (!meta || !l.data || l.data.length < minLen) continue;
       const body = l.data.replace(/^0x/, "");
       const amount0 = i256(body.slice(0, 64));
       const amount1 = i256(body.slice(64, 128));
@@ -488,15 +593,18 @@ async function refreshVolume() {
       const abs = amt < 0n ? -amt : amt;
       const volUsd = meta.hub === "usdg"
         ? Number(abs) / 1e6
-        : (Number(abs) / 1e18) * PRICE_USDG_PER_ETH;
+        : (Number(abs) / 1e18) * price;
       if (!(volUsd > 0)) continue;
-      const feeUsd = (volUsd * meta.fee) / 1e6;
+      // A v4 pool may charge a DYNAMIC fee — mp_pools stores the 0x800000 sentinel for those, which as a
+      // rate would read as 838% — so take the fee the swap ACTUALLY paid from the event's last word.
+      const feePips = isV4 ? Number(BigInt("0x" + body.slice(320, 384))) : meta.fee;
+      const feeUsd = Number.isFinite(feePips) && feePips >= 0 && feePips <= 1e6 ? (volUsd * feePips) / 1e6 : 0;
       const blockNum = parseInt(l.blockNumber, 16);
       const bucket = Math.floor(blockNum / BLOCKS_PER_BUCKET);
-      const key = `${lc(l.address)}|${bucket}`;
-      const b = byBucket.get(key) || { pool: lc(l.address), bucket, volume_usd: 0, fees_usd: 0, swaps: 0 };
+      const bkey = `${key}|${bucket}`;
+      const b = byBucket.get(bkey) || { pool: key, bucket, volume_usd: 0, fees_usd: 0, swaps: 0 };
       b.volume_usd += volUsd; b.fees_usd += feeUsd; b.swaps += 1;
-      byBucket.set(key, b);
+      byBucket.set(bkey, b);
       swapCount++;
     }
   }

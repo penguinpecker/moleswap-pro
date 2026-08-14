@@ -17,7 +17,7 @@ import { v4PoolState } from "./v4Pool";
 import type { PoolState, TickData } from "./v3Pool";
 import { robinhoodChain, LIVE_POOL_KEY, MOLE_ADDRESSES, DYNAMIC_FEE_FLAG, ROBINHOOD_RPC_URL } from "@/lib/mole/chain";
 import { poolIdOf, type V4PoolKey } from "@/lib/mole/poolId";
-import { wordsToFetch } from "../indexer";
+import { wordsToFetch, DEFAULT_WORD_RADIUS } from "../indexer";
 
 const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b" as Address;
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;
@@ -36,6 +36,145 @@ const hookAbi = [
 function client() {
   const rpc = (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) || ROBINHOOD_RPC_URL;
   return createPublicClient({ chain: robinhoodChain, transport: http(rpc) });
+}
+
+/* ------------------------------------------------------------------ tick window (widening) */
+
+const MIN_TICK = -887272;
+const MAX_TICK = 887272;
+
+/** Which 256-bit bitmap word a tick lives in. Floor division twice — correct for negative ticks. */
+function wordOfTick(tick: number, tickSpacing: number): number {
+  return Math.floor(Math.floor(tick / tickSpacing) / 256);
+}
+
+/**
+ * How far ONE widening pass may reach on a single side, in bitmap words.
+ *
+ * 128 words is the ENTIRE tick space at tickSpacing >= 60 (spacing 60 spans words -58..57, spacing 200
+ * spans -18..17), so for the spacings these v4 pools actually use the widened search is exhaustive: if an
+ * initialised tick exists on that side, it is found. At finer spacings it still reaches
+ * 128 * 256 * tickSpacing ticks — 327,680 at spacing 10 — while keeping the read to ONE extra multicall.
+ */
+const MAX_WIDEN_WORDS_PER_SIDE = 128;
+
+/** Calldata bytes per aggregate3 chunk. Sized so the base window is still one eth_call and a full
+ *  widening pass is two or three, rather than viem's default 1024 bytes (~15 reads) per round trip. */
+const MULTICALL_CHUNK_BYTES = 8_192;
+
+/**
+ * The EXTRA bitmap words to read when the window around spot came back one-sided, nearest word first.
+ *
+ * This is the second half of the fix that `wordsToFetch` started. That helper widened the window to the
+ * MIN/MAX boundary words, which covers a FULL-RANGE position; it does nothing for a BOUNDED position
+ * whose far tick is neither near spot nor at the extremes. The hole is invisible at one tickSpacing and
+ * fatal at another, because the window is measured in WORDS: one word spans 256 * tickSpacing ticks, so
+ * a fixed +/-6-word radius reaches +/-307,200 ticks at spacing 200 but only +/-92,160 at spacing 60.
+ *
+ * Measured on this chain: the launchpad seeds one position 120,000 ticks wide with spot sitting exactly
+ * on its lower tick. At spacing 200 that upper tick is 2.3 words away and the pool quotes; at spacing 60
+ * it is 7.8 words away — one word outside the window — so the reader saw only the lower tick, the pool
+ * looked one-sided, the quoter could not cross upward, and every fee-3000 pool answered "no liquidity
+ * route found" for a buy the chain executes happily. Live pool 0xd6c1698f… (fee 3000, spacing 60): spot
+ * tick -210600, initialised ticks -210600 (word -14, the centre word) and -90600 (word -6, EIGHT words
+ * up). Widening reads the second one.
+ *
+ * Bounded and lazy: nothing extra is read unless a side is genuinely missing, and never more than `cap`
+ * words per side. Exported so the v3 readers can adopt the same widening rather than re-deriving it.
+ *
+ * @param alreadyRead the words the base window already covered — never re-read.
+ */
+export function widenWords(
+  centerWord: number,
+  tickSpacing: number,
+  alreadyRead: readonly number[],
+  needBelow: boolean,
+  needAbove: boolean,
+  cap: number = MAX_WIDEN_WORDS_PER_SIDE,
+): number[] {
+  const minWord = wordOfTick(Math.ceil(MIN_TICK / tickSpacing) * tickSpacing, tickSpacing);
+  const maxWord = wordOfTick(Math.floor(MAX_TICK / tickSpacing) * tickSpacing, tickSpacing);
+  const read = new Set(alreadyRead);
+  // Nearest-first along one side, skipping what the window already covered, then truncated to the cap.
+  const side = (count: number, at: (i: number) => number) =>
+    Array.from({ length: Math.max(0, count) }, (_, i) => at(i))
+      .filter((w) => !read.has(w))
+      .slice(0, cap);
+  const out: number[] = [];
+  if (needAbove) out.push(...side(maxWord - centerWord, (i) => centerWord + 1 + i));
+  if (needBelow) out.push(...side(centerWord - minWord, (i) => centerWord - 1 - i));
+  return out;
+}
+
+/**
+ * Read the initialised ticks a quote can actually cross: the window around spot, widened outward on any
+ * side that came back empty. `baseRadius` is the cheap first look; the widening only fires when the pool
+ * really is one-sided through that window, so a normal dense pool costs exactly what it cost before.
+ *
+ * "One side is missing" is defined the way the simulator crosses ticks: downward it consumes ticks at or
+ * below the current tick, upward it consumes ticks strictly above it.
+ */
+async function readTickWindow(
+  c: ReturnType<typeof client>,
+  poolId: `0x${string}`,
+  tickSpacing: number,
+  tick: number,
+  baseRadius: number,
+): Promise<TickData[]> {
+  const readBitmaps = async (ws: number[]): Promise<bigint[]> =>
+    ws.length === 0
+      ? []
+      : ((await c.multicall({
+          contracts: ws.map((w) => ({
+            address: STATE_VIEW,
+            abi: stateViewAbi,
+            functionName: "getTickBitmap" as const,
+            args: [poolId, w] as const,
+          })),
+          multicallAddress: MULTICALL3,
+          allowFailure: false,
+          batchSize: MULTICALL_CHUNK_BYTES,
+        })) as bigint[]);
+
+  const ticksIn = (ws: number[], bitmaps: bigint[]): number[] => {
+    const out: number[] = [];
+    ws.forEach((w, i) => {
+      const bm = bitmaps[i]!;
+      if (bm === 0n) return;
+      for (let bit = 0; bit < 256; bit++) {
+        if ((bm >> BigInt(bit)) & 1n) out.push((w * 256 + bit) * tickSpacing);
+      }
+    });
+    return out;
+  };
+
+  const centerWord = wordOfTick(tick, tickSpacing);
+  const base = wordsToFetch(centerWord, tickSpacing, baseRadius);
+  const tickList = ticksIn(base, await readBitmaps(base));
+
+  const needBelow = !tickList.some((t) => t <= tick);
+  const needAbove = !tickList.some((t) => t > tick);
+  if (needBelow || needAbove) {
+    const extra = widenWords(centerWord, tickSpacing, base, needBelow, needAbove);
+    if (extra.length > 0) tickList.push(...ticksIn(extra, await readBitmaps(extra)));
+  }
+  if (tickList.length === 0) return [];
+
+  const infos = (await c.multicall({
+    contracts: tickList.map((t) => ({
+      address: STATE_VIEW,
+      abi: stateViewAbi,
+      functionName: "getTickInfo" as const,
+      args: [poolId, t] as const,
+    })),
+    multicallAddress: MULTICALL3,
+    allowFailure: false,
+    batchSize: MULTICALL_CHUNK_BYTES,
+  })) as readonly (readonly [bigint, bigint, bigint, bigint])[];
+
+  // TickData keys the tick by `index` — the simulator binary-searches on it; a wrong key here made
+  // every v4 tick invisible and quoted the pool as constant-liquidity (over-quote → minOut revert).
+  return tickList.map((t, i) => ({ index: t, liquidityNet: infos[i]![1] })).sort((a, b) => a.index - b.index);
 }
 
 /** Read the live MoleHook WETH/USDG pool and return it as a routable PoolState, or null if unquotable. */
@@ -74,39 +213,14 @@ export async function fetchV4Pool(poolKey: V4PoolKey): Promise<PoolState | null>
     if (sqrtPriceX96 === 0n) return null; // pool uninitialised
 
     // Walk the tick bitmap around the current tick to collect initialised ticks (same layout as v3).
-    const compressed = Math.floor(tick / tickSpacing);
-    const centerWord = compressed >> 8;
-    // Boundary words included for the same reason as the v3 readers: a full-range position parks
+    // Boundary words are included for the same reason as the v3 readers: a full-range position parks
     // its ticks at the extremes of tick space, far outside any window centred on spot, and reading
     // only the window makes the pool look one-sided so the quoter refuses one direction entirely.
-    // This is our OWN v4 venue, and MoleSwap pools are seeded full-range by create-pool.
-    const words: number[] = wordsToFetch(centerWord, tickSpacing, 3);
-    const bitmapResults = await c.multicall({
-      contracts: words.map((w) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickBitmap" as const, args: [poolId, w] as const })),
-      multicallAddress: MULTICALL3,
-      allowFailure: false,
-    });
-    const bitmaps = bitmapResults as bigint[];
-
-    const tickList: number[] = [];
-    words.forEach((w, i) => {
-      let bm = bitmaps[i]!;
-      if (bm === 0n) return;
-      for (let bit = 0; bit < 256; bit++) {
-        if ((bm >> BigInt(bit)) & 1n) tickList.push((w * 256 + bit) * tickSpacing);
-      }
-    });
-
-    const infos = (await c.multicall({
-      contracts: tickList.map((t) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickInfo" as const, args: [poolId, t] as const })),
-      multicallAddress: MULTICALL3,
-      allowFailure: false,
-    })) as readonly (readonly [bigint, bigint, bigint, bigint])[];
-    // TickData keys the tick by `index` — the simulator binary-searches on it; a wrong key here made
-    // every v4 tick invisible and quoted the pool as constant-liquidity (over-quote → minOut revert).
-    const ticks: TickData[] = tickList
-      .map((t, i) => ({ index: t, liquidityNet: infos[i]![1] }))
-      .sort((a, b) => a.index - b.index);
+    // This is our OWN v4 venue, and MoleSwap pools are seeded full-range by create-pool — hence the
+    // small base radius. readTickWindow widens it automatically if a side still comes back empty,
+    // which is what a bounded (non-full-range) position needs; at spacing 60 a radius of 3 reaches
+    // only +/-46,080 ticks, so an operator-created pool with a narrow band was unbuyable without it.
+    const ticks: TickData[] = await readTickWindow(c, poolId, tickSpacing, tick, 3);
 
     // Build the quotable state (quote fee = live lpFee), then restore the execution key's dynamic-fee
     // sentinel so the plan targets the real pool id.
@@ -176,32 +290,11 @@ export async function fetchV4PoolByKey(poolKey: V4PoolKey): Promise<PoolState | 
     // single effective rate that reproduces the chain: 1 - (1-p)(1-l).
     const effectiveFee = Math.round(1e6 - ((1e6 - protocolFee) * (1e6 - lpFee)) / 1e6);
 
-    const centerWord = Math.floor(Math.floor(tick / tickSpacing) / 256);
-    const words = wordsToFetch(centerWord, tickSpacing, 6);
-    const bitmaps = (await c.multicall({
-      contracts: words.map((w) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickBitmap" as const, args: [poolId, w] as const })),
-      multicallAddress: MULTICALL3,
-      allowFailure: false,
-    })) as bigint[];
-
-    const tickList: number[] = [];
-    words.forEach((w, i) => {
-      const bm = bitmaps[i]!;
-      if (bm === 0n) return;
-      for (let bit = 0; bit < 256; bit++) {
-        if ((bm >> BigInt(bit)) & 1n) tickList.push((w * 256 + bit) * tickSpacing);
-      }
-    });
-
-    const infos = (await c.multicall({
-      contracts: tickList.map((t) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickInfo" as const, args: [poolId, t] as const })),
-      multicallAddress: MULTICALL3,
-      allowFailure: false,
-    })) as readonly (readonly [bigint, bigint, bigint, bigint])[];
-
-    const ticks: TickData[] = tickList
-      .map((t, i) => ({ index: t, liquidityNet: infos[i]![1] }))
-      .sort((a, b) => a.index - b.index);
+    // Window around spot, widened on any side that comes back empty. A fixed word radius is a tick
+    // radius that SHRINKS with tickSpacing, which is exactly why the fee-3000/spacing-60 pools on this
+    // chain read as one-sided and quoted "no route" while the fee-10000/spacing-200 pools — holding the
+    // identically-shaped position — quoted fine. See widenWords.
+    const ticks: TickData[] = await readTickWindow(c, poolId, tickSpacing, tick, DEFAULT_WORD_RADIUS);
 
     const state = v4PoolState({
       poolKey: { ...poolKey, fee: effectiveFee },

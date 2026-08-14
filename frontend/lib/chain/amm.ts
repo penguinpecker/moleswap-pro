@@ -40,6 +40,20 @@ import { quoteSwap } from "@/lib/aggregator/client";
 import type { PoolRow } from "@/lib/aggregator/client";
 import { getAggFeeBps } from "@/lib/mole/aggFee";
 import { createClient } from "@/lib/supabase/client";
+// The registry query itself lives beside the API routes' loader so the browser and server copies cannot
+// drift apart again — the last fix landed on the server twin only, which is what left this file broken.
+import {
+  fetchPoolRowsByPair,
+  fetchPoolRowsWindow,
+  poolPairTokens,
+  type PoolPair,
+} from "@/lib/aggregator/serverPools";
+import {
+  DEFAULT_SLIPPAGE_BPS,
+  MAX_SLIPPAGE_BPS,
+  MIN_SLIPPAGE_BPS,
+  getSlippageBps,
+} from "@/lib/settings/swapSettings";
 
 /* ─── Re-exports (unchanged import surface) ──────────────────────────────── */
 export {
@@ -56,6 +70,8 @@ export {
   type TokenInfo,
   type PoolInfo,
 };
+/** The tolerance used when the user has not chosen one (Max Slippage = AUTO). */
+export { DEFAULT_SLIPPAGE_BPS };
 
 export const AMM_ROUTER = CONTRACTS.MOLE_ROUTER;
 export const AMM_FACTORY = CONTRACTS.FACTORY;
@@ -66,7 +82,22 @@ export const RH_TOKENS = TOKENS;
 const ZERO = "0x0000000000000000000000000000000000000000";
 const WETH = CONTRACTS.WETH;
 const RH_CHAIN_HEX = "0x1237"; // 4663
-const DEFAULT_SLIPPAGE_BPS = 50;
+
+/**
+ * The slippage tolerance to quote and sign with, in bps.
+ *
+ * An explicit argument wins (callers that already know the user's choice, e.g. a screen holding the
+ * live quote). Otherwise the user's persisted Max Slippage from the Settings panel is read here —
+ * executeSwap runs outside the render tree, so it cannot take the value from a hook. When nothing is
+ * stored, that resolves to DEFAULT_SLIPPAGE_BPS, which is exactly the 50 bps this file used before,
+ * so behaviour for a user who never opened the panel is unchanged.
+ */
+function resolveSlippageBps(explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) {
+    return Math.min(MAX_SLIPPAGE_BPS, Math.max(MIN_SLIPPAGE_BPS, Math.round(explicit)));
+  }
+  return getSlippageBps();
+}
 
 /* ─── Types kept for the UI ─────────────────────────────────────────────── */
 export interface SwapQuote {
@@ -124,17 +155,77 @@ export function getProvider(): ethers.JsonRpcProvider {
 }
 
 /* ─── Pool registry loader (indexer → Supabase) ────────────────────────── */
-let _poolRowsCache: { at: number; rows: PoolRow[] } | null = null;
-export async function loadPoolRows(): Promise<PoolRow[]> {
-  if (_poolRowsCache && Date.now() - _poolRowsCache.at < 30_000) return _poolRowsCache.rows;
+
+/**
+ * Load the `mp_pools` rows a quote needs.
+ *
+ * WHAT WAS WRONG. This used to be `select("*").eq("active", true)` with `error` destructured away.
+ * PostgREST caps an unranged select at 1000 rows and the registry now holds ~94k active pools, so the
+ * browser priced every swap against an arbitrary ~1% slice — while `/api/v1/quote` used a paged loader,
+ * which is why the UI and the public API could disagree about the same pair. On a Supabase error the
+ * destructured-away `error` left `rows` empty and that empty array was cached as authoritative for 30s;
+ * the `catch` below never ran for it, because supabase-js RETURNS errors rather than throwing them.
+ *
+ * v4 is the part that truncation actually breaks. A v4 pool has no address, so `discoverForPair` — which
+ * asks factories for pool addresses — can never find one; v3 has that on-chain probe as a safety net and
+ * v4 has nothing. v4 is also ~85% of the registry.
+ *
+ * WHAT IT DOES NOW. Given a pair it asks the database for exactly the pools that can carry that route
+ * (direct + WETH hub legs + USDG legs), complete and unpaginated-away, sharing one implementation with
+ * the server twin so the two can never drift again. That is both correct AND faster than the truncated
+ * select it replaces (~40-90 rows, ~150-600ms).
+ *
+ * Called with no pair it keeps today's single 1000-row window — see the warning it logs. That is a
+ * compatibility path for callers that have not been given a pair yet, not a supported way to quote.
+ */
+interface PoolRowsCacheEntry {
+  at: number;
+  rows: PoolRow[];
+  /** False = a known-truncated window. Recorded so the truncation is legible rather than implied. */
+  complete: boolean;
+}
+let _poolRowsCache: PoolRowsCacheEntry | null = null;
+const _pairRowsCache = new Map<string, PoolRowsCacheEntry>();
+const POOL_ROWS_CACHE_MS = 30_000;
+/** Same cap PostgREST applies to an unranged select — i.e. exactly what this loader fetched before. */
+const PAIRLESS_WINDOW_ROWS = 1000;
+
+export async function loadPoolRows(pair?: PoolPair): Promise<PoolRow[]> {
+  const key = pair ? poolPairTokens(pair).slice().sort().join("|") : null;
+  const hit = key ? _pairRowsCache.get(key) : _poolRowsCache;
+  const now = Date.now();
+  if (hit && now - hit.at < POOL_ROWS_CACHE_MS) return hit.rows;
+
   try {
     const sb = createClient();
-    const { data } = await sb.from("mp_pools").select("*").eq("active", true);
-    const rows = (data as PoolRow[]) || [];
-    _poolRowsCache = { at: Date.now(), rows };
-    return rows;
-  } catch {
-    return _poolRowsCache?.rows ?? [];
+    if (pair && key) {
+      const rows = await fetchPoolRowsByPair(sb, pair);
+      _pairRowsCache.set(key, { at: now, rows, complete: true });
+      return rows;
+    }
+    const win = await fetchPoolRowsWindow(sb, PAIRLESS_WINDOW_ROWS);
+    if (!win.complete) {
+      console.warn(
+        `[MoleSwap] loadPoolRows() was called without a pair, so it can only read the first ${PAIRLESS_WINDOW_ROWS} of ~94k active pools${
+          win.error ? ` (${win.error})` : ""
+        }. Pools outside that slice — in particular every v4 pool, which on-chain discovery cannot find — are missing from this quote. Pass { tokenIn, tokenOut, weth } to load the complete set for the route.`,
+      );
+      // Served and cached as today, but recorded AS truncated and warned about, instead of passing
+      // itself off as the whole registry.
+      _poolRowsCache = { at: now, rows: win.rows, complete: false };
+      return win.rows;
+    }
+    _poolRowsCache = { at: now, rows: win.rows, complete: true };
+    return win.rows;
+  } catch (err) {
+    console.error(
+      `[MoleSwap] pool registry read failed${pair ? ` for ${pair.tokenIn} -> ${pair.tokenOut}` : ""}:`,
+      err instanceof Error ? `${err.name}: ${err.message}` : err,
+    );
+    // Last known-good answer beats a silently empty registry; if there is none, the caller must be told
+    // the registry did not answer rather than shown "no route for this pair".
+    if (hit) return hit.rows;
+    throw err;
   }
 }
 
@@ -164,12 +255,20 @@ export async function getSwapQuote(params: {
   tokenOut: string;
   amountIn: string;
   fee?: number;
+  /** Tolerated shortfall in bps. Omitted → the user's persisted Max Slippage (AUTO → 50 bps). */
+  slippageBps?: number;
 }): Promise<SwapQuote | null> {
   try {
     const amountIn = BigInt(params.amountIn || "0");
     if (amountIn <= 0n) return null;
 
-    const rows = await loadPoolRows();
+    // Ask the registry for this pair's pools specifically — the whole table is ~94k rows and a
+    // truncated read silently deletes venues (v4 above all, which has no on-chain discovery fallback).
+    const rows = await loadPoolRows({
+      tokenIn: params.tokenIn,
+      tokenOut: params.tokenOut,
+      weth: WETH,
+    });
     if (rows.length === 0) return null;
 
     const q = await quoteSwap(rows, {
@@ -177,7 +276,7 @@ export async function getSwapQuote(params: {
       tokenOut: toAggInput(params.tokenOut),
       amountIn,
       recipient: "0x000000000000000000000000000000000000dEaD",
-      slippageBps: DEFAULT_SLIPPAGE_BPS,
+      slippageBps: resolveSlippageBps(params.slippageBps),
       feeBps: await getAggFeeBps(Date.now()),
       weth: WETH,
     });
@@ -324,6 +423,8 @@ export async function executeSwap(params: {
   tokenOut: string;
   amountIn: string;
   amountOutMin?: string;
+  /** Tolerated shortfall in bps for the signing-time re-quote. Omitted → the user's Max Slippage. */
+  slippageBps?: number;
   recipient: string;
   outputRecipient?: string | null;
   fee?: number;
@@ -357,14 +458,16 @@ export async function executeSwap(params: {
     // Fresh quote at execution time → exact plan + honest minimum-out floor. The fee is re-read live here
     // too, so minAmountOut is built on the post-fee output at the instant of execution.
     onStep(0, "Swap", "pending");
-    const rows = await loadPoolRows();
+    // Pair-scoped, same as the display quote — the route that executes must be built from the same
+    // registry rows the price was shown from, not a different arbitrary slice of the table.
+    const rows = await loadPoolRows({ tokenIn: params.tokenIn, tokenOut: params.tokenOut, weth: WETH });
     const feeBps = await getAggFeeBps(Date.now());
     const q = await quoteSwap(rows, {
       tokenIn: aggIn,
       tokenOut: aggOut,
       amountIn,
       recipient,
-      slippageBps: DEFAULT_SLIPPAGE_BPS,
+      slippageBps: resolveSlippageBps(params.slippageBps),
       feeBps,
       weth: WETH,
     });

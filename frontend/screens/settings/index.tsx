@@ -2,6 +2,7 @@
 import React from "react";
 import { ArrowLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useSwapSettings } from "@/hooks/use-swap-settings";
 
 const Settings = ({
   setShowSettings,
@@ -12,9 +13,17 @@ const Settings = ({
   const router = useRouter();
   const onBack = () => router.back();
   const [expandedCard, setExpandedCard] = React.useState<string | null>(null);
-  const [routePriority, setRoutePriority] = React.useState("BEST RETURN");
-  const [maxSlippage, setMaxSlippage] = React.useState("AUTO");
-  const [gasPrice, setGasPrice] = React.useState("NORMAL");
+
+  // These three used to be component-local useState, which meant the quote path never saw them and the
+  // choice was thrown away on unmount. They now live in localStorage (lib/settings/swapSettings.ts) and
+  // Max Slippage is what the on-chain amountOutMin is actually computed from.
+  const { settings, setSettings } = useSwapSettings();
+  const routePriority = settings.routePriority;
+  const maxSlippage = settings.maxSlippage;
+  const gasPrice = settings.gasPrice;
+  const setRoutePriority = (v: "BEST RETURN" | "FASTEST") => setSettings({ routePriority: v });
+  const setMaxSlippage = (v: string) => setSettings({ maxSlippage: v });
+  const setGasPrice = (v: "SLOW" | "NORMAL" | "FAST") => setSettings({ gasPrice: v });
 
   const toggleCard = (cardId: string) => {
     setExpandedCard(expandedCard === cardId ? null : cardId);

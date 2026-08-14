@@ -7,7 +7,7 @@
  * argument. Nothing here re-implements math — it composes verified parts and applies one policy: slippage.
  */
 
-import { getQuote, NATIVE, type Quote } from "./quote";
+import { getQuote, NATIVE, NoRouteError, type Quote } from "./quote";
 import type { PoolState } from "./venues/v3Pool";
 import { fetchV3StatesMulticall } from "./multicall";
 import { fetchV4MolePool, fetchV4Pool, fetchV4PoolByKey } from "./venues/v4Reader";
@@ -88,8 +88,13 @@ export async function fetchRelevantPoolStates(
   let discovered: PoolRow[] = [];
   try {
     discovered = await discoverForPair(tokenIn, tokenOut, weth);
-  } catch {
-    /* discovery best-effort — fall back to the indexed set */
+  } catch (err) {
+    /* discovery best-effort — fall back to the indexed set, but say so: a quote built from fewer venues
+       than the chain actually has is a worse price, and silently swallowing this hid that. */
+    console.warn(
+      `[aggregator] pool discovery failed for ${tokenIn} -> ${tokenOut}; quoting on the indexed set only:`,
+      err instanceof Error ? `${err.name}: ${err.message}` : err,
+    );
   }
 
   // Merge indexed + discovered, deduped by pool address.
@@ -121,8 +126,12 @@ export async function fetchRelevantPoolStates(
       })),
       rpcUrl,
     );
-  } catch {
+  } catch (err) {
     /* multicall read failed — fall through to the v4 venues below rather than failing the whole quote */
+    console.error(
+      `[aggregator] v3 state multicall failed for ${v3Rows.length} pool(s) on ${tokenIn} -> ${tokenOut}; those venues are missing from this quote:`,
+      err instanceof Error ? `${err.name}: ${err.message}` : err,
+    );
   }
 
   // Always add the live MoleSwap v4 (MoleHook) WETH/USDG pool. It is the deepest WETH<->USDG venue and,
@@ -132,8 +141,12 @@ export async function fetchRelevantPoolStates(
   try {
     const v4 = await fetchV4MolePool();
     if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) v3States.push(v4);
-  } catch {
+  } catch (err) {
     /* v4 read failed — quote on the V3 venues alone */
+    console.error(
+      "[aggregator] the live MoleSwap v4 WETH/USDG pool could not be read; the WETH<->USDG bridge edge is missing from this quote:",
+      err instanceof Error ? `${err.name}: ${err.message}` : err,
+    );
   }
 
   // Any OTHER whitelisted MoleHook pool created via the operator flow and registered in mp_pools routes
@@ -157,8 +170,12 @@ export async function fetchRelevantPoolStates(
         hooks: (p.hooks || MOLE_ADDRESSES.moleHook) as `0x${string}`,
       });
       if (v4 && (v4.liquidity > 0n || v4.ticks.length > 0)) v3States.push(v4);
-    } catch {
+    } catch (err) {
       /* skip an unreadable v4 pool */
+      console.warn(
+        `[aggregator] MoleHook v4 pool ${p.id} (fee ${p.fee}, spacing ${p.tick_spacing}) could not be read; excluded from this quote:`,
+        err instanceof Error ? `${err.name}: ${err.message}` : err,
+      );
     }
   }
 
@@ -185,8 +202,12 @@ export async function fetchRelevantPoolStates(
         hooks: (p.hooks || "0x0000000000000000000000000000000000000000") as `0x${string}`,
       });
       if (st && (st.liquidity > 0n || st.ticks.length > 0)) v3States.push(st);
-    } catch {
+    } catch (err) {
       /* skip an unreadable pool rather than failing the quote */
+      console.warn(
+        `[aggregator] external v4 pool ${p.id} (fee ${p.fee}, spacing ${p.tick_spacing}) could not be read; excluded from this quote:`,
+        err instanceof Error ? `${err.name}: ${err.message}` : err,
+      );
     }
   }
 
@@ -214,7 +235,41 @@ export interface SwapQuote {
 }
 
 /**
- * Price a swap and produce the exact `MoleRouter.swap` argument. Returns `null` if no route exists.
+ * The quoter itself failed — this is NOT "this pair has no liquidity".
+ *
+ * `quoteSwap` returns `null` for the one honest no-route case (`NoRouteError`: pools were read, no path
+ * clears). EVERY other throw out of `getQuote` means something is wrong with US, not with the market:
+ * a bad argument, the deliberate "incomplete route — re-fetch pool state and re-quote" signal from
+ * plan.ts, or a plain programming error in the routing/tick math. Those used to be flattened into the
+ * same `null`, so a live quoter regression was indistinguishable from an illiquid pair and every
+ * consumer reported "No liquidity route found for this pair". They are now logged and thrown as this
+ * type, so a caller can tell the two apart (`err instanceof QuoteFailedError`) and a bug shows up as a
+ * 500 / an error log instead of hiding inside normal-looking 404 copy.
+ *
+ * Every existing caller already wraps `quoteSwap` in try/catch (the API routes turn it into a 500 with
+ * the real message; `lib/chain/amm.ts` logs it and returns null; the swap card keeps its last price),
+ * so nothing crashes — the failure just stops lying about its cause.
+ */
+export class QuoteFailedError extends Error {
+  /** The original throw from the quoter, kept for logging/inspection. */
+  readonly detail: unknown;
+  constructor(detail: unknown) {
+    super(
+      detail instanceof Error
+        ? `quote failed: ${detail.message}`
+        : `quote failed: ${String(detail)}`,
+    );
+    this.name = "QuoteFailedError";
+    this.detail = detail;
+  }
+}
+
+/**
+ * Price a swap and produce the exact `MoleRouter.swap` argument.
+ *
+ * Returns `null` ONLY when the pair genuinely has no route (no pool state at all, or the router found
+ * no path that clears). Any unexpected failure inside the quoter is logged and rethrown as
+ * {@link QuoteFailedError} rather than being disguised as "no liquidity".
  *
  * @param pools the registry rows (loaded from Supabase by the caller/hook).
  */
@@ -223,7 +278,14 @@ export async function quoteSwap(pools: PoolRow[], req: SwapQuoteRequest): Promis
   const ttl = req.ttlSeconds ?? 60n; // ~60s deadline; on a 0.1s-block chain 300s let stale intent fill
 
   const states = await fetchRelevantPoolStates(pools, req.tokenIn, req.tokenOut, req.weth);
-  if (states.length === 0) return null;
+  if (states.length === 0) {
+    // Genuinely nothing to quote against. Still worth a line: it is also what an RPC outage looks like,
+    // because every read inside fetchRelevantPoolStates is best-effort.
+    console.warn(
+      `[aggregator] quoteSwap: no pool state for ${req.tokenIn} -> ${req.tokenOut} (registry rows: ${pools.length}) — reporting no route`,
+    );
+    return null;
+  }
 
   let quote: Quote;
   try {
@@ -238,8 +300,27 @@ export async function quoteSwap(pools: PoolRow[], req: SwapQuoteRequest): Promis
       feeBps: req.feeBps ?? 0,
       weth: req.weth,
     });
-  } catch {
-    return null;
+  } catch (err) {
+    // The ONE honest no-route case: pools were read and priced, no path clears. Callers keep showing
+    // "no liquidity route" for this, exactly as before.
+    if (err instanceof NoRouteError) return null;
+    // Everything else is a defect on our side, not an empty market. Log it with the actual error (and
+    // enough context to reproduce), then rethrow it as a distinct type so no caller can mistake it for
+    // an illiquid pair.
+    console.error(
+      "[aggregator] quoteSwap: the quoter threw — this is a QUOTER FAILURE, not 'no liquidity'",
+      {
+        tokenIn: req.tokenIn,
+        tokenOut: req.tokenOut,
+        amountIn: req.amountIn.toString(),
+        slippageBps: req.slippageBps,
+        feeBps: req.feeBps ?? 0,
+        poolStates: states.length,
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      },
+    );
+    throw new QuoteFailedError(err);
   }
 
   const { arg, value } = encodePlan(quote.plan);

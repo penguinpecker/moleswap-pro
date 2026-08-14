@@ -114,12 +114,44 @@ export async function loadLivePools(
   const client = sb();
   if (!client) return _cache?.rows ?? [];
 
-  const { data: poolRows, error } = await client
-    .from("mp_pools")
-    .select("id,token0,token1,fee,tick_spacing,hooks")
-    .eq("venue", "mole_v4")
-    .eq("active", true);
-  if (error || !poolRows?.length) return _cache?.rows ?? [];
+  // NOT gated on `active`. That column answers the AGGREGATOR's question — "may the router build a
+  // path through this pool" — and the indexer sets it from `routable`, which is false for any v4 pool
+  // whose hook returns a swap delta (services/indexer/src/index.mjs discoverV4). MoleHook does exactly
+  // that, so every MoleSwap pool, including the live WETH/USDG one the vault and the queue run on
+  // (LIVE_POOL_ID 0x9aca9d2f…, real liquidity on-chain right now), was stamped active=false and this
+  // query returned nothing — /api/v1/pools answered `count: 0` and /pools listed no pool at all.
+  // Whether a pool is listed is a different question from whether the router may route through it, and
+  // the emptiness gate that belongs here is the one the API route already applies: a pool shows up when
+  // it holds real deposited reserves (route.ts `hasLiquidity`), not when the router likes it.
+  //
+  // RETRIED, because this query fails intermittently in production. `mp_pools` holds ~390k rows and
+  // `venue` is not indexed, so the filter is a sequential scan that lands either side of PostgREST's
+  // 3s anon statement_timeout: measured locally it returned in ~0.8s on some calls and came back
+  // `canceling statement due to statement timeout` on others. A single timed-out attempt used to render
+  // /pools as "No pools found" — a live pool list vanishing at random. Two attempts turn a coin-flip
+  // into a rare miss without risking the API route's own time budget.
+  let poolRows: any[] | null = null;
+  let error: { message?: string } | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await client
+      .from("mp_pools")
+      .select("id,token0,token1,fee,tick_spacing,hooks")
+      .eq("venue", "mole_v4");
+    poolRows = res.data as any[] | null;
+    error = res.error;
+    if (!error) break;
+    console.warn(`loadLivePools: mp_pools query attempt ${attempt + 1} failed:`, error.message || error);
+  }
+  // Never swallow the failure silently: an unlogged error here is indistinguishable from "MoleSwap runs
+  // no pools", which is exactly how /pools sat empty without anyone seeing a reason.
+  if (error) {
+    console.error("loadLivePools: mp_pools query failed:", error.message || error);
+    return _cache?.rows ?? [];
+  }
+  if (!poolRows?.length) {
+    console.warn("loadLivePools: no mole_v4 pools registered in mp_pools");
+    return _cache?.rows ?? [];
+  }
 
   // Token metadata for every leg in one round trip.
   const addrs = Array.from(
@@ -225,6 +257,11 @@ export async function loadLivePools(
     }),
   );
 
+  for (const r of settled) {
+    // A rejected read means the chain, not the registry, is the problem — say so rather than reporting
+    // an empty pool list that reads as "MoleSwap has no pools".
+    if (r.status === "rejected") console.error("loadLivePools: pool state read failed:", (r.reason as any)?.shortMessage || r.reason);
+  }
   const rows = settled
     .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
     .map((r) => r.value)

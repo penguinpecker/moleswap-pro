@@ -19,6 +19,7 @@ import { searchIndex, heldTokens, popularTokens, resolveTokenMetas, type Indexed
 import { looksLikePoolId, resolvePoolId } from "@/lib/chain/poolIdLookup";
 import { fetchTokenInfo, fmtUsd, shortAddr, type TokenMarketInfo } from "@/lib/chain/tokenInfo";
 import Settings from "../settings";
+import { useSwapSettings } from "@/hooks/use-swap-settings";
 import { diagnostics } from "@/lib/diagnostics";
 import { MoleMascot } from "../shared";
 
@@ -299,6 +300,10 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+
+  // Max Slippage from the Settings panel. This is the number the quote's minAmountOut — and therefore
+  // MoleRouter's on-chain amountOutMin — is built from, so it must not be a literal here.
+  const { slippageBps } = useSwapSettings();
 
   // Swap history: loaded from Supabase when wallet connects
   const [swapHistory, setSwapHistory] = useState<any[]>([]);
@@ -730,7 +735,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
           recipientAddress ||
           walletAddress ||
           "0x000000000000000000000000000000000000dEaD",
-        slippageBps: 50,
+        slippageBps,
         decimalsIn: fromTokenMeta?.decimals ?? 18,
         decimalsOut: toTokenMeta?.decimals ?? 18,
       });
@@ -742,6 +747,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       amountWei,
       recipientAddress,
       walletAddress,
+      slippageBps,
       fromTokenMeta?.decimals,
       toTokenMeta?.decimals,
       sessionEpoch,
