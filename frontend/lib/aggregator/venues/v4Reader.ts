@@ -160,8 +160,24 @@ export async function fetchV4PoolByKey(poolKey: V4PoolKey): Promise<PoolState | 
     const lpFee = Number(slot0[3]);
     if (sqrtPriceX96 === 0n) return null;
 
+    // v4 charges a PROTOCOL fee on top of the LP fee, and slot0 returns it separately. Our own
+    // MoleHook pools have it set to zero, so the MoleHook reader never needed it — but external
+    // pools do set it, and ignoring it over-quotes by exactly that amount. Measured on the GSMC
+    // pool: protocolFee 4097000 packs to 1000 pips (0.1000%) per direction, and the engine
+    // over-quoted the chain by 0.1000% until this was included.
+    // Packing: the low 12 bits are the zeroForOne fee, the next 12 the oneForZero fee, in pips.
+    const protoRaw = Number(slot0[2]);
+    const protoZeroForOne = protoRaw & 0xfff;
+    const protoOneForZero = (protoRaw >> 12) & 0xfff;
+    // The simulator takes a single fee, so use the worse of the two directions rather than guess
+    // which way this pool will be traded — under-quoting is safe, over-quoting causes reverts.
+    const protocolFee = Math.max(protoZeroForOne, protoOneForZero);
+    // v4 applies the protocol fee first, then the LP fee on the remainder. Composing them keeps a
+    // single effective rate that reproduces the chain: 1 - (1-p)(1-l).
+    const effectiveFee = Math.round(1e6 - ((1e6 - protocolFee) * (1e6 - lpFee)) / 1e6);
+
     const centerWord = Math.floor(Math.floor(tick / tickSpacing) / 256);
-    const words = wordsToFetch(centerWord, tickSpacing, 3);
+    const words = wordsToFetch(centerWord, tickSpacing, 6);
     const bitmaps = (await c.multicall({
       contracts: words.map((w) => ({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getTickBitmap" as const, args: [poolId, w] as const })),
       multicallAddress: MULTICALL3,
@@ -188,7 +204,7 @@ export async function fetchV4PoolByKey(poolKey: V4PoolKey): Promise<PoolState | 
       .sort((a, b) => a.index - b.index);
 
     const state = v4PoolState({
-      poolKey: { ...poolKey, fee: lpFee },
+      poolKey: { ...poolKey, fee: effectiveFee },
       sqrtPriceX96,
       tick,
       liquidity,
