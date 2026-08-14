@@ -703,7 +703,16 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setQuoteRefreshing(true);
     (async () => {
       try {
-        const rows = await loadPoolRows();
+        // Pass the pair. Without it loadPoolRows falls back to a 1000-row window of ~94k active
+        // pools, and v4 is ~85% of the registry — so a v4-only token was priced against a slice
+        // that could not contain its pool, and the card said "no route" for a pair /api/v1/quote
+        // (which loads by pair) priced fine. A v4 pool has no address, so on-chain discovery cannot
+        // recover it the way it does for v3; loading the right rows is the only way it is found.
+        const rows = await loadPoolRows({
+          tokenIn: toAggToken(fromToken),
+          tokenOut: toAggToken(toToken),
+          weth: CONTRACTS.WETH,
+        });
         const s = new LivePairSession(
           toAggToken(fromToken),
           toAggToken(toToken),
