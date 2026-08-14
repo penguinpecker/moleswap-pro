@@ -16,7 +16,7 @@ import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { createClient as createSupabaseBrowser } from "@/lib/supabase/client";
 import { tokenHasPool } from "@/lib/aggregator/discover";
 import { searchIndex, heldTokens, popularTokens, resolveTokenMetas, type IndexedToken, type HeldToken } from "@/lib/chain/tokenSearch";
-import { looksLikePoolId, resolvePoolId } from "@/lib/chain/poolIdLookup";
+import { looksLikePoolId, resolvePoolId, tokenHasV4Pool } from "@/lib/chain/poolIdLookup";
 import { fetchTokenInfo, fmtUsd, shortAddr, type TokenMarketInfo } from "@/lib/chain/tokenInfo";
 import Settings from "../settings";
 import { useSwapSettings } from "@/hooks/use-swap-settings";
@@ -498,9 +498,14 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         const viaPoolId = !!poolIdToken && poolIdToken.toLowerCase() === lc;
         const found = viaPoolId ? [] : await tokenHasPool(lc);
         if (cancelled) return;
-        if (!viaPoolId && found.length === 0) {
+        // The V3 probe cannot see v4, so ask v4 directly before rejecting. Only when the cheap
+        // factory probe came back empty — this is one extra round trip on the miss path, and it is
+        // what makes a v4-only launch selectable at all.
+        const hasV4 = !viaPoolId && found.length === 0 ? await tokenHasV4Pool(lc) : false;
+        if (cancelled) return;
+        if (!viaPoolId && found.length === 0 && !hasV4) {
           setImporting(false);
-          return; // no live pool anywhere → not importable
+          return; // no live pool on any venue → not importable
         }
         const client = createPublicClient({ chain: robinhoodChain, transport: http() });
         const [symbol, decimals, name] = await Promise.all([

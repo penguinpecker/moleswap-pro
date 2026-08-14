@@ -36,6 +36,58 @@ export interface PoolIdPair {
   token: string;
 }
 
+const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+
+/**
+ * Does this token have a Uniswap-v4 pool against WETH or USDG?
+ *
+ * WHY THIS EXISTS
+ * The token picker admits a pasted address only if `tokenHasPool` finds liquidity, and that probes
+ * V3-style factories via `getPool(tokenA, tokenB, fee)`. A v4 pool has no factory and no address —
+ * its identity is keccak(PoolKey), and the key includes a 160-bit hook address that cannot be
+ * enumerated — so there is no getPool to ask and a v4-only token looks poolless. On a chain where
+ * launches happen on v4 that rejects perfectly tradeable tokens: the quote path prices them fine,
+ * but the user can never select one to reach it.
+ *
+ * The Initialize event is the only source of a v4 pool's existence, but filtering on BOTH the topic
+ * and an indexed currency makes it cheap: the RPC caps unfiltered getLogs at a 10,000-block range,
+ * yet answers an argument-filtered query over all history with no size limit. Measured on Robinhood
+ * Chain: 414-556ms for a full-history lookup of one token against both hubs. That is invisible at
+ * token-selection time (a one-off user action), which is why this belongs here and NOT on the quote
+ * path — per-quote v4 discovery was measured at 2.3-7.0s against a 0.15s baseline and reverted.
+ *
+ * Currency order inside a PoolKey is sorted, so each hub is checked in both topic positions.
+ */
+const v4Cache = new Map<string, boolean>();
+
+export async function tokenHasV4Pool(token: string): Promise<boolean> {
+  const tok = token.trim().toLowerCase();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(tok)) return false;
+  if (v4Cache.has(tok)) return v4Cache.get(tok)!;
+
+  try {
+    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
+    const pad = (a: string) => ethers.zeroPadValue(ethers.getAddress(a), 32);
+    const self = pad(tok);
+    const hubs = [CONTRACTS.WETH, USDG].map(pad);
+
+    // currency0 and currency1 are topics 2 and 3; the pair can sit either way round.
+    const results = await Promise.all(
+      hubs.flatMap((hub) => [
+        provider.getLogs({ address: CONTRACTS.POOL_MANAGER, topics: [INITIALIZE_TOPIC, null, hub, self], fromBlock: 0, toBlock: "latest" }),
+        provider.getLogs({ address: CONTRACTS.POOL_MANAGER, topics: [INITIALIZE_TOPIC, null, self, hub], fromBlock: 0, toBlock: "latest" }),
+      ]),
+    );
+
+    const found = results.some((logs) => logs.length > 0);
+    v4Cache.set(tok, found);
+    return found;
+  } catch {
+    // Best-effort: a failed lookup must not block a token that the V3 probe already admitted.
+    return false;
+  }
+}
+
 /** A 32-byte hex value: the shape of a PoolId (and of a tx hash — see resolvePoolId). */
 export function looksLikePoolId(s: string): boolean {
   return /^0x[0-9a-fA-F]{64}$/.test(s.trim());
