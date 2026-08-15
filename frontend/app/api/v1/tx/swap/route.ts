@@ -73,7 +73,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const rows = await loadPoolRowsServer(Date.now());
+    // Pair-scoped for the same reason as /api/v1/quote: the pairless window is both v4-blind and,
+    // under database pressure, returns [] instead of throwing, bypassing the degraded fallback.
+    const rows = await loadPoolRowsServer(Date.now(), {
+      tokenIn: toAgg(tokenIn),
+      tokenOut: toAgg(tokenOut),
+      weth: CONTRACTS.WETH,
+    });
     if (rows.length === 0) return apiError("Pool registry unavailable — try again shortly", 503);
 
     const q = await quoteSwap(rows, {

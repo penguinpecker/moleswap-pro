@@ -69,7 +69,14 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const rows = await loadPoolRowsServer(Date.now());
+    // Pass the pair: the pairless call reads a bounded window of ~94k active pools, which both
+    // misses v4 rows outside the window AND, under database pressure, returns [] instead of
+    // throwing — turning a slow registry into a 503 before the loader's degraded fallback could run.
+    const rows = await loadPoolRowsServer(Date.now(), {
+      tokenIn: toAgg(tokenIn),
+      tokenOut: toAgg(tokenOut),
+      weth: CONTRACTS.WETH,
+    });
     if (rows.length === 0) return apiError("Pool registry unavailable — try again shortly", 503);
 
     const feeBps = await getAggFeeBps(Date.now());

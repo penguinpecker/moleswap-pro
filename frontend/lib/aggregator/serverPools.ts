@@ -215,6 +215,12 @@ export async function loadPoolRowsServer(nowMs: number, pair?: PoolPair): Promis
       return rows;
     }
     const win = await fetchPoolRowsWindow(sb, WINDOW_MAX_ROWS);
+    if (win.rows.length === 0) {
+      // An EMPTY window is not a smaller answer, it is no answer — under database pressure the
+      // window read fails soft ([] with win.error) rather than throwing, which used to sail past
+      // every fallback and 503 the route. Route it through the same degraded path as a thrown read.
+      throw new Error(`registry window returned 0 rows${win.error ? `: ${win.error}` : ""}`);
+    }
     if (!win.complete) {
       // Truncated. It is still served and still cached — a route that answers with fewer venues beats
       // one that does not answer at all, and re-running a 20-page scan per request would be worse than
