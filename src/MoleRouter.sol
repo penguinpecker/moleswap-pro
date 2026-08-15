@@ -8,6 +8,7 @@ import {Currency} from "v4-core/types/Currency.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
 
 /// @title MoleRouter
@@ -61,13 +62,37 @@ import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
 ///   - the fee DESTINATION (`feeRecipient`) is an immutable here. The dial cannot redirect fees;
 ///   - the dial is read with a gas-capped STATICCALL and ANY failure — revert, empty return, gas burn —
 ///     resolves to fee = 0. A broken or hostile dial makes swaps free, never stuck;
-///   - `minAmountOut` is enforced on the POST-FEE amount the recipient actually receives, so a fee change
-///     landing between quote and execution cannot push a swap below the floor the user was promised;
-///   - the zero-residual invariant is unchanged: output = recipient's amount + fee, both pushed out in
+///   - the zero-residual invariant is unchanged: the input splits into fee + routed amount, both leave in
 ///     the same transaction, and the sweep still returns every other increase to the payer.
 ///
-/// A plan's `minAmountOut` therefore prices in the fee off-chain (quote × (1 − fee) × (1 − slippage)),
-/// and what `swap` returns — and what `Swapped` reports as `amountOut` — is what the RECIPIENT received.
+/// THE FEE IS TAKEN FROM THE INPUT (the source currency), NOT THE OUTPUT.
+///
+/// The earlier router skimmed the fee off the route's OUTPUT. That is the common design and it is wrong for
+/// this venue: on a memecoin BUY the output is the memecoin, so the treasury accrued whatever token the user
+/// happened to be buying — illiquid, sometimes unsellable, and costing that pool's LP fee again to convert.
+/// Uniswap's own interface fee sidesteps this by only charging on a list of liquid majors. Here every route
+/// is a hub route, so the INPUT is overwhelmingly ETH or USDG: taking the fee there pays the treasury in the
+/// asset the user already chose to spend, at identical cost to the user (0.69% is 0.69% wherever it is
+/// clipped along the path).
+///
+/// Known and accepted: on a SELL (memecoin -> ETH) the source currency IS the memecoin, so that direction
+/// still collects the long-tail token. This is the MetaMask model and it is a deliberate trade, not an
+/// oversight — most volume is buys, and no in-kind fee can avoid it on both sides at once.
+///
+/// TWO CONSEQUENCES THAT CHANGE THE PLAN CONTRACT, both load-bearing:
+///
+///   1. `minAmountOut` is now enforced on the FULL route output, because the whole output belongs to the
+///      recipient. Off-chain the quote routes (amountIn − fee) and floors that: quote(amountIn − fee) ×
+///      (1 − slippage). The fee is no longer subtracted from the output at all.
+///   2. `plan.paths[i].amountIn` sum to the GROSS `plan.amountIn`, and the router scales each path
+///      pro-rata by (amountIn − fee)/amountIn AT EXECUTION TIME. This is what keeps the dial's
+///      no-re-approval property honest: a fee change landing between quote and execution re-splits the
+///      route on-chain instead of invalidating a plan whose paths were summed for the old fee. Per-path
+///      rounding is DOWN, so the scaled parts can leave a few wei unrouted; the sweep returns it to the
+///      payer, and zero-residual holds.
+///
+/// The fee push FAILS OPEN, like the dial read: if the source token refuses to pay the treasury, the fee is
+/// forgone and the FULL input is routed to the user instead. A fee misconfiguration can never block a swap.
 contract MoleRouter is IUnlockCallback {
     /// @dev The v4 singleton. The router opens exactly one unlock per swap and does all venue work inside
     ///      it, so a route may freely mix v4 and v3 hops in a single atomic transaction.
@@ -173,8 +198,9 @@ contract MoleRouter is IUnlockCallback {
 
     error BadFeeConfig();
 
-    /// @dev `amountOut` is what the RECIPIENT received (post-fee); `fee` is what went to `feeRecipient`,
-    ///      in the output token (WETH for a native-out swap). amountOut + fee = the route's raw output.
+    /// @dev `amountIn` is the GROSS input the payer supplied; `fee` is what went to `feeRecipient`, in the
+    ///      INPUT token (WETH for a native-in swap), so amountIn − fee is what was actually routed.
+    ///      `amountOut` is the route's full output, all of which went to the recipient.
     event Swapped(
         address indexed payer,
         address indexed recipient,
@@ -328,12 +354,12 @@ contract MoleRouter is IUnlockCallback {
 
         _acquireInput(plan, payer, effIn);
 
-        uint256 totalOut;
-        for (uint256 i = 0; i < plan.paths.length; ++i) {
-            totalOut += _runPath(plan.paths[i], effIn, effOut);
-        }
+        // The fee comes off the INPUT, immediately after acquisition and before any hop runs, so the
+        // treasury is paid in the source currency. Fails open: if the token refuses to pay the treasury,
+        // `fee` stays 0 and the full input is routed to the user.
+        fee = _takeInputFee(effIn, plan.amountIn);
 
-        (userOut, fee) = _deliverOutput(plan, effOut, totalOut);
+        userOut = _deliverOutput(plan, effOut, _runPaths(plan, fee, effIn, effOut));
 
         _sweep(tokens, startBal, payer, plan.tokenIn == NATIVE || plan.tokenOut == NATIVE);
     }
@@ -345,27 +371,68 @@ contract MoleRouter is IUnlockCallback {
         else _pull(effIn, payer, plan.amountIn);
     }
 
+    /// @dev Run every path against the POST-FEE budget, each scaled pro-rata by (amountIn − fee)/amountIn.
+    ///      Rounding DOWN per path can leave a few wei unrouted; `_sweep` returns it to the payer, so
+    ///      nothing strands. Scaling here rather than off-chain is what lets the fee dial move between
+    ///      quote and execution without invalidating a plan whose paths were summed for the old fee.
+    ///
+    ///      Its own function, not an inlined loop, for the reason `_execute`'s header gives: the combined
+    ///      frame sits one variable from a Yul stack-too-deep at this project's optimizer settings, and
+    ///      adding `fee`/`routable` to it tipped it over during this change. Small frames keep the
+    ///      contract compilable.
+    ///      The scale is written into the path's own MEMORY copy rather than passed as an extra argument:
+    ///      `plan` is already a memory decode, the calldata plan the payer signed is untouched, and it
+    ///      keeps `_runPath`'s signature — and therefore its stack frame — exactly as it was.
+    function _runPaths(SwapPlan memory plan, uint256 fee, address effIn, address effOut)
+        internal
+        returns (uint256 totalOut)
+    {
+        for (uint256 i = 0; i < plan.paths.length; ++i) {
+            if (fee != 0) {
+                plan.paths[i].amountIn = FullMath.mulDiv(plan.paths[i].amountIn, plan.amountIn - fee, plan.amountIn);
+            }
+            if (plan.paths[i].amountIn != 0) totalOut += _runPath(plan.paths[i], effIn, effOut);
+        }
+    }
+
+    /// @dev Skim the aggregator fee from the INPUT, in the source currency (WETH for a native-in swap, so
+    ///      the treasury handles one asset shape). Called after the input is acquired and before any hop,
+    ///      so what routes is already net.
+    ///
+    ///      FAILS OPEN, exactly like the dial read: if the source token refuses to pay the treasury (e.g.
+    ///      an issuer dynamically blacklists it — the one recipient failure a deploy-time guard cannot
+    ///      catch), the fee is FORGONE for this swap and the full input is routed for the user instead of
+    ///      reverting. So "a fee misconfiguration can never block a swap" holds on this leg too, and
+    ///      zero-residual is preserved: the fee reaches the treasury OR is routed for the user, never
+    ///      stranded here.
+    ///
+    ///      Rounding is DOWN, so the fee can never exceed feeBps of the input, and a dust input rounds to
+    ///      a zero fee rather than eating the whole trade.
+    function _takeInputFee(address effIn, uint256 amountIn) internal returns (uint256 fee) {
+        uint256 rawFee = (amountIn * _feeBps()) / BPS_DENOM;
+        if (rawFee == 0) return 0;
+        // Never let the fee consume the entire input.
+        //
+        // DOCUMENTED MUTATION SURVIVOR, recorded rather than quietly kept (same treatment as MoleQueue's
+        // `err.length` check and `refundOf`'s Settled gate). Deleting this line kills no test, and cannot:
+        // `_feeBps()` clamps to MAX_FEE_BPS = 100 bps first, so `rawFee` is at most 1% of `amountIn` and
+        // the condition is unreachable from any dial value, hostile or not. It is kept because it is the
+        // only thing standing between a future MAX_FEE_BPS change and handing a payer's entire balance to
+        // the treasury — the clamp and this guard fail independently, which is the point of having both.
+        if (rawFee >= amountIn) return 0;
+        return _tryPush(effIn, feeRecipient, rawFee) ? rawFee : 0;
+    }
+
     /// @dev Deliver the tracked output — the per-hop total, NOT balanceOf, so an airdropped output token
-    ///      cannot inflate what we claim to have produced (it is swept instead). The aggregator fee is
-    ///      skimmed here, from the OUTPUT, before delivery: the recipient gets totalOut − fee, and the fee
-    ///      goes to the immutable feeRecipient as the output ERC-20 — deliberately WETH (not unwrapped
-    ///      native) on a native-out swap, so the treasury handles one asset shape and the user's portion
-    ///      is the only thing unwrapped. Native out: unwrap and forward; ERC-20 out: transfer directly.
+    ///      cannot inflate what we claim to have produced (it is swept instead). The whole output belongs
+    ///      to the recipient now that the fee is taken on the input side.
+    ///      Native out: unwrap and forward; ERC-20 out: transfer directly.
     function _deliverOutput(SwapPlan memory plan, address effOut, uint256 totalOut)
         internal
-        returns (uint256 userOut, uint256 fee)
+        returns (uint256 userOut)
     {
-        if (totalOut == 0) return (0, 0);
-        uint256 rawFee = (totalOut * _feeBps()) / BPS_DENOM;
-        // The fee push FAILS OPEN, exactly like the dial read: if the output token refuses to pay the
-        // treasury (e.g. an issuer dynamically blacklists it — the one recipient failure a deploy-time
-        // guard cannot catch), the fee is FORGONE for this swap and folded back to the user, rather than
-        // reverting the whole swap. So "a fee misconfiguration can never block a swap" holds for the
-        // recipient leg too, and zero-residual is preserved: the fee goes to the treasury OR to the user,
-        // never stranded here.
-        fee = (rawFee != 0 && _tryPush(effOut, feeRecipient, rawFee)) ? rawFee : 0;
-        userOut = totalOut - fee;
-        if (userOut == 0) return (userOut, fee);
+        userOut = totalOut;
+        if (userOut == 0) return 0;
         if (plan.tokenOut == NATIVE) {
             IWETH(weth).withdraw(userOut);
             _sendNative(plan.recipient, userOut);

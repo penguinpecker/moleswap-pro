@@ -87,24 +87,70 @@ contract AttackRouterFee is Test, Deployers {
 
     /* ─── the fee is taken, exactly, and goes to the immutable treasury ─── */
 
-    function test_feeSkimmedToTreasury_userGetsRemainder_routerHoldsNothing() public {
-        uint256 treasuryBefore = tokenB.balanceOf(treasury);
-        uint256 userBefore = tokenB.balanceOf(user);
+    /// @notice The fee is taken from the INPUT, in the source currency, and is exactly bps of the GROSS
+    ///         input — a stronger statement than the old output-side test could make, because the input is
+    ///         a number the payer chose rather than one derived from whatever the pool happened to return.
+    function test_feeSkimmedFromInputToTreasury_userGetsFullOutput_routerHoldsNothing() public {
+        uint256 treasuryBefore = tokenA.balanceOf(treasury);
+        uint256 userOutBefore = tokenB.balanceOf(user);
+        uint256 userInBefore = tokenA.balanceOf(user);
 
         vm.prank(user);
         uint256 amountOut = router.swap(_plan(1e18, 0));
 
-        uint256 feeTaken = tokenB.balanceOf(treasury) - treasuryBefore;
-        uint256 userGot = tokenB.balanceOf(user) - userBefore;
+        uint256 feeTaken = tokenA.balanceOf(treasury) - treasuryBefore;
+        uint256 userGot = tokenB.balanceOf(user) - userOutBefore;
 
         assertEq(userGot, amountOut, "swap() return must equal what the user received");
-        assertGt(feeTaken, 0, "0.69% fee must be nonzero on a 1e18 swap");
-        // fee = floor(raw * 69 / 10000) => raw = userGot + feeTaken and fee/(raw) ~ 0.69%
-        uint256 raw = userGot + feeTaken;
-        assertEq(feeTaken, (raw * 69) / 10_000, "fee must be exactly 69 bps of the raw output");
+        // The whole point of the change: the treasury is paid in the token the user SPENT.
+        assertEq(feeTaken, (1e18 * 69) / 10_000, "fee must be exactly 69 bps of the GROSS input");
+        assertEq(tokenB.balanceOf(treasury), 0, "treasury must NOT receive the output token");
+        // The user pays exactly the gross input they declared — the fee comes out of it, not on top.
+        assertEq(userInBefore - tokenA.balanceOf(user), 1e18, "payer is debited exactly plan.amountIn");
+        // And the whole route output belongs to them now.
+        assertGt(userGot, 0, "user must receive the full route output");
         // zero residual — beyond the declared fee, nothing stays.
         assertEq(tokenA.balanceOf(address(router)), 0, "router holds no input");
         assertEq(tokenB.balanceOf(address(router)), 0, "router holds no output");
+    }
+
+    /// @notice The routed amount really is the post-fee amount — proven by comparing against the same swap
+    ///         run feeless. If the router charged the fee but still routed the gross (or scaled the wrong
+    ///         way), these two outputs would not line up.
+    function test_theRoutedAmountIsTheNetAmount_notTheGross() public {
+        MoleRouter feeless = new MoleRouter(manager, makeAddr("weth-unused"), address(0), address(0));
+        vm.prank(user);
+        tokenA.approve(address(feeless), type(uint256).max);
+
+        uint256 fee = (1e18 * 69) / 10_000;
+        // Feeless router, given exactly the NET amount: this is what the charging router should produce.
+        vm.prank(user);
+        uint256 expected = feeless.swap(_plan(1e18 - fee, 0));
+
+        // Reset the pool by swapping back is not possible here, so instead assert the charging router's
+        // output is within a hair of `expected` — the two swaps hit the pool at slightly different prices,
+        // so an exact equality would be testing pool depth, not the fee. A gross-routed swap would be
+        // ~0.69% ABOVE expected, far outside this band.
+        vm.prank(user);
+        uint256 got = router.swap(_plan(1e18, 0));
+        uint256 diff = got > expected ? got - expected : expected - got;
+        assertLt(diff * 10_000 / expected, 20, "charging router must route the NET amount (within 0.2%)");
+    }
+
+    /// @notice A fee that would consume the entire input is refused rather than handing the payer's whole
+    ///         balance to the treasury. Unreachable at the compiled 1% clamp, guarded anyway.
+    function test_feeCanNeverConsumeTheEntireInput() public {
+        HostileDial hostile = new HostileDial(10_000); // 100%
+        MoleRouter capped = new MoleRouter(manager, makeAddr("weth-unused"), address(hostile), treasury);
+        vm.prank(user);
+        tokenA.approve(address(capped), type(uint256).max);
+
+        uint256 treasuryBefore = tokenA.balanceOf(treasury);
+        vm.prank(user);
+        uint256 out = capped.swap(_plan(1e18, 0));
+
+        assertGt(out, 0, "a 100% dial must not zero the user's swap");
+        assertEq(tokenA.balanceOf(treasury) - treasuryBefore, (1e18 * 100) / 10_000, "clamped to 1%");
     }
 
     /* ─── clause: "cannot exceed 1%" — a hostile dial is clamped by immutable code ─── */
@@ -116,14 +162,12 @@ contract AttackRouterFee is Test, Deployers {
         vm.prank(user);
         tokenA.approve(address(capped), type(uint256).max);
 
-        uint256 treasuryBefore = tokenB.balanceOf(treasury);
-        uint256 userBefore = tokenB.balanceOf(user);
+        uint256 treasuryBefore = tokenA.balanceOf(treasury);
         vm.prank(user);
         capped.swap(_plan(1e18, 0));
 
-        uint256 feeTaken = tokenB.balanceOf(treasury) - treasuryBefore;
-        uint256 raw = (tokenB.balanceOf(user) - userBefore) + feeTaken;
-        assertEq(feeTaken, (raw * 100) / 10_000, "a 50% dial must be clamped to exactly 1%");
+        uint256 feeTaken = tokenA.balanceOf(treasury) - treasuryBefore;
+        assertEq(feeTaken, (1e18 * 100) / 10_000, "a 50% dial must be clamped to exactly 1% of the input");
     }
 
     /* ─── clause: "cannot block swaps" — reverting / gas-burning dials mean fee = 0 ─── */
@@ -154,9 +198,12 @@ contract AttackRouterFee is Test, Deployers {
         assertEq(tokenB.balanceOf(treasury), treasuryBefore, "no fee from a gas-burning dial");
     }
 
-    /* ─── clause: "cannot eat into the quoted minimum" — minOut is post-fee ─── */
+    /* ─── clause: "cannot eat into the quoted minimum" — minOut is the FULL route output ─── */
 
-    function test_minAmountOut_enforcedOnPostFeeAmount() public {
+    /// @dev With the fee on the input, the whole route output belongs to the recipient, so minAmountOut is
+    ///      enforced against all of it. Off-chain the quote routes (amountIn − fee) and floors THAT, so the
+    ///      promise the user is shown is still the promise the chain checks.
+    function test_minAmountOut_enforcedOnTheFullOutput() public {
         // Discover the post-fee output, then demand exactly it: must succeed.
         vm.prank(user);
         uint256 got = router.swap(_plan(1e18, 0));
@@ -177,16 +224,18 @@ contract AttackRouterFee is Test, Deployers {
         vm.prank(dialOwner);
         dial.setFeeBps(0);
 
-        uint256 treasuryBefore = tokenB.balanceOf(treasury);
+        uint256 treasuryBefore = tokenA.balanceOf(treasury);
         vm.prank(user);
         router.swap(_plan(1e18, 0));
-        assertEq(tokenB.balanceOf(treasury), treasuryBefore, "fee 0 must skim nothing");
+        assertEq(tokenA.balanceOf(treasury), treasuryBefore, "fee 0 must skim nothing");
 
         vm.prank(dialOwner);
         dial.setFeeBps(100);
         vm.prank(user);
         router.swap(_plan(1e18, 0));
-        assertGt(tokenB.balanceOf(treasury), treasuryBefore, "fee 100 bps must skim");
+        assertEq(
+            tokenA.balanceOf(treasury) - treasuryBefore, (1e18 * 100) / 10_000, "fee 100 bps must skim 1% of input"
+        );
     }
 
     function test_dialRefusesAboveItsOwnCap_andNonOwner() public {
@@ -211,14 +260,17 @@ contract AttackRouterFee is Test, Deployers {
         assertEq(tokenB.balanceOf(treasury), treasuryBefore, "no dial, no fee, ever");
     }
 
-    /* ─── clause: "cannot block swaps" — a treasury the OUTPUT token blacklists forgoes the fee, not the swap ─── */
+    /* ─── clause: "cannot block swaps" — a treasury the INPUT token blacklists forgoes the fee, not the swap ─── */
 
-    function test_feeRecipientBlacklisted_swapSucceedsFeeless_nothingStranded() public {
-        // Build a fresh pool whose OUTPUT token refuses transfers to the treasury (a dynamic post-deploy
+    /// @dev Repointed at the INPUT token, because that is where the fee is now taken — blacklisting the
+    ///      output would no longer exercise the fee path at all. The attack machine is unchanged; only the
+    ///      leg it is aimed at moved. The user must receive the FULL output of the FULL (unreduced) input.
+    function test_feeRecipientBlacklistedOnInput_swapSucceedsFeeless_nothingStranded() public {
+        // A fresh pool whose INPUT token refuses transfers to the treasury (a dynamic post-deploy
         // blacklist — the one recipient failure no deploy-time guard can catch).
-        BlacklistToken outTok = new BlacklistToken();
-        outTok.setBlacklisted(treasury, true);
-        MockERC20 inTok = new MockERC20("IN", "IN", 18);
+        BlacklistToken inTok = new BlacklistToken();
+        inTok.setBlacklisted(treasury, true);
+        MockERC20 outTok = new MockERC20("OUT", "OUT", 18);
         (Currency c0, Currency c1, bool inIsZero) = address(inTok) < address(outTok)
             ? (Currency.wrap(address(inTok)), Currency.wrap(address(outTok)), true)
             : (Currency.wrap(address(outTok)), Currency.wrap(address(inTok)), false);
@@ -254,10 +306,12 @@ contract AttackRouterFee is Test, Deployers {
         uint256 amountOut = router.swap(plan); // MUST NOT revert despite the blacklisted treasury
 
         assertGt(amountOut, 0, "swap must succeed even though the treasury cannot be paid");
-        assertEq(outTok.balanceOf(user) - userBefore, amountOut, "user receives the FULL output (fee forgone)");
-        assertEq(outTok.balanceOf(treasury), 0, "blacklisted treasury got nothing");
-        assertEq(outTok.balanceOf(address(router)), 0, "no fee stranded in the router");
-        assertEq(inTok.balanceOf(address(router)), 0, "no input stranded");
+        assertEq(outTok.balanceOf(user) - userBefore, amountOut, "user receives the FULL output");
+        assertEq(inTok.balanceOf(treasury), 0, "blacklisted treasury got nothing");
+        // Fail-open on the INPUT side means the forgone fee is ROUTED for the user, not stranded: the
+        // router must have swapped the whole 1e18, so nothing of either token stays behind.
+        assertEq(inTok.balanceOf(address(router)), 0, "no fee stranded in the router");
+        assertEq(outTok.balanceOf(address(router)), 0, "no output stranded");
     }
 
     /* ─── deploy-time misconfigurations fail the deploy, not the users ─── */

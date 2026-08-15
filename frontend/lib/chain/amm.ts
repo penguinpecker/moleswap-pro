@@ -319,8 +319,8 @@ export async function getSwapQuote(params: {
 
     return {
       amountIn: params.amountIn,
-      // amountOut is the NET (post-fee) output — what the recipient receives — so a re-quote on the review
-      // screen matches the on-chain result. gross/fee kept for a breakdown if needed.
+      // The aggregator fee is taken from the INPUT, so the route's whole output reaches the recipient and
+      // netAmountOut == amountOut. Both are kept (equal) so consumers reading either stay correct.
       amountOut: q.quote.netAmountOut.toString(),
       grossAmountOut: q.quote.amountOut.toString(),
       minAmountOut: q.quote.minAmountOut.toString(),

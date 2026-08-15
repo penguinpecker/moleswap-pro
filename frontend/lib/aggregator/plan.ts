@@ -72,10 +72,16 @@ export interface PlanOptions {
   /** Tolerated shortfall from the quoted output, in basis points. 50 = 0.5%. */
   readonly slippageBps: number;
   /**
-   * The aggregator fee the router will skim from the OUTPUT, in basis points (read live from the fee
-   * dial). minAmountOut MUST be computed on the post-fee amount, because the router enforces minAmountOut
-   * on what the recipient receives AFTER the skim — setting it off the raw output would revert every swap
-   * the moment the fee is nonzero. Defaults to 0 (feeless router) when omitted.
+   * The GROSS input the payer supplies, when it differs from the split's amountIn. The split is priced on
+   * the NET (gross − fee) because that is what the router swaps, but the plan must declare the gross and
+   * let the router scale the slices down itself. Omit when there is no fee.
+   */
+  readonly grossAmountIn?: bigint;
+  /**
+   * The aggregator fee the router takes from the INPUT, in basis points (read live from the fee dial).
+   * It no longer affects minAmountOut — the fee is removed before the swap, so the whole route output
+   * reaches the recipient and the floor is computed on all of it. Retained because callers pass it and
+   * it is reported back on the quote. Defaults to 0 (feeless router) when omitted.
    */
   readonly feeBps?: number;
 }
@@ -165,22 +171,39 @@ export function planFromSplit(
   if (split.incomplete) {
     throw new Error("cannot build a plan from an incomplete split; re-fetch pool state and re-quote");
   }
-  const paths: PlanPath[] = split.parts.map((r) => ({
-    amountIn: r.amountIn,
+  // The split was computed on the NET input (gross − fee), because that is what the router actually
+  // swaps. The plan, however, must declare the GROSS: the contract checks the path slices against
+  // plan.amountIn and then scales each one down by (amountIn − fee)/amountIn itself. So scale the
+  // slices back up here, in the same proportions.
+  const gross = opts.grossAmountIn ?? split.amountIn;
+  const amounts: bigint[] = split.parts.map((r) =>
+    gross === split.amountIn ? r.amountIn : (r.amountIn * gross) / split.amountIn,
+  );
+  if (gross !== split.amountIn && amounts.length > 0) {
+    // Per-slice rounding leaves the sum a few wei short of gross; the contract demands EXACT, so the
+    // last slice absorbs the remainder. The router scales it straight back down, and its sweep returns
+    // any wei that rounding leaves unrouted — so this cannot strand value either way.
+    const summedScaled = amounts.reduce((a, b) => a + b, 0n);
+    amounts[amounts.length - 1] += gross - summedScaled;
+  }
+  const paths: PlanPath[] = split.parts.map((r, i) => ({
+    amountIn: amounts[i],
     hops: r.hops.map(hopToPlan),
   }));
-  // The contract requires the path slices to sum to amountIn EXACTLY. route.ts already guarantees this,
-  // but a translation layer that silently disagreed with the contract's own check is exactly the kind of
-  // seam bug worth an assertion, so verify it here too.
+  // The contract requires the path slices to sum to amountIn EXACTLY. The scaling above is built to
+  // guarantee it, but a translation layer that silently disagreed with the contract's own check is
+  // exactly the kind of seam bug worth an assertion, so verify it here too.
   const summed = paths.reduce((a, p) => a + p.amountIn, 0n);
-  if (summed !== split.amountIn) {
-    throw new Error(`path slices ${summed} do not sum to amountIn ${split.amountIn}`);
+  if (summed !== gross) {
+    throw new Error(`path slices ${summed} do not sum to amountIn ${gross}`);
   }
   return {
     tokenIn,
     tokenOut,
-    amountIn: split.amountIn,
-    minAmountOut: minOutFor(applyAggFee(split.amountOut, opts.feeBps ?? 0), opts.slippageBps),
+    amountIn: gross,
+    // NOT post-fee any more: the fee was already removed from the input, so the whole route output
+    // belongs to the recipient and the floor is computed on all of it.
+    minAmountOut: minOutFor(split.amountOut, opts.slippageBps),
     recipient: opts.recipient,
     deadline: opts.deadline,
     paths,

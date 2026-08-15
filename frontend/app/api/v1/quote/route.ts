@@ -103,9 +103,19 @@ export async function GET(req: NextRequest) {
       amountIn,
       amountOut: q.quote.netAmountOut.toString(),
       amountOutFormatted: humanOut.toFixed(decOut > 6 ? 8 : 6),
+      // The fee is taken from the INPUT now, so the route's whole output reaches the recipient and there
+      // is no "gross output" distinct from it. Kept and equal to amountOut so existing integrators do not
+      // break, rather than removed silently.
       grossAmountOut: q.quote.amountOut.toString(),
       aggregatorFeeBps: q.quote.feeBps,
+      /** ⚠ Denominated in tokenIn — the fee is charged on the source currency. Formatting this with
+       *  tokenOut's decimals is a silent 10^12 error on a 6-vs-18 pair. `aggregatorFeeToken` names it
+       *  explicitly so an integrator cannot guess wrong. */
       aggregatorFee: q.quote.feeAmount.toString(),
+      aggregatorFeeToken: tokenIn,
+      aggregatorFeeFormatted: (Number(q.quote.feeAmount) / 10 ** decIn).toFixed(decIn > 6 ? 8 : 6),
+      /** What actually reaches the pools: amountIn − aggregatorFee. */
+      netAmountIn: q.quote.netAmountIn.toString(),
       minReceived: q.quote.minAmountOut.toString(),
       slippageBps,
       type: q.quote.routeDescriptions.length > 1 ? "split" : "direct",

@@ -40,16 +40,21 @@ export interface QuoteRequest {
 }
 
 export interface Quote {
+  /** GROSS input — what the payer is debited. The fee comes out of this, not on top of it. */
   readonly amountIn: bigint;
-  /** The raw route output against current pool state, BEFORE the aggregator fee. */
+  /** amountIn − feeAmount: what actually reaches the pools and what the route was priced on. */
+  readonly netAmountIn: bigint;
+  /** The route's full output against current pool state. Since the fee is taken on the INPUT, all of
+   *  this goes to the recipient — this is the number to show as "you receive". */
   readonly amountOut: bigint;
-  /** What the recipient actually receives, AFTER the router skims the aggregator fee — the number to show
-   *  as "you receive". Equals amountOut when feeBps is 0. */
+  /** Identical to amountOut. Retained so existing consumers of "the number to show" keep working; it no
+   *  longer differs, because nothing is skimmed from the output any more. */
   readonly netAmountOut: bigint;
-  /** The aggregator fee applied, in bps, and its amount in the output token. */
+  /** The aggregator fee applied, in bps, and its amount in the **INPUT** token.
+   *  ⚠ Denominated in tokenIn, not tokenOut — format it with tokenIn's decimals. */
   readonly feeBps: number;
   readonly feeAmount: bigint;
-  /** The floor the transaction enforces on-chain (computed on netAmountOut). */
+  /** The floor the transaction enforces on-chain (computed on the full output). */
   readonly minAmountOut: bigint;
   /** How much of the trade nets against opposing pool liquidity vs. price impact — for display. */
   readonly split: SplitRoute;
@@ -86,8 +91,17 @@ export function getQuote(pools: readonly PoolState[], req: QuoteRequest): Quote 
   const routeOut = nativeOut ? req.weth! : req.tokenOut;
   if (routeIn.toLowerCase() === routeOut.toLowerCase()) throw new Error("effective tokenIn equals tokenOut");
 
+  // THE FEE COMES OFF THE INPUT, so the route is computed on what will actually be swapped. The router
+  // takes its cut in the source currency immediately after pulling the input and routes the remainder,
+  // scaling each path pro-rata — so quoting the GROSS here would over-promise by exactly the fee.
+  const feeBps = req.feeBps ?? 0;
+  const clampedBps = feeBps > 100 ? 100 : feeBps < 0 ? 0 : feeBps; // mirror the router's MAX_FEE_BPS clamp
+  const feeAmount = (req.amountIn * BigInt(clampedBps)) / 10_000n; // floor, like the contract
+  const netAmountIn = req.amountIn - feeAmount;
+  if (netAmountIn <= 0n) throw new Error("aggregator fee consumes the entire input");
+
   const graph = new PoolGraph(pools);
-  const split = bestSplitRoute(graph, routeIn, routeOut, req.amountIn, {
+  const split = bestSplitRoute(graph, routeIn, routeOut, netAmountIn, {
     parts: req.splitParts ?? 10,
     maxHops: req.maxHops ?? 3,
     // 12 (was 8): with pool-disjoint split selection, more ranked candidates just give the selector more
@@ -100,21 +114,28 @@ export function getQuote(pools: readonly PoolState[], req: QuoteRequest): Quote 
 
   // Build the plan with the ORIGINAL (possibly NATIVE) tokenIn/tokenOut on the outer fields; the hops
   // already reference WETH because the route was computed over it.
-  const feeBps = req.feeBps ?? 0;
   const plan = planFromSplit(split, req.tokenIn, req.tokenOut, {
     recipient: req.recipient,
     deadline: req.nowSeconds + req.ttlSeconds,
     slippageBps: req.slippageBps,
     feeBps,
+    // The plan's paths must sum to the GROSS input: the router checks that sum against plan.amountIn and
+    // then scales each path down by (amountIn − fee)/amountIn itself. Scaling on-chain rather than here
+    // is what lets the fee dial move between quote and execution without invalidating the plan.
+    grossAmountIn: req.amountIn,
   });
 
-  const netAmountOut = applyAggFee(split.amountOut, feeBps);
   return {
-    amountIn: split.amountIn,
+    // What the payer is debited (gross) versus what actually reaches the pools (net).
+    amountIn: req.amountIn,
+    netAmountIn,
+    // The route's FULL output — all of it goes to the recipient now that the fee is taken on the input.
     amountOut: split.amountOut,
-    netAmountOut,
+    netAmountOut: split.amountOut,
     feeBps,
-    feeAmount: split.amountOut - netAmountOut,
+    // NOTE: denominated in the INPUT token, not the output. Consumers formatting this must use tokenIn's
+    // decimals — using tokenOut's is a silent 10^12 error on a 6-vs-18 pair.
+    feeAmount,
     minAmountOut: plan.minAmountOut,
     split,
     routeDescriptions: split.parts.map((r) => describeRoute(r)),
