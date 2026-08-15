@@ -239,6 +239,33 @@ export async function loadPoolRowsServer(nowMs: number, pair?: PoolPair): Promis
       err instanceof Error ? `${err.name}: ${err.message}` : err,
     );
     if (hit) return hit.rows;
+
+    // DEGRADED MODE, measured incident 2026-08-15: after the 369k-row v4 backfill, a long autovacuum
+    // ANALYZE starved the disk, the pair query started hitting the anon role's 3s statement timeout,
+    // and this throw turned "database is slow" into a total quote outage — every pair answered
+    // 503 "Pool registry unavailable" while the chain itself was fine. A DEX that cannot read its own
+    // registry can still quote: the venue='mole_v4' read is a handful of rows through the
+    // mp_pools_venue index (it kept answering in ~0.1s during the same incident), and every v3 venue
+    // is recovered live on-chain by discoverForPair regardless of what the registry says. What this
+    // degraded set genuinely loses is EXTERNAL v4 pools (registry-only, no address to discover) — a
+    // narrower market for the duration of a database incident, instead of no market at all.
+    // Deliberately NOT cached as complete, so the full pair query is retried on the next request.
+    try {
+      const { data } = await sb
+        .from("mp_pools")
+        .select("*")
+        .eq("venue", "mole_v4")
+        .eq("active", true);
+      const rows = (data as PoolRow[]) || [];
+      if (rows.length > 0) {
+        console.warn(
+          `[aggregator] serving DEGRADED pool set (${rows.length} mole_v4 rows + live v3 discovery); external v4 routing is unavailable until the registry recovers`,
+        );
+        return rows;
+      }
+    } catch {
+      /* degraded read also failed — fall through to the original error */
+    }
     throw err;
   }
 }
