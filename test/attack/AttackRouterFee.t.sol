@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {MoleRouter} from "../../src/MoleRouter.sol";
+import {deployMoleRouter, deployMoleRouterOwned, MoleDeployer, TEST_UPGRADE_ADMIN} from "../helpers/ProxyDeploy.sol";
 import {MoleFeeDial} from "../../src/MoleFeeDial.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {Currency} from "v4-core/types/Currency.sol";
@@ -33,7 +34,7 @@ contract AttackRouterFee is Test, Deployers {
         if (address(tokenA) > address(tokenB)) (tokenA, tokenB) = (tokenB, tokenA);
 
         dial = new MoleFeeDial(dialOwner, 69); // 0.69%
-        router = new MoleRouter(manager, makeAddr("weth-unused"), address(dial), treasury);
+        router = deployMoleRouter(manager, makeAddr("weth-unused"), address(dial), treasury);
 
         // A plain hookless v4 pool with deep liquidity to swap against.
         key_ = PoolKey({
@@ -118,7 +119,7 @@ contract AttackRouterFee is Test, Deployers {
     ///         run feeless. If the router charged the fee but still routed the gross (or scaled the wrong
     ///         way), these two outputs would not line up.
     function test_theRoutedAmountIsTheNetAmount_notTheGross() public {
-        MoleRouter feeless = new MoleRouter(manager, makeAddr("weth-unused"), address(0), address(0));
+        MoleRouter feeless = deployMoleRouter(manager, makeAddr("weth-unused"), address(0), address(0));
         vm.prank(user);
         tokenA.approve(address(feeless), type(uint256).max);
 
@@ -141,7 +142,7 @@ contract AttackRouterFee is Test, Deployers {
     ///         balance to the treasury. Unreachable at the compiled 1% clamp, guarded anyway.
     function test_feeCanNeverConsumeTheEntireInput() public {
         HostileDial hostile = new HostileDial(10_000); // 100%
-        MoleRouter capped = new MoleRouter(manager, makeAddr("weth-unused"), address(hostile), treasury);
+        MoleRouter capped = deployMoleRouter(manager, makeAddr("weth-unused"), address(hostile), treasury);
         vm.prank(user);
         tokenA.approve(address(capped), type(uint256).max);
 
@@ -158,7 +159,7 @@ contract AttackRouterFee is Test, Deployers {
     function test_hostileDialAboveCap_isClampedTo1Percent() public {
         // The real dial refuses >100 itself, so mount a raw hostile one returning 5000 (50%).
         HostileDial hostile = new HostileDial(5000);
-        MoleRouter capped = new MoleRouter(manager, makeAddr("weth-unused"), address(hostile), treasury);
+        MoleRouter capped = deployMoleRouter(manager, makeAddr("weth-unused"), address(hostile), treasury);
         vm.prank(user);
         tokenA.approve(address(capped), type(uint256).max);
 
@@ -174,7 +175,7 @@ contract AttackRouterFee is Test, Deployers {
 
     function test_revertingDial_swapSucceedsFeeless() public {
         RevertingDial bad = new RevertingDial();
-        MoleRouter r2 = new MoleRouter(manager, makeAddr("weth-unused"), address(bad), treasury);
+        MoleRouter r2 = deployMoleRouter(manager, makeAddr("weth-unused"), address(bad), treasury);
         vm.prank(user);
         tokenA.approve(address(r2), type(uint256).max);
 
@@ -187,7 +188,7 @@ contract AttackRouterFee is Test, Deployers {
 
     function test_gasBurningDial_swapSucceedsFeeless() public {
         GasBurnerDial burner = new GasBurnerDial();
-        MoleRouter r2 = new MoleRouter(manager, makeAddr("weth-unused"), address(burner), treasury);
+        MoleRouter r2 = deployMoleRouter(manager, makeAddr("weth-unused"), address(burner), treasury);
         vm.prank(user);
         tokenA.approve(address(r2), type(uint256).max);
 
@@ -250,7 +251,7 @@ contract AttackRouterFee is Test, Deployers {
     /* ─── the feeless configuration is byte-identical to the old router ─── */
 
     function test_zeroDialAddress_isPermanentlyFeeless() public {
-        MoleRouter feeless = new MoleRouter(manager, makeAddr("weth-unused"), address(0), address(0));
+        MoleRouter feeless = deployMoleRouter(manager, makeAddr("weth-unused"), address(0), address(0));
         vm.prank(user);
         tokenA.approve(address(feeless), type(uint256).max);
         uint256 treasuryBefore = tokenB.balanceOf(treasury);
@@ -316,25 +317,34 @@ contract AttackRouterFee is Test, Deployers {
 
     /* ─── deploy-time misconfigurations fail the deploy, not the users ─── */
 
+    /// @dev These three go through MoleDeployer rather than calling the helper directly. A proxy deploy is
+    ///      TWO creates — implementation, then proxy (whose constructor runs `initialize`) — and
+    ///      `vm.expectRevert` arms for the NEXT create, which is the implementation and always succeeds.
+    ///      One external frame makes the whole deployment a single call so the initializer's revert is what
+    ///      surfaces. Same reason ProxyDeploy.sol wraps the vault deployments.
+
     function test_constructorRejects_dialWithNoRecipient() public {
+        MoleDeployer d = new MoleDeployer();
         vm.expectRevert(MoleRouter.BadFeeConfig.selector);
-        new MoleRouter(manager, makeAddr("weth-unused"), address(dial), address(0));
+        d.router(manager, makeAddr("weth-unused"), address(dial), address(0), TEST_UPGRADE_ADMIN);
     }
 
     function test_constructorRejects_codelessDial() public {
         // The most likely deploy typo: a wrong / not-yet-deployed dial address. Must fail loudly, not
         // silently run feeless.
+        MoleDeployer d = new MoleDeployer();
         vm.expectRevert(MoleRouter.BadFeeConfig.selector);
-        new MoleRouter(manager, makeAddr("weth-unused"), makeAddr("not-a-contract"), treasury);
+        d.router(manager, makeAddr("weth-unused"), makeAddr("not-a-contract"), treasury, TEST_UPGRADE_ADMIN);
     }
 
     function test_constructorRejects_strandingRecipients() public {
         address weth = makeAddr("weth");
         // WETH and the PoolManager as recipient would strand a mid-unlock transfer — rejected.
+        MoleDeployer d = new MoleDeployer();
         vm.expectRevert(MoleRouter.BadFeeConfig.selector);
-        new MoleRouter(manager, weth, address(dial), weth);
+        d.router(manager, weth, address(dial), weth, TEST_UPGRADE_ADMIN);
         vm.expectRevert(MoleRouter.BadFeeConfig.selector);
-        new MoleRouter(manager, weth, address(dial), address(manager));
+        d.router(manager, weth, address(dial), address(manager), TEST_UPGRADE_ADMIN);
     }
 }
 

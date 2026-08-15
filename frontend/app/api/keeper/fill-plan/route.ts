@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 // returns a SwapPlan with recipient = the order owner and minAmountOut = the floor. The keeper only signs
 // and sends fillLeg(id, plan); all the routing lives here (one aggregator, server-side). Secret-gated.
 
-const MOLE_ORDERS = "0x3279E08fE241669cD098F30156b9F1B8FCB0c67C" as Address;
+const MOLE_ORDERS = "0x3bA3Ca1e5D411Dcd686E198C852e0d331384aE77" as Address;
 const ordersAbi = [
   {
     type: "function", name: "orders", stateMutability: "view", inputs: [{ type: "uint256" }],

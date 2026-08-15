@@ -9,6 +9,7 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {MoleRouter} from "../../src/MoleRouter.sol";
+import {deployMoleRouter, deployMoleRouterOwned} from "../helpers/ProxyDeploy.sol";
 import {MoleOrders} from "../../src/MoleOrders.sol";
 
 /// Attacks on MoleOrders. The claim under test:
@@ -33,7 +34,7 @@ contract AttackMoleOrders is Test, Deployers {
         tokenB = new MockERC20("B", "B", 18);
         if (address(tokenA) > address(tokenB)) (tokenA, tokenB) = (tokenB, tokenA);
 
-        router = new MoleRouter(manager, makeAddr("weth"), address(0), address(0)); // feeless for clean math
+        router = deployMoleRouter(manager, makeAddr("weth"), address(0), address(0)); // feeless for clean math
         book = new MoleOrders(router, admin, keeper);
 
         key_ = PoolKey({

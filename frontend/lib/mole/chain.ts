@@ -62,14 +62,14 @@ export const MOLE_ADDRESSES = {
   moleFeeCollector: "0x4771865614D194Aa8b7aAB9d91e857686c37E584" as Address,
   /**
    * MoleRouter — the aggregator's on-chain executor (immutable, no admin). Redeployed 2026-08-10 with the
-   * fee-dial split: it reads the aggregator fee (bps) from MoleFeeDial 0xd36C845bfFDFb4b204A7aa0b0CB3D205A6e1A9e8
+   * fee-dial split: it reads the aggregator fee (bps) from MoleFeeDial 0x242263f3Ea6165a70B463d8b65F8DdFdd66762EA
    * at swap time, clamped to 1%, fee to an immutable recipient, failing to 0% — so the fee is a tunable
    * number while the approval target stays immutable. Users grant it a standing ERC-20 approval; it speaks
    * only two verbs (v3 pool swap, v4 PoolManager swap) and holds nothing between transactions.
    */
-  moleRouter: "0x7D74a0959A321e362aDb171E405Ee97ADA6ca79d" as Address,
+  moleRouter: "0xBd9B841d690E31B61aa3858EB145EA8BBe71122c" as Address,
   /** MoleFeeDial — the aggregator fee as a single mutable, capped (1%) number read by the router. */
-  moleFeeDial: "0xd36C845bfFDFb4b204A7aa0b0CB3D205A6e1A9e8" as Address,
+  moleFeeDial: "0x242263f3Ea6165a70B463d8b65F8DdFdd66762EA" as Address,
 } as const;
 
 /** The PancakeSwap V3 factory + TickLens on Robinhood Chain — the aggregator's primary liquidity venue. */

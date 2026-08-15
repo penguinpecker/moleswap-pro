@@ -27,9 +27,9 @@ export const CONTRACTS = {
   // ═══ MoleSwap contracts ═══
   // MoleRouter — the aggregator's immutable on-chain executor. Users grant it a standing ERC-20
   // approval; it holds nothing between txs. This is both the swap router and the approval target.
-  MOLE_ROUTER: "0x7D74a0959A321e362aDb171E405Ee97ADA6ca79d",
-  SWAP_ROUTER: "0x7D74a0959A321e362aDb171E405Ee97ADA6ca79d",
-  MOLESWAP_FEE_ROUTER: "0x7D74a0959A321e362aDb171E405Ee97ADA6ca79d",
+  MOLE_ROUTER: "0xBd9B841d690E31B61aa3858EB145EA8BBe71122c",
+  SWAP_ROUTER: "0xBd9B841d690E31B61aa3858EB145EA8BBe71122c",
+  MOLESWAP_FEE_ROUTER: "0xBd9B841d690E31B61aa3858EB145EA8BBe71122c",
   // Uniswap v4 singleton + the ALM's hook/vault/queue.
   POOL_MANAGER: "0x8366a39CC670B4001A1121B8F6A443A643e40951",
   MOLE_HOOK: "0xb2c9A0af48dF8858F3765385E733Cd8776a138C4",

@@ -6,6 +6,7 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {MolePositions} from "../../src/MolePositions.sol";
 import {MoleHook} from "../../src/MoleHook.sol";
 import {MoleQueue} from "../../src/MoleQueue.sol";
+import {MoleRouter} from "../../src/MoleRouter.sol";
 import {IMoleOracle} from "../../src/MoleQueue.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 
@@ -32,6 +33,16 @@ address constant TEST_UPGRADE_ADMIN = address(uint160(uint256(keccak256("mole.te
 ///      did not revert as expected" while the contract is behaving perfectly. Routing through an external
 ///      call makes the whole deployment a single frame, so the initializer's revert is what surfaces.
 contract MoleDeployer {
+    /// @dev Router variant of the wrapper below — a proxy deploy is two creates, so a test expecting the
+    ///      INITIALIZER to revert must route through one external frame or the cheatcode is consumed by the
+    ///      implementation create, which always succeeds.
+    function router(IPoolManager poolManager, address weth, address feeDial, address feeRecipient, address upgradeAdmin)
+        external
+        returns (MoleRouter)
+    {
+        return deployMoleRouterOwned(poolManager, weth, feeDial, feeRecipient, upgradeAdmin);
+    }
+
     function vault(
         IPoolManager poolManager,
         address keeper,
@@ -290,4 +301,29 @@ function deployMoleQueue(
         )
     );
     return MoleQueue(address(new ERC1967Proxy(address(impl), data)));
+}
+
+/// @notice A MoleRouter behind an ERC-1967 proxy, keeping the pre-proxy constructor argument list so the
+///         existing router/fee/orders suites keep asserting exactly what they asserted before the router
+///         became upgradeable. Same reasoning as the vault helper above: the migration changed WHO can
+///         replace the code, not what the code does, and a suite rewritten alongside it would stop being
+///         evidence of that.
+function deployMoleRouter(IPoolManager poolManager, address weth, address feeDial, address feeRecipient)
+    returns (MoleRouter)
+{
+    return deployMoleRouterOwned(poolManager, weth, feeDial, feeRecipient, TEST_UPGRADE_ADMIN);
+}
+
+/// @notice As above, with the upgrade admin named — for tests that exercise the upgrade path itself.
+function deployMoleRouterOwned(
+    IPoolManager poolManager,
+    address weth,
+    address feeDial,
+    address feeRecipient,
+    address upgradeAdmin
+) returns (MoleRouter) {
+    MoleRouter impl = new MoleRouter();
+    bytes memory data =
+        abi.encodeCall(MoleRouter.initialize, (poolManager, weth, feeDial, feeRecipient, upgradeAdmin));
+    return MoleRouter(payable(address(new ERC1967Proxy(address(impl), data))));
 }

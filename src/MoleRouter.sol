@@ -10,6 +10,8 @@ import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title MoleRouter
 /// @notice The aggregator's on-chain executor. It performs a pre-computed swap route across venues and
@@ -44,22 +46,47 @@ import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
 ///      Nothing accumulates for a later caller to sweep. This is the same property the vault enforces on
 ///      itself, and it is what makes the router safe to leave standing approvals against.
 ///
-/// IMMUTABLE ON PURPOSE, unlike the rest of this project. MolePositions is a UUPS proxy because it
-/// custodies funds across time and its policy must be able to change. This router custodies nothing
-/// between transactions — it is in the MoleFeeCollector category — and for a contract that users grant
-/// token approvals to, immutability is the STRONGER guarantee: an upgradeable approval target is exactly
-/// the standing-approval-turned-malicious risk stated above. So there is no admin, no upgrade path, and
-/// no privileged address. What you audit is what runs, forever.
+/// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+/// UPGRADEABLE — AND THIS IS THE CONTRACT'S LARGEST TRUST ASSUMPTION. READ IT BEFORE APPROVING.
+///
+/// The previous router was immutable ON PURPOSE, and the argument for that has not become wrong: for a
+/// contract users grant standing token approvals to, immutability is the STRONGER guarantee, because an
+/// upgradeable approval target IS the standing-approval-turned-malicious risk described above. That is
+/// still true. This deployment accepts it deliberately (operator decision, 2026-08-15) in exchange for
+/// being able to change routing and fee logic without forcing every user to re-approve a new address.
+///
+/// STATE PLAINLY WHAT THAT COSTS, because the paragraphs above would otherwise overclaim:
+///
+///   - `upgradeAdmin` can replace every line of this contract, including the two-verbs claim. A future
+///     implementation COULD contain `call(target, data)` or a direct `transferFrom(user, attacker, ...)`.
+///     The bound is therefore not "this code cannot escalate an approval" but "whoever holds
+///     `upgradeAdmin` will not". Every wallet that has ever approved this router is exposed up to its
+///     allowance — and the app approves `type(uint256).max`.
+///   - `feeRecipient`, `feeDial` and the effective fee ceiling were immutables and are now upgradeable
+///     state. "The fee can never exceed 1%" is consequently a statement about the CURRENT implementation,
+///     not about the address. The dial's own clamp still holds against a compromised DIAL key; it does
+///     not hold against a compromised UPGRADE key.
+///   - As deployed, `upgradeAdmin` is the same key used for the keeper, the fee recipient and deployment.
+///     A compromise of that hot key is therefore a compromise of every approval granted here. This is
+///     recorded as a known, accepted exposure rather than papered over.
+///
+/// WHAT SURVIVES ANY UPGRADE: nothing at this layer. Unlike MoleHook — whose permission bits live in its
+/// ADDRESS and so cannot be acquired by any implementation — a router's powers are entirely code. The only
+/// mechanical guarantee available is to surrender the key: `transferUpgradeAdmin(address(0))` makes this
+/// contract permanently immutable and restores the original property in full. It is built, and it is the
+/// intended end state once the fee model has settled.
 ///
 /// ─────────────────────────────────────────────────────────────────────────────────────────────────────
-/// THE AGGREGATOR FEE, AND WHY IT DOES NOT WEAKEN ANY OF THE ABOVE.
+/// THE AGGREGATOR FEE. Every clause below is scoped to the CURRENT implementation — see the upgrade
+/// section above, which supersedes any reading of these as properties of the ADDRESS.
 ///
-/// The fee NUMBER is mutable; everything with POWER is immutable. The router reads `feeBps` from a tiny
-/// external dial (MoleFeeDial) at swap time, so the fee can be tuned with one transaction there — but:
+/// The router reads `feeBps` from a tiny external dial (MoleFeeDial) at swap time, so the fee can be tuned
+/// with one transaction there — but, against a compromised DIAL key specifically:
 ///
 ///   - the router clamps whatever the dial returns at the compiled-in `MAX_FEE_BPS` (1%). A fully
 ///     compromised dial key moves a number inside [0, 1%] and can do nothing else;
-///   - the fee DESTINATION (`feeRecipient`) is an immutable here. The dial cannot redirect fees;
+///   - the fee DESTINATION (`feeRecipient`) is not readable or writable by the dial, so the dial cannot
+///     redirect a wei. (It IS writable by an upgrade — that is the upgrade key's power, not the dial's.);
 ///   - the dial is read with a gas-capped STATICCALL and ANY failure — revert, empty return, gas burn —
 ///     resolves to fee = 0. A broken or hostile dial makes swaps free, never stuck;
 ///   - the zero-residual invariant is unchanged: the input splits into fee + routed amount, both leave in
@@ -93,15 +120,20 @@ import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
 ///
 /// The fee push FAILS OPEN, like the dial read: if the source token refuses to pay the treasury, the fee is
 /// forgone and the FULL input is routed to the user instead. A fee misconfiguration can never block a swap.
-contract MoleRouter is IUnlockCallback {
+contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
     /// @dev The v4 singleton. The router opens exactly one unlock per swap and does all venue work inside
     ///      it, so a route may freely mix v4 and v3 hops in a single atomic transaction.
-    IPoolManager public immutable poolManager;
+    ///
+    ///      NOTE: this and the four fields below were `immutable` in the pre-proxy router. Behind a proxy
+    ///      an immutable lives in the IMPLEMENTATION's bytecode, not the proxy's storage, so it would be
+    ///      silently re-set by every upgrade and read as zero until `initialize` ran. They are storage now.
+    ///      Their ORDER IS PART OF THE ABI FOR EVERY FUTURE UPGRADE — append only, never reorder.
+    IPoolManager public poolManager;
 
     /// @dev The wrapped-native token (WETH on Robinhood Chain). Native ETH is a wrapper at the EDGES only:
     ///      the router wraps incoming ETH to WETH before the first hop and unwraps the final WETH to ETH
     ///      after the last, so every pool ever sees an ERC-20 and the routing math never special-cases it.
-    address public immutable weth;
+    address public weth;
 
     /// @dev The sentinel a plan uses to mean "native ETH" for `tokenIn`/`tokenOut`. The de-facto standard
     ///      0xEeee… address, distinct from address(0) so a native leg can never be confused with an unset
@@ -111,11 +143,11 @@ contract MoleRouter is IUnlockCallback {
 
     /// @dev The fee dial — the ONLY mutable input to this contract, and only ever a number. address(0)
     ///      deploys the router permanently feeless.
-    address public immutable feeDial;
+    address public feeDial;
 
     /// @dev Where the fee goes. IMMUTABLE so a compromised dial key cannot redirect a wei; changing the
     ///      treasury means deploying a new router, which is the intended cost for that action.
-    address public immutable feeRecipient;
+    address public feeRecipient;
 
     /// @dev The hard ceiling on the fee, compiled in. The dial is clamped to this no matter what it
     ///      returns — the trust statement is "the fee can never exceed 1%", enforced by immutable code.
@@ -211,11 +243,34 @@ contract MoleRouter is IUnlockCallback {
         uint256 fee
     );
 
-    constructor(IPoolManager _poolManager, address _weth, address _feeDial, address _feeRecipient) {
+    error NotUpgradeAdmin();
+    error OwnerRequired();
+
+    /// @notice The key that can replace this implementation. See the upgrade section in the header: it can
+    ///         replace every line of this contract, and every wallet that approved this router is exposed
+    ///         up to its allowance. `transferUpgradeAdmin(address(0))` surrenders it permanently.
+    address public upgradeAdmin;
+
+    /// @dev The implementation must never be initializable in its own right — an attacker who initializes
+    ///      a bare implementation owns nothing here (the proxy holds the state), but leaving it open is
+    ///      free to close and removes a whole class of confusing findings.
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice One-time setup behind the proxy. Carries the same fee-config proofs the immutable router
+    ///         checked in its constructor — a mis-set dial is still a deploy-time failure, not a live bug.
+    function initialize(IPoolManager _poolManager, address _weth, address _feeDial, address _feeRecipient, address _upgradeAdmin)
+        external
+        initializer
+    {
+        if (_upgradeAdmin == address(0)) revert OwnerRequired();
+        upgradeAdmin = _upgradeAdmin;
         poolManager = _poolManager;
         weth = _weth;
-        // Every plausible fee-config mistake fails the deploy LOUDLY here, because the router is immutable
-        // and none of it is fixable afterwards:
+        // Every plausible fee-config mistake fails the DEPLOY loudly here. (It is now fixable by upgrade
+        // rather than permanent — but a misconfiguration that reaches users is still a misconfiguration,
+        // and the cheapest place to catch it is before the proxy is ever pointed at.)
         if (_feeDial != address(0)) {
             // A codeless dial (a typo, or the router deployed before the dial) makes the gas-capped
             // staticcall return empty -> _feeBps silently resolves to 0 forever, so the router runs
@@ -231,6 +286,25 @@ contract MoleRouter is IUnlockCallback {
         }
         feeDial = _feeDial;
         feeRecipient = _feeRecipient;
+    }
+
+    /// @dev The whole trust assumption, in one line. See the header.
+    function _authorizeUpgrade(address) internal override {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+    }
+
+    event UpgradeAdminTransferred(address indexed from, address indexed to);
+
+    /// @notice Hand the upgrade key to somebody else — a multisig, a timelock, or **address(0) to give it
+    ///         up permanently**, which makes this contract immutable and restores the guarantee an approval
+    ///         target really wants: what you audit is what runs, forever. That is the intended end state
+    ///         once the fee model has settled, and it is the only mechanical protection available here.
+    /// @dev Deliberately one-step and deliberately allows address(0): a two-step handshake cannot express
+    ///      "burn it", and burning is the option that matters most for this particular contract.
+    function transferUpgradeAdmin(address to) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        emit UpgradeAdminTransferred(upgradeAdmin, to);
+        upgradeAdmin = to;
     }
 
     /// @notice Accept native ETH ONLY while a swap is in flight — which is exactly when WETH sends it back

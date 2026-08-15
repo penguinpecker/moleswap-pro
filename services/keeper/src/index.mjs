@@ -12,7 +12,7 @@
  *   RPC_URL        — Robinhood Chain RPC (Alchemy).
  *   FILL_PLAN_URL  — https://moleswap.com/api/keeper/fill-plan  (or the vercel URL)
  *   KEEPER_SECRET  — shared secret gating fill-plan (== KEEPER_SECRET/MP_WRITE_SECRET on the frontend)
- *   MOLE_ORDERS    — the MoleOrders address (default 0x3279E08f…)
+ *   MOLE_ORDERS    — the MoleOrders address (default 0x3bA3Ca1e…, redeployed 2026-08-15 for the fee-on-input router)
  *   POLL_SECONDS   — loop cadence (default 30)
  */
 import { createPublicClient, createWalletClient, http } from "viem";
@@ -21,7 +21,7 @@ import { privateKeyToAccount } from "viem/accounts";
 const RPC = process.env.RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
 const FILL_PLAN_URL = process.env.FILL_PLAN_URL;
 const SECRET = process.env.KEEPER_SECRET;
-const MOLE_ORDERS = process.env.MOLE_ORDERS || "0x3279E08fE241669cD098F30156b9F1B8FCB0c67C";
+const MOLE_ORDERS = process.env.MOLE_ORDERS || "0x3bA3Ca1e5D411Dcd686E198C852e0d331384aE77";
 const POLL_MS = (Number(process.env.POLL_SECONDS) || 30) * 1000;
 
 let KEY = process.env.KEEPER_KEY || "";

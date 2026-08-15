@@ -8,6 +8,7 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {MoleRouter, IPancakeV3Pool} from "../../src/MoleRouter.sol";
+import {deployMoleRouter, deployMoleRouterOwned} from "../helpers/ProxyDeploy.sol";
 
 /// @title MoleRouterFork
 /// @notice The back-to-back proof: a swap driven through MoleRouter on the LIVE chain delivers exactly
@@ -34,7 +35,7 @@ contract MoleRouterFork is Test {
 
     function setUp() public {
         if (block.chainid != 4663) vm.skip(true);
-        router = new MoleRouter(POOL_MANAGER, WETH, address(0), address(0));
+        router = deployMoleRouter(POOL_MANAGER, WETH, address(0), address(0));
     }
 
     /* ------------------------------------------------------------------------------------------ helpers */

@@ -13,7 +13,7 @@ import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { erc20Abi } from "./abi";
 import { ROBINHOOD_RPC_URL } from "./chain";
 
-export const MOLE_ORDERS = "0x3279E08fE241669cD098F30156b9F1B8FCB0c67C" as Address;
+export const MOLE_ORDERS = "0x3bA3Ca1e5D411Dcd686E198C852e0d331384aE77" as Address;
 
 export const moleOrdersAbi = [
   {
