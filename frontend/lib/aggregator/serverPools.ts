@@ -185,6 +185,12 @@ interface CacheEntry {
 let _cache: CacheEntry | null = null;
 const _pairCache = new Map<string, CacheEntry>();
 const CACHE_MS = 30_000;
+/** Circuit breaker. After a registry read fails, every request for the next SICK_MS serves the
+ *  static degraded set immediately instead of re-paying the 6-12s of retries-into-timeout per
+ *  request that the incident measured — with quotes queueing behind a sick database, the fallback
+ *  itself was arriving too late to matter. One request per window re-probes the real registry. */
+let _dbSickUntil = 0;
+const SICK_MS = 30_000;
 
 function pairKey(pair: PoolPair): string {
   return poolPairTokens(pair).slice().sort().join("|");
@@ -194,6 +200,7 @@ export async function loadPoolRowsServer(nowMs: number, pair?: PoolPair): Promis
   const key = pair ? pairKey(pair) : null;
   const hit = key ? _pairCache.get(key) : _cache;
   if (hit && nowMs - hit.at < CACHE_MS) return hit.rows;
+  if (nowMs < _dbSickUntil) return DEGRADED_MOLE_ROWS; // breaker open — do not touch the database
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -246,32 +253,35 @@ export async function loadPoolRowsServer(nowMs: number, pair?: PoolPair): Promis
     );
     if (hit) return hit.rows;
 
-    // DEGRADED MODE, measured incident 2026-08-15: after the 369k-row v4 backfill, a long autovacuum
-    // ANALYZE starved the disk, the pair query started hitting the anon role's 3s statement timeout,
-    // and this throw turned "database is slow" into a total quote outage — every pair answered
-    // 503 "Pool registry unavailable" while the chain itself was fine. A DEX that cannot read its own
-    // registry can still quote: the venue='mole_v4' read is a handful of rows through the
-    // mp_pools_venue index (it kept answering in ~0.1s during the same incident), and every v3 venue
-    // is recovered live on-chain by discoverForPair regardless of what the registry says. What this
-    // degraded set genuinely loses is EXTERNAL v4 pools (registry-only, no address to discover) — a
-    // narrower market for the duration of a database incident, instead of no market at all.
-    // Deliberately NOT cached as complete, so the full pair query is retried on the next request.
-    try {
-      const { data } = await sb
-        .from("mp_pools")
-        .select("*")
-        .eq("venue", "mole_v4")
-        .eq("active", true);
-      const rows = (data as PoolRow[]) || [];
-      if (rows.length > 0) {
-        console.warn(
-          `[aggregator] serving DEGRADED pool set (${rows.length} mole_v4 rows + live v3 discovery); external v4 routing is unavailable until the registry recovers`,
-        );
-        return rows;
-      }
-    } catch {
-      /* degraded read also failed — fall through to the original error */
-    }
-    throw err;
+    // DEGRADED MODE, measured incident 2026-08-15: after the 369k-row v4 backfill the database went
+    // IO-bound — autovacuum ANALYZE ground for minutes, the pair query hit the anon role's 3s
+    // statement timeout, and quoting 503d entirely while the chain itself was fine. The first version
+    // of this fallback re-queried the database for the mole_v4 rows, which failed for BOTH reasons a
+    // fallback can fail: the sick database also timed that read out, and the rows themselves had been
+    // flipped inactive by the indexer, so even a successful read returned []. A fallback that depends
+    // on the failing dependency is not a fallback. This one is a code constant: the three MoleSwap
+    // pools, each key verified by keccak against its on-chain PoolId. v3 venues are recovered live by
+    // discoverForPair regardless of the registry, so what a database incident now costs is EXTERNAL
+    // v4 routing only — a narrower market, not a dead one. Never cached, so the real registry is
+    // retried on the next request.
+    _dbSickUntil = nowMs + SICK_MS;
+    console.warn(
+      `[aggregator] serving DEGRADED static pool set (${DEGRADED_MOLE_ROWS.length} mole_v4 rows + live v3 discovery) and skipping registry reads for ${SICK_MS / 1000}s; external v4 routing unavailable until the registry recovers`,
+    );
+    return DEGRADED_MOLE_ROWS;
   }
 }
+
+/** The MoleSwap pools as code, for when the registry cannot be read. Each entry's (currency0,
+ *  currency1, fee, tickSpacing, hooks) was verified to keccak-hash to exactly its `id` — these are
+ *  the on-chain pool identities, not a cache that can drift. Note the second WETH/USDG pool runs
+ *  tickSpacing 10, not 60. */
+const MOLE_HOOK = "0xb2c9a0af48df8858f3765385e733cd8776a138c4";
+const WETH_LC = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
+const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+const CASHCAT_LC = "0x020bfc650a365f8bb26819deaabf3e21291018b4";
+const DEGRADED_MOLE_ROWS: PoolRow[] = [
+  { id: "0x9aca9d2f4bb68ef41e6928bbe080a4b076b167e2d4b7fdebf4b4fd5d6dadd029", venue: "mole_v4", token0: WETH_LC, token1: USDG_LC, fee: 8388608, tick_spacing: 60, hooks: MOLE_HOOK, address: "", active: true },
+  { id: "0xf54b7c6690cdfb8629ea2bc66dacd29640e86b4847b13eeb019e4f033550fbe9", venue: "mole_v4", token0: WETH_LC, token1: USDG_LC, fee: 8388608, tick_spacing: 10, hooks: MOLE_HOOK, address: "", active: true },
+  { id: "0xb93693d680d3373b836c5fe174cb26f078e28175eb20c6f571a93ffb8e3206f9", venue: "mole_v4", token0: CASHCAT_LC, token1: WETH_LC, fee: 8388608, tick_spacing: 60, hooks: MOLE_HOOK, address: "", active: true },
+];
