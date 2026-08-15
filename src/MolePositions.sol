@@ -505,6 +505,22 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         emit PositionSizeBandSet(minLiquidity, maxLiquidity);
     }
 
+    event RangeWidthBandSet(int24 minWidth, int24 maxWidth);
+
+    /// @notice Set the legal range-width band for new positions. Emits, so a change is observable.
+    /// @dev The band was initializer-only, which froze `maxRangeWidth` at 60,000 ticks while the
+    ///      launchpad seeds this chain's pools with 120,000-tick single-sided ranges — so a deposit
+    ///      matching the native launch shape was refusable but not configurable. Same invariants as
+    ///      `initialize`, checked the same way. Existing positions are untouched: the band gates
+    ///      `_validateRange` on open/rebalance only, never withdrawal.
+    function setRangeWidthBand(int24 minWidth, int24 maxWidth) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        if (minWidth <= 0 || maxWidth < minWidth) revert BadRangeBounds();
+        minRangeWidth = minWidth;
+        maxRangeWidth = maxWidth;
+        emit RangeWidthBandSet(minWidth, maxWidth);
+    }
+
     /// @notice Opt a position in or out of keeper management. Owner only.
     /// @dev Note what this deliberately does NOT touch: withdrawal. Revoking the keeper cannot strand a
     ///      position, because the exit never depended on the keeper in the first place.

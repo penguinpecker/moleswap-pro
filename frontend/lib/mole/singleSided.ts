@@ -26,7 +26,7 @@
  * - Liquidity is rounded DOWN (full-precision single floor) so the pool can never pull more
  *   than the user's stated amount; the OFF side's amountMax is 0n, which makes a two-sided pull
  *   revert instead of silently draining the other token.
- * - Live MolePositions bounds: width in [minRangeWidth=120, maxRangeWidth=60000] ticks, both
+ * - Live MolePositions bounds: width in [minRangeWidth=120, maxRangeWidth=120000] ticks, both
  *   ticks % tickSpacing == 0, lower < upper. There is NO constraint tying the range to spot —
  *   an entirely off-spot range is legal, minPositionLiquidity = 0.
  */
@@ -48,7 +48,7 @@ import {
 /** Live MolePositions.minRangeWidth (ticks), read from the chain this session. */
 export const MIN_RANGE_WIDTH = 120;
 /** Live MolePositions.maxRangeWidth (ticks), read from the chain this session. */
-export const MAX_RANGE_WIDTH = 60000;
+export const MAX_RANGE_WIDTH = 120000;
 /**
  * Nominal width of the 'tight' preset — a few hundred ticks starting just beyond spot
  * (rounded to a spacing multiple, clamped into the live band).
@@ -64,9 +64,9 @@ const MAX_UINT128 = (1n << 128n) - 1n;
 export type OneSidedSide = "token0" | "token1";
 
 /**
- * 'launch': the WIDEST width the live vault accepts (60000 ticks). NOTE: the launchpad
+ * 'launch': the WIDEST width the live vault accepts (120000 ticks) — full launchpad parity
  * pattern in the wild (Meteora-style single-sided launches) uses ranges ~120,000 ticks wide,
- * which EXCEEDS the live maxRangeWidth=60000 — MolePositions would reject it, so 'launch'
+ * (the band was raised from 60000 by the 2026-08-15 setRangeWidthBand upgrade), so 'launch'
  * here is capped at the legal maximum, not the folklore number.
  * 'tight': ~TIGHT_WIDTH_TICKS starting just beyond spot.
  * Custom: an explicit width in ticks (snapped to spacing, clamped into the live band).
@@ -161,7 +161,7 @@ export function assertStrictlyOneSided(
 
 /**
  * Build a one-sided range: snapped to spacing, strictly beyond spot per the snap rule,
- * width a spacing multiple clamped into the live [120, 60000] band, and clamped to the
+ * width a spacing multiple clamped into the live [120, 120000] band, and clamped to the
  * usable tick bounds (throws if spot is so close to a bound that no legal width fits).
  */
 export function computeOneSidedRange(params: {

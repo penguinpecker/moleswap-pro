@@ -118,14 +118,15 @@ describe("ATTACK: assertStrictlyOneSided is the last line before a send", () => 
 
 /* ========================================================================== width band */
 
-describe("ATTACK: width clamps to the LIVE band [120, 60000] and stays on the spacing grid", () => {
-  it("'launch' is the widest LEGAL width: exactly 60000 — NOT the 120,000-tick launchpad folklore", () => {
-    // Meteora-style launches in the wild use ~120k-tick ranges; live maxRangeWidth is 60000
-    // and MolePositions rejects wider. If the preset ever regresses to 120000, this is RED.
+describe("ATTACK: width clamps to the LIVE band [120, 120000] and stays on the spacing grid", () => {
+  it("'launch' is the widest LEGAL width: exactly 120000 — launchpad parity", () => {
+    // The live band was raised to 120000 by the 2026-08-15 setRangeWidthBand upgrade (verified on
+    // chain: maxRangeWidth()==120000), matching the launchpad's in-the-wild seed shape. If the
+    // preset and this constant ever disagree with the chain again, deposits revert on-chain.
     for (const side of ["token0", "token1"] as OneSidedSide[]) {
       const r = computeOneSidedRange({ side, currentTick: LIVE_TICK, tickSpacing: 60, preset: "launch" });
       expect(r.tickUpper - r.tickLower).toBe(MAX_RANGE_WIDTH);
-      expect(r.tickUpper - r.tickLower).toBe(60000);
+      expect(r.tickUpper - r.tickLower).toBe(120000);
     }
   });
 
@@ -134,9 +135,9 @@ describe("ATTACK: width clamps to the LIVE band [120, 60000] and stays on the sp
     expect(r.tickUpper - r.tickLower).toBe(120);
   });
 
-  it("custom width above the maximum clamps DOWN to 60000", () => {
-    const r = computeOneSidedRange({ side: "token1", currentTick: LIVE_TICK, tickSpacing: 60, preset: { widthTicks: 100000 } });
-    expect(r.tickUpper - r.tickLower).toBe(60000);
+  it("custom width above the maximum clamps DOWN to 120000", () => {
+    const r = computeOneSidedRange({ side: "token1", currentTick: LIVE_TICK, tickSpacing: 60, preset: { widthTicks: 200000 } });
+    expect(r.tickUpper - r.tickLower).toBe(120000);
   });
 
   it("custom widths land on the spacing grid inside the band", () => {
@@ -145,6 +146,7 @@ describe("ATTACK: width clamps to the LIVE band [120, 60000] and stays on the sp
       [150, 180],
       [1000, 1020],
       [59990, 60000],
+      [119990, 120000],
     ] as const) {
       const r = computeOneSidedRange({ side: "token0", currentTick: LIVE_TICK, tickSpacing: 60, preset: { widthTicks: w } });
       expect(r.tickUpper - r.tickLower).toBe(expected);
@@ -152,9 +154,9 @@ describe("ATTACK: width clamps to the LIVE band [120, 60000] and stays on the sp
     }
   });
 
-  it("every produced width is inside [120, 60000], a spacing multiple, lower < upper", () => {
+  it("every produced width is inside [120, 120000], a spacing multiple, lower < upper", () => {
     for (const s of [1, 10, 60, 200]) {
-      for (const preset of ["launch", "tight", { widthTicks: 137 }, { widthTicks: 59999 }] as const) {
+      for (const preset of ["launch", "tight", { widthTicks: 137 }, { widthTicks: 119999 }] as const) {
         for (const side of ["token0", "token1"] as OneSidedSide[]) {
           const r = computeOneSidedRange({ side, currentTick: LIVE_TICK, tickSpacing: s, preset });
           const w = r.tickUpper - r.tickLower;
@@ -169,7 +171,7 @@ describe("ATTACK: width clamps to the LIVE band [120, 60000] and stays on the sp
 
   it("a spacing that cannot produce any legal width throws instead of shipping garbage", () => {
     expect(() =>
-      computeOneSidedRange({ side: "token0", currentTick: 0, tickSpacing: 61000, preset: "launch" }),
+      computeOneSidedRange({ side: "token0", currentTick: 0, tickSpacing: 121000, preset: "launch" }),
     ).toThrow();
   });
 });
