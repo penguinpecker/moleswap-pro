@@ -10,8 +10,9 @@
  * That indirection is the product; see upstreams.ts for why it matters.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { MAX_BODY_BYTES, proxyJsonRpc, requestCost } from "@/lib/rpc/proxy";
+import { flush, record, shouldFlush, summarise } from "@/lib/rpc/metrics";
 import { arcUpstreams } from "@/lib/rpc/upstreams";
 import { checkRpcRateLimit } from "@/lib/rpc/rate-limit";
 import {
@@ -136,6 +137,25 @@ export async function POST(req: NextRequest) {
   }
 
   const result = await proxyJsonRpc({ rawBody, upstreams: arcUpstreams() });
+
+  /*
+   * Counting happens AFTER the wallet has its answer. `after()` defers the work until the
+   * response is sent, and everything inside is best-effort: a metrics failure must never
+   * turn into a failed swap. Only the method name and whether an error came back are read —
+   * never `params`, which is where the user's addresses live.
+   */
+  after(async () => {
+    try {
+      const parsed = JSON.parse(rawBody);
+      record(summarise(Array.isArray(parsed) ? parsed : [parsed], result.body), clientIp(req));
+      // MUST be awaited, not fired and forgotten: `after` keeps the function alive only for
+      // as long as the promise it is given. A floating flush() is torn down mid-fetch and
+      // every counter in that buffer is lost — silently, since flush swallows its own errors.
+      if (shouldFlush()) await flush();
+    } catch {
+      /* unparseable request bodies are already rejected upstream; nothing to count */
+    }
+  });
 
   return new NextResponse(result.body || null, {
     status: result.status,
