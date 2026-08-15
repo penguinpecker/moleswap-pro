@@ -1,8 +1,69 @@
 import { describe, it, expect } from "vitest";
 import { NextRequest } from "next/server";
+import { FetchRequest } from "ethers";
+import { request as httpsRequest } from "node:https";
+import { gunzipSync } from "node:zlib";
 import { GET as quoteGET } from "@/app/api/v1/quote/route";
 import { POST as swapPOST } from "@/app/api/v1/tx/swap/route";
 import { POST as addLiqPOST } from "@/app/api/v1/tx/add-liquidity/route";
+
+/**
+ * Let ethers reach the live RPC from inside vitest's jsdom environment.
+ *
+ * ethers' built-in node transport collects node-realm Buffers, but the ethers module in these
+ * tests is instantiated in the jsdom realm, whose Uint8Array is a DIFFERENT class — so every
+ * response fails isBytesLike ("invalid BytesLike value") and live reads 503. This getUrl override
+ * does the same HTTP over node:https but hands ethers a Uint8Array built in the test realm.
+ * (No accept-encoding is sent, so the body needs no decompression.) Registration is per test
+ * file — vitest isolates module registries — and only affects requests that would otherwise
+ * have failed on the realm mismatch.
+ */
+FetchRequest.registerGetUrl(async (req: any) => {
+  const url = new URL(req.url);
+  // ethers advertises accept-encoding: gzip (allowGzip) but its OWN transport is what would have
+  // decompressed the body — this one hands ethers the raw bytes, so never ask for gzip.
+  const reqHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers as Record<string, string>)) {
+    if (k.toLowerCase() !== "accept-encoding") reqHeaders[k] = v;
+  }
+  return await new Promise<any>((resolve, reject) => {
+    const r = httpsRequest(
+      {
+        hostname: url.hostname,
+        port: url.port || 443,
+        path: `${url.pathname}${url.search}`,
+        method: req.method,
+        headers: reqHeaders,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          let raw = Buffer.concat(chunks);
+          const headers: Record<string, string> = {};
+          for (const [k, v] of Object.entries(res.headers)) {
+            headers[k] = Array.isArray(v) ? v.join(", ") : String(v ?? "");
+          }
+          if ((headers["content-encoding"] || "").includes("gzip")) {
+            raw = gunzipSync(raw); // defensive — should not happen without accept-encoding
+            delete headers["content-encoding"];
+          }
+          const body = new Uint8Array(raw.length); // test-realm Uint8Array — the whole point
+          body.set(raw);
+          resolve({
+            statusCode: res.statusCode || 0,
+            statusMessage: res.statusMessage || "",
+            headers,
+            body,
+          });
+        });
+        res.on("error", reject);
+      },
+    );
+    r.on("error", reject);
+    if (req.body) r.end(Buffer.from(req.body)); else r.end();
+  });
+});
 
 const WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
 const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
@@ -106,10 +167,23 @@ describe("/api/v1/tx/add-liquidity validation", () => {
     expect(r.status).toBe(400);
     expect((await r.json()).error).toMatch(/STRING in wei/);
   });
-  it("400 on a zero leg, pointing at the one-sided zap instead", async () => {
+  it("400 on a zero leg WITHOUT range params, explaining the one-sided contract", async () => {
     const r = await addLiq({ ...OK_BODY, amount1Desired: "0" });
     expect(r.status).toBe(400);
-    expect((await r.json()).error).toMatch(/zapOpen/);
+    const j = await r.json();
+    // The refusal must teach the caller how to make the same request valid.
+    expect(j.error).toMatch(/ONE-SIDED/i);
+    expect(j.error).toMatch(/tickLower/);
+    expect(j.error).toMatch(/preset/);
+  });
+  it("400 when both legs are zero, even with a preset", async () => {
+    const r = await addLiq({ ...OK_BODY, amount0Desired: "0", amount1Desired: "0", preset: "tight" });
+    expect(r.status).toBe(400);
+  });
+  it("400 on a malformed preset with a zero leg", async () => {
+    const r = await addLiq({ ...OK_BODY, amount1Desired: "0", preset: "wide" });
+    expect(r.status).toBe(400);
+    expect((await r.json()).error).toMatch(/preset/);
   });
   it("400 on a fee tier that is not the live dynamic-fee pool", async () => {
     const r = await addLiq({ ...OK_BODY, fee: 3000 });
@@ -127,7 +201,66 @@ describe("/api/v1/tx/add-liquidity validation", () => {
     const r = await addLiq({ ...OK_BODY, slippageBps: 10001 });
     expect(r.status).toBe(400);
   });
-  // NOTE: the happy path (and the reversed-leg-order path) needs a live eth_call for slot0 and the
-  // vault's range bounds, so it is exercised out-of-band rather than pinned here — this file stays
-  // RPC-free on purpose.
+  // NOTE: the TWO-SIDED happy path (and the reversed-leg-order path) needs a live eth_call for slot0
+  // and the vault's range bounds, so it is exercised out-of-band rather than pinned here.
+});
+
+// ONE-SIDED deposits: a zero leg + a preset (or explicit ticks) builds a real open() whose off-side
+// cap is 0. These need the live tick (the range is placed relative to spot), so they do one
+// eth_call each against the mainnet RPC — using a preset keeps them deterministic wherever the
+// tick happens to be. ethers reads over node http(s), so the jsdom fetch mock does not interfere.
+const VAULT_ADDR = "0x674625B6E6a2614ef6e247af099BEA2e65e1536A".toLowerCase();
+const APPROVE_SELECTOR = /^0x095ea7b3/;
+
+describe("/api/v1/tx/add-liquidity one-sided deposits", () => {
+  it("zero token1 leg + preset → one-sided token0 (WETH) open ABOVE spot, off-side cap 0", async () => {
+    const r = await addLiq({ ...OK_BODY, amount1Desired: "0", preset: "tight" });
+    expect(r.status).toBe(200);
+    const j = await r.json();
+    expect(j.data.depositMode).toBe("one-sided");
+    expect(j.data.side).toBe("token0");
+    expect(j.data.depositToken.address.toLowerCase()).toBe(WETH.toLowerCase());
+    // THE one-sided guarantee: the off side's cap is 0 and the range is strictly above spot.
+    expect(j.data.amount1Max).toBe("0");
+    expect(j.data.tickLower).toBeGreaterThan(j.data.currentTick);
+    // width inside the live band, ticks on the 60 spacing
+    const width = j.data.tickUpper - j.data.tickLower;
+    expect(width).toBeGreaterThanOrEqual(120);
+    expect(width).toBeLessThanOrEqual(60000);
+    expect(Math.abs(j.data.tickLower % 60)).toBe(0); // abs: negative ticks give -0
+    expect(Math.abs(j.data.tickUpper % 60)).toBe(0);
+    // exactly ONE approval (the deposit token), then the open() against the vault
+    const approvals = j.data.transactions.filter((t: any) => APPROVE_SELECTOR.test(t.data));
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].to.toLowerCase()).toBe(WETH.toLowerCase());
+    const open = j.data.transactions[j.data.transactions.length - 1];
+    expect(open.to.toLowerCase()).toBe(VAULT_ADDR);
+  }, 30_000);
+
+  it("zero token0 leg + preset → one-sided token1 (USDG) open BELOW spot, off-side cap 0", async () => {
+    const r = await addLiq({ ...OK_BODY, amount0Desired: "0", preset: "launch" });
+    expect(r.status).toBe(200);
+    const j = await r.json();
+    expect(j.data.depositMode).toBe("one-sided");
+    expect(j.data.side).toBe("token1");
+    expect(j.data.depositToken.address.toLowerCase()).toBe(USDG.toLowerCase());
+    expect(j.data.amount0Max).toBe("0");
+    expect(j.data.tickUpper).toBeLessThanOrEqual(j.data.currentTick);
+    const approvals = j.data.transactions.filter((t: any) => APPROVE_SELECTOR.test(t.data));
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].to.toLowerCase()).toBe(USDG.toLowerCase());
+  }, 30_000);
+
+  it("explicit ticks on the WRONG side of spot are refused, not nudged across", async () => {
+    // A token0 (above-spot) deposit with a range far BELOW any plausible spot tick: the route must
+    // 400 with the side rule spelled out, never "fix" the range into a two-sided pull.
+    const r = await addLiq({
+      ...OK_BODY,
+      amount1Desired: "0",
+      tickLower: -886800,
+      tickUpper: -886500,
+    });
+    expect(r.status).toBe(400);
+    expect((await r.json()).error).toMatch(/ABOVE the current tick/);
+  }, 30_000);
 });

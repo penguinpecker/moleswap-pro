@@ -19,6 +19,17 @@ import {
 import { ethers } from "ethers";
 import { createClient } from "@/lib/supabase/client";
 import { MoleEngine } from "./MoleEngine";
+// One-sided deposit option in the add-liquidity modal: range/width math comes from the shared
+// singleSided module (the same one lib/chain/amm.addLiquidityOneSided signs with) — never re-derived.
+import { LIVE_POOL_KEY } from "@/lib/mole/chain";
+import {
+  computeOneSidedRange,
+  MIN_RANGE_WIDTH,
+  MAX_RANGE_WIDTH,
+  TIGHT_WIDTH_TICKS,
+  type OneSidedPreset,
+  type OneSidedSide,
+} from "@/lib/mole/singleSided";
 
 /**
  * Real 24h volume + fees per pool from the swap-event indexer (mp_pool_volume_24h, read with the anon
@@ -975,7 +986,7 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
     try {
       // ALM positions exit via the verified-safe withdrawAll(id) — reads liquidity inside the call.
       const { almWithdraw } = await import("@/lib/mole/vault");
-      const result = await almWithdraw(pos.tokenId);
+      const result = await almWithdraw(String(pos.tokenId));
       setTxMsg(result.success ? "Position exited!" : (result.error || "Failed"));
       setTimeout(() => { setTxMsg(null); onRefresh(); }, 3000);
     } catch (err: any) {
@@ -1268,6 +1279,11 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   const [rangeMode, setRangeMode] = useState<"full" | "custom">("full");
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
+  // ── Deposit mode: "both" (default, unchanged behaviour) or "one" (single-token, range beyond spot).
+  const [depositMode, setDepositMode] = useState<"both" | "one">("both");
+  const [oneSide, setOneSide] = useState<0 | 1>(0);
+  const [oneSidedPresetKey, setOneSidedPresetKey] = useState<"launch" | "tight" | "custom">("launch");
+  const [customWidth, setCustomWidth] = useState("6000");
 
   useEffect(() => {
     if (!address) return;
@@ -1327,6 +1343,72 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   const hasInsufficientBalance = insufficientBalance0 || insufficientBalance1;
   const canSubmit = amount0 && amount1 && Number(amount0) > 0 && Number(amount1) > 0 && !hasInsufficientBalance && !loading;
 
+  // ── One-sided deposit derivations ────────────────────────────────────────────────────────────
+  // Only the live WETH/USDG v4 pool is whitelisted by MolePositions, so one-sided opens are gated
+  // to it — offering the toggle on a pool where open() would revert wastes the user's gas.
+  const isLivePool =
+    pool.token0.address.toLowerCase() === LIVE_POOL_KEY.currency0.toLowerCase() &&
+    pool.token1.address.toLowerCase() === LIVE_POOL_KEY.currency1.toLowerCase();
+  const oneSidedSide: OneSidedSide = oneSide === 0 ? "token0" : "token1";
+  const oneSidedPreset: OneSidedPreset =
+    oneSidedPresetKey === "custom"
+      ? { widthTicks: Math.max(1, Math.floor(Number(customWidth) || 0)) }
+      : oneSidedPresetKey;
+  // Preview only — the signing path (addLiquidityOneSided) recomputes from a fresh tick and
+  // re-asserts the range is strictly one-sided immediately before sending.
+  const oneSidedRange = useMemo(() => {
+    if (depositMode !== "one" || !isLivePool) return null;
+    try {
+      return computeOneSidedRange({
+        side: oneSidedSide,
+        currentTick,
+        tickSpacing: LIVE_POOL_KEY.tickSpacing,
+        preset: oneSidedPreset,
+      });
+    } catch {
+      return null;
+    }
+    // oneSidedPreset is rebuilt each render; its inputs are the real deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depositMode, isLivePool, oneSidedSide, currentTick, oneSidedPresetKey, customWidth]);
+  const off0 = depositMode === "one" && oneSide !== 0; // token0 input greyed out
+  const off1 = depositMode === "one" && oneSide !== 1; // token1 input greyed out
+  const oneAmt = oneSide === 0 ? amount0 : amount1;
+  const oneTok = oneSide === 0 ? pool.token0 : pool.token1;
+  const otherTok = oneSide === 0 ? pool.token1 : pool.token0;
+  const oneInsufficient = oneSide === 0 ? insufficientBalance0 : insufficientBalance1;
+  const canSubmitOneSided =
+    depositMode === "one" && isLivePool && !!oneAmt && Number(oneAmt) > 0 &&
+    !oneInsufficient && !loading && !!oneSidedRange;
+
+  const handleAddLiquidityOneSided = async () => {
+    if (!address || !canSubmitOneSided) return;
+    setLoading(true); setTxError(null); setTxHash(null); setStepLabel("Preparing...");
+    try {
+      const { addLiquidityOneSided } = await import("@/lib/chain/amm");
+      const amountWei = ethers.parseUnits(oneAmt, oneTok.decimals).toString();
+      const result = await addLiquidityOneSided({
+        chainClient,
+        side: oneSidedSide,
+        amount: amountWei,
+        preset: oneSidedPreset,
+        onStep: (_step: number, label: string, status: string) => { setStepLabel(label); if (status === "error") setTxError(label); },
+      });
+      if (result.success) { setTxHash(result.txHash || null); setTxDone(true); setAmount0(""); setAmount1(""); }
+      else setTxError(result.error || "Transaction failed");
+    } catch (err: any) {
+      setTxError((err?.message || "Transaction failed").slice(0, 150));
+    } finally { setLoading(false); setStepLabel(""); }
+  };
+
+  const getOneSidedButtonLabel = () => {
+    if (loading) return stepLabel || "PROCESSING...";
+    if (oneInsufficient) return `GET ${oneTok.symbol} →`;
+    if (!oneAmt || Number(oneAmt) <= 0) return "ENTER AMOUNT";
+    if (!oneSidedRange) return "RANGE UNAVAILABLE";
+    return "ADD ONE-SIDED LIQUIDITY";
+  };
+
   /**
    * priceToTick: Math.log is -Infinity at 0 and NaN for negatives, which
    * would propagate as bad ticks and silently revert the position mint.
@@ -1364,7 +1446,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
       const amount1Wei = ethers.parseUnits(amount1, pool.token1.decimals).toString();
       const result = await addLiquidity({
         chainClient, token0: pool.pool.token0, token1: pool.pool.token1, fee: pool.fee,
-        amount0Desired: amount0Wei, amount1Desired: amount1Wei, recipient: address,
+        amount0: amount0Wei, amount1: amount1Wei, recipient: address,
         tickLower: selectedTickLower, tickUpper: selectedTickUpper,
         onStep: (_step: any, label: string, status: string) => { setStepLabel(label); if (status === "error") setTxError(label); },
       });
@@ -1496,60 +1578,157 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                     − Remove liquidity
                   </button>
                 </div>
+                {/* Direct one-token deposit (MolePositions.open with a beyond-spot range) — the
+                    single-sided OPTION this feature adds. Only offered on the live whitelisted
+                    pool; everything else stays vault-managed exactly as before. */}
+                {isLivePool && (
+                  <div className="act-row" style={{ marginTop: 8 }}>
+                    <button
+                      className="act-btn add"
+                      data-testid="one-token-add"
+                      onClick={() => { setDepositMode("one"); setActionTab("add"); }}
+                    >
+                      ◈ One-token add
+                    </button>
+                  </div>
+                )}
                 <p className="d" style={{ marginTop: 12 }}>
                   WETH/USDG liquidity is auto-managed by the MoleSwap ALM vault — deposit or exit there.
                 </p>
               </>
             ) : (
-              /* Unreachable add-liquidity form (nothing sets actionTab to "add") — logic kept
-                 as-is; not ported to Burrow beyond compiling without the pixel-art assets. */
+              /* Add-liquidity form — reached via the live pool's "One-token add" button. The
+                 "both tokens" mode remains the fail-closed ALM stub; the one-token mode signs
+                 through lib/chain/amm.addLiquidityOneSided. */
               <div className="overflow-hidden rounded-lg border-3 border-[#3A1F0E] bg-gradient-to-b from-[#52301A] to-[#4A2C15]">
                 <div className="flex items-center justify-between border-b-2 border-[#3A1F0E] bg-black/20 px-4 py-3">
                   <span className="font-display text-xl tracking-wider text-white">+ ADD LIQUIDITY</span>
                   <button onClick={() => { setActionTab(null); setAmount0(""); setAmount1(""); }} className="font-display cursor-pointer text-lg text-gray-300 hover:text-white">✕</button>
                 </div>
                 <div className="px-4 py-3">
+                  {/* Deposit mode — Both tokens (default, unchanged) / One token (range beyond spot).
+                      Same pattern as create-pool. One-sided is only offered on the whitelisted
+                      WETH/USDG v4 pool, the only pool MolePositions.open accepts. */}
+                  {isLivePool && (
+                    <div className="relative mb-2 rounded px-3 py-2.5">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="font-display text-lg text-gray-200">DEPOSIT MODE</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button onClick={() => setDepositMode("both")}
+                          className={`font-display cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
+                            depositMode === "both" ? "border-[#6DBB3E] bg-[#6DBB3E]/10 text-[#6DBB3E]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
+                          }`}>BOTH TOKENS</button>
+                        <button onClick={() => setDepositMode("one")}
+                          className={`font-display cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
+                            depositMode === "one" ? "border-[#FFD47A] bg-[#FFD47A]/10 text-[#FFD47A]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
+                          }`}>ONE TOKEN</button>
+                      </div>
+                      {depositMode === "one" && (
+                        <>
+                          {/* Which token funds the deposit */}
+                          <div className="mt-2 grid grid-cols-2 gap-2">
+                            {([0, 1] as const).map((i) => (
+                              <button key={i} onClick={() => setOneSide(i)}
+                                className={`font-display cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
+                                  oneSide === i ? "border-[#FFD47A] bg-[#FFD47A]/10 text-[#FFD47A]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
+                                }`}>{(i === 0 ? pool.token0 : pool.token1).symbol} ONLY</button>
+                            ))}
+                          </div>
+                          {/* Range presets */}
+                          <div className="mt-2 grid grid-cols-3 gap-2">
+                            {([["launch", "LAUNCH"], ["tight", "TIGHT"], ["custom", "CUSTOM"]] as const).map(([k, l]) => (
+                              <button key={k} onClick={() => setOneSidedPresetKey(k)}
+                                className={`font-display cursor-pointer rounded-lg border-2 px-3 py-2 text-center text-sm tracking-wider transition-all ${
+                                  oneSidedPresetKey === k ? "border-[#FFD47A] bg-[#FFD47A]/10 text-[#FFD47A]" : "border-[#3A1F0E] text-gray-300 hover:text-white"
+                                }`}>{l}</button>
+                            ))}
+                          </div>
+                          {oneSidedPresetKey === "custom" && (
+                            <div className="mt-2 rounded border-2 border-[#3A1F0E] bg-black/20 px-3 py-2">
+                              <div className="font-display mb-1 text-sm text-gray-300">RANGE WIDTH (TICKS)</div>
+                              <input type="text" value={customWidth} onChange={e => setCustomWidth(e.target.value.replace(/[^0-9]/g, ""))}
+                                placeholder={String(TIGHT_WIDTH_TICKS)}
+                                className="font-display w-full bg-transparent text-lg text-[#FFD47A] placeholder:text-gray-500 focus:outline-none" />
+                              <div className="font-display text-sm text-gray-400">{MIN_RANGE_WIDTH}–{MAX_RANGE_WIDTH} ticks, snapped to spacing</div>
+                            </div>
+                          )}
+                          {/* Which side of spot the range sits on, and what that means */}
+                          <div className="font-display mt-2 text-sm text-gray-300">
+                            {oneSide === 0
+                              ? `Deposits ${oneTok.symbol} only. Your range sits entirely ABOVE the current price — it earns nothing until the price rises into it, then sells ${oneTok.symbol} into ${otherTok.symbol}. None of your ${otherTok.symbol} is pulled.`
+                              : `Deposits ${oneTok.symbol} only. Your range sits entirely BELOW the current price — it earns nothing until the price falls into it, then buys ${otherTok.symbol} with ${oneTok.symbol}. None of your ${otherTok.symbol} is pulled.`}
+                            {oneSidedRange
+                              ? ` Range: ticks ${oneSidedRange.tickLower} to ${oneSidedRange.tickUpper}.`
+                              : " No legal range fits here right now."}
+                          </div>
+                          {oneSidedRange && (
+                            <div className="mt-2">
+                              <LiquidityGraph currentTick={currentTick} tickLower={oneSidedRange.tickLower} tickUpper={oneSidedRange.tickUpper} height={36} price={price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   {/* Token 0 input */}
-                  <div className="relative mb-2 rounded px-3 py-2.5">
+                  <div className="relative mb-2 rounded px-3 py-2.5" style={off0 ? { opacity: 0.45 } : undefined}>
                     <div className="mb-1 flex justify-between">
                       <span className="font-display text-lg text-gray-200">{pool.token0.symbol}</span>
-                      <span className={`font-display text-lg ${insufficientBalance0 ? "text-red-400" : "text-gray-200"}`}>
+                      <span className={`font-display text-lg ${insufficientBalance0 && !off0 ? "text-red-400" : "text-gray-200"}`}>
                         BAL: {balance0 !== null ? Number(balance0).toFixed(4) : "..."}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
                       <TokenIcon token={pool.token0} size={28} />
-                      <input type="text" value={amount0} onFocus={() => setInputFocused(0)} onChange={e => updateAmount1FromAmount0(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0"
+                      <input type="text" value={off0 ? "" : amount0} disabled={off0} onFocus={() => setInputFocused(0)}
+                        onChange={e => {
+                          const v = e.target.value.replace(/[^0-9.]/g, "");
+                          // One-sided: no paired auto-fill — only the deposit token's amount matters.
+                          if (depositMode === "one") setAmount0(v); else updateAmount1FromAmount0(v);
+                        }} placeholder="0.0"
                         className="font-display w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
                       {[{ l: "25%", v: 0.25 }, { l: "50%", v: 0.5 }, { l: "MAX", v: 1 }].map(p => (
-                        <button key={p.l} onClick={() => setPercentage0(p.v)} className="font-display text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
+                        <button key={p.l} disabled={off0} onClick={() => {
+                          if (depositMode === "one") { if (balance0) setAmount0((Number(balance0) * p.v).toFixed(Math.min(pool.token0.decimals, 8))); }
+                          else setPercentage0(p.v);
+                        }} className="font-display text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm disabled:cursor-not-allowed">{p.l}</button>
                       ))}
                     </div>
-                    {insufficientBalance0 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-display text-xs text-red-400">INSUFFICIENT {pool.token0.symbol} BALANCE</span></div>}
+                    {insufficientBalance0 && !off0 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-display text-xs text-red-400">INSUFFICIENT {pool.token0.symbol} BALANCE</span></div>}
                   </div>
 
                   <div className="my-1 flex justify-center"><span className="font-display text-2xl text-gray-300">+</span></div>
 
                   {/* Token 1 input */}
-                  <div className="relative mb-3 rounded px-3 py-2.5">
+                  <div className="relative mb-3 rounded px-3 py-2.5" style={off1 ? { opacity: 0.45 } : undefined}>
                     <div className="mb-1 flex justify-between">
                       <span className="font-display text-lg text-gray-200">{pool.token1.symbol}</span>
-                      <span className={`font-display text-lg ${insufficientBalance1 ? "text-red-400" : "text-gray-200"}`}>
+                      <span className={`font-display text-lg ${insufficientBalance1 && !off1 ? "text-red-400" : "text-gray-200"}`}>
                         BAL: {balance1 !== null ? Number(balance1).toFixed(4) : "..."}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
                       <TokenIcon token={pool.token1} size={28} />
-                      <input type="text" value={amount1} onFocus={() => setInputFocused(1)} onChange={e => updateAmount0FromAmount1(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0"
+                      <input type="text" value={off1 ? "" : amount1} disabled={off1} onFocus={() => setInputFocused(1)}
+                        onChange={e => {
+                          const v = e.target.value.replace(/[^0-9.]/g, "");
+                          if (depositMode === "one") setAmount1(v); else updateAmount0FromAmount1(v);
+                        }} placeholder="0.0"
                         className="font-display w-full flex-1 bg-transparent text-2xl tracking-wider text-white placeholder:text-gray-600 focus:outline-none" />
                       {[{ l: "25%", v: 0.25 }, { l: "50%", v: 0.5 }, { l: "MAX", v: 1 }].map(p => (
-                        <button key={p.l} onClick={() => setPercentage1(p.v)} className="font-display text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm">{p.l}</button>
+                        <button key={p.l} disabled={off1} onClick={() => {
+                          if (depositMode === "one") { if (balance1) setAmount1((Number(balance1) * p.v).toFixed(Math.min(pool.token1.decimals, 8))); }
+                          else setPercentage1(p.v);
+                        }} className="font-display text-peach-500 border-ground-button-border bg-ground-button-border cursor-pointer rounded-sm border px-2 py-1 text-sm disabled:cursor-not-allowed">{p.l}</button>
                       ))}
                     </div>
-                    {insufficientBalance1 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-display text-xs text-red-400">INSUFFICIENT {pool.token1.symbol} BALANCE</span></div>}
+                    {insufficientBalance1 && !off1 && <div className="mt-1 flex items-center gap-1"><AlertTriangle className="h-3 w-3 text-red-400" /><span className="font-display text-xs text-red-400">INSUFFICIENT {pool.token1.symbol} BALANCE</span></div>}
                   </div>
 
-                  {/* Range selector */}
+                  {/* Range selector — both-tokens mode only; a one-sided range is set by its preset. */}
+                  {depositMode === "both" && (
                   <div className="relative mb-3 rounded px-3 py-2.5">
                     <div className="mb-2 flex items-center justify-between">
                       <span className="font-display text-lg text-gray-200">SELECT RANGE</span>
@@ -1590,14 +1769,20 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                     </div>
                     <LiquidityGraph currentTick={currentTick} tickLower={selectedTickLower} tickUpper={selectedTickUpper} height={36} price={price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
                   </div>
+                  )}
 
                   {/* Info rows */}
                   <div className="relative mb-3 rounded px-3 py-2">
                     {[
                       ["PRICE", `1 ${pool.token0.symbol} = ${priceUsable ? price.toFixed(4) : "N/A"} ${pool.token1.symbol}`, "text-peach-300"],
                       ["FEE TIER", feeLabel(pool.fee), "text-peach-300"],
-                      ["RANGE", rangeMode === "full" ? "FULL RANGE" : `${minPrice || "0"} — ${maxPrice || "∞"} ${pool.token1.symbol}`, rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"],
-                      ["SLIPPAGE", "0.5%", "text-gray-200"],
+                      ["DEPOSIT", depositMode === "one" ? `${oneTok.symbol} ONLY (${oneSide === 0 ? "ABOVE" : "BELOW"} SPOT)` : "BOTH TOKENS", depositMode === "one" ? "text-[#FFD47A]" : "text-[#6DBB3E]"],
+                      ["RANGE",
+                        depositMode === "one"
+                          ? (oneSidedRange ? `TICKS ${oneSidedRange.tickLower} → ${oneSidedRange.tickUpper}` : "—")
+                          : rangeMode === "full" ? "FULL RANGE" : `${minPrice || "0"} — ${maxPrice || "∞"} ${pool.token1.symbol}`,
+                        depositMode === "one" ? "text-[#FFD47A]" : rangeMode === "full" ? "text-[#6DBB3E]" : "text-[#FFD47A]"],
+                      ["SLIPPAGE", depositMode === "one" ? "N/A (NO SWAP)" : "0.5%", "text-gray-200"],
                       ["ON-CHAIN", pool.active ? "LIVE ✓" : "NO LIQUIDITY", pool.active ? "text-[#6DBB3E]" : "text-red-400"],
                     ].map(([k, v, c]) => (
                       <div key={k} className="flex justify-between py-0.5">
@@ -1608,14 +1793,18 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                   </div>
 
                   <button
-                    onClick={missingToken ? () => router.push(getMissingTokenSwapUrl(missingToken)) : handleAddLiquidity}
-                    disabled={!missingToken && !canSubmit}
+                    onClick={
+                      depositMode === "one"
+                        ? (oneInsufficient ? () => router.push(getMissingTokenSwapUrl(oneTok)) : handleAddLiquidityOneSided)
+                        : (missingToken ? () => router.push(getMissingTokenSwapUrl(missingToken)) : handleAddLiquidity)
+                    }
+                    disabled={depositMode === "one" ? (!oneInsufficient && !canSubmitOneSided) : (!missingToken && !canSubmit)}
                     className={`font-display w-full cursor-pointer rounded-lg px-6 py-3 text-xl tracking-wider transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 ${
-                      missingToken
+                      (depositMode === "one" ? oneInsufficient : missingToken)
                         ? "bg-peach-500 text-black shadow-[0px_-4px_0px_0px_#C97E00_inset,0px_4px_0px_0px_rgba(255,212,122,0.6)_inset]"
                         : "bg-[#6DBB3E] text-white shadow-[0px_-4px_0px_0px_#4A8B29_inset,0px_4px_0px_0px_rgba(255,255,255,0.3)_inset]"
                     }`}>
-                    {getButtonLabel()}
+                    {depositMode === "one" ? getOneSidedButtonLabel() : getButtonLabel()}
                   </button>
                 </div>
               </div>

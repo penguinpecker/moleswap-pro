@@ -54,6 +54,19 @@ import {
   MIN_SLIPPAGE_BPS,
   getSlippageBps,
 } from "@/lib/settings/swapSettings";
+// One-sided ("deposit one token") liquidity for the live WETH/USDG v4 pool. ALL range/liquidity
+// math lives in lib/mole/singleSided — this file only wires wallet plumbing around it.
+import { molePositionsAbi } from "@/lib/mole/abi";
+import { MOLE_ADDRESSES, LIVE_POOL_KEY, LIVE_POOL_ID } from "@/lib/mole/chain";
+import {
+  computeOneSidedRange,
+  liquidityForOneSidedAmount,
+  buildOneSidedOpenArgs,
+  assertStrictlyOneSided,
+  loadPoolTickState,
+  type OneSidedSide,
+  type OneSidedPreset,
+} from "@/lib/mole/singleSided";
 
 /* ─── Re-exports (unchanged import surface) ──────────────────────────────── */
 export {
@@ -103,6 +116,10 @@ function resolveSlippageBps(explicit?: number): number {
 export interface SwapQuote {
   amountIn: string;
   amountOut: string;
+  /** Pre-fee output and the fee taken from it — carried so the review screen can show a breakdown. */
+  grossAmountOut?: string;
+  minAmountOut?: string;
+  feeBps?: number;
   tokenIn: TokenInfo;
   tokenOut: TokenInfo;
   fee: number;
@@ -616,6 +633,140 @@ export async function getUserPositions(_userAddress: string): Promise<LiquidityP
 }
 export async function addLiquidity(_params: AddLiquidityParams): Promise<{ txHash: string; success: boolean; error?: string }> {
   return { txHash: "", success: false, error: "Liquidity provisioning is managed by the MoleSwap ALM." };
+}
+
+/**
+ * addLiquidityOneSided — deposit ONE token into the live WETH/USDG v4 pool via MolePositions.open,
+ * with the whole range placed strictly beyond the current tick (side "token0" = WETH, range ABOVE
+ * spot; side "token1" = USDG, range BELOW spot — Uniswap v4 semantics). The other side's amountMax
+ * is 0, so if the price moved into the range the open REVERTS instead of quietly pulling both
+ * tokens. Range construction, liquidity sizing and the open() argument tuple all come from
+ * lib/mole/singleSided; nothing is re-derived here.
+ *
+ * Sits BESIDE addLiquidity (the fail-closed two-sided stub), which is deliberately untouched.
+ */
+export async function addLiquidityOneSided(params: {
+  chainClient?: any;
+  /** The token the user deposits: "token0" (WETH → range above spot) or "token1" (USDG → below). */
+  side: OneSidedSide;
+  /** Deposit amount as a WEI STRING of the chosen token — a JS number cannot hold wei exactly. */
+  amount: string;
+  /** "launch" (widest legal width, 60000 ticks), "tight" (~300 ticks), or { widthTicks }. */
+  preset?: OneSidedPreset;
+  /** Unix seconds; default now + 30 min. */
+  deadline?: number;
+  onStep?: (stepIdx: number, label: string, status: string) => void;
+}): Promise<{ success: boolean; txHash?: string; error?: string; tickLower?: number; tickUpper?: number }> {
+  const onStep = params.onStep || (() => {});
+  try {
+    const eth = browserEth();
+    if (!eth) return { success: false, error: "No wallet found" };
+    await ensureChain(eth);
+
+    const wallet = createWalletClient({ chain: robinhoodChain, transport: custom(eth) });
+    const pub = publicClient();
+    const [account] = await wallet.getAddresses();
+    if (!account) return { success: false, error: "Wallet not connected" };
+
+    const amount = BigInt(params.amount || "0");
+    if (amount <= 0n) return { success: false, error: "Enter an amount" };
+    const side = params.side;
+    const token = (side === "token0" ? LIVE_POOL_KEY.currency0 : LIVE_POOL_KEY.currency1) as `0x${string}`;
+
+    // Quote-time state: live tick → range strictly beyond spot → liquidity from the single amount.
+    const { currentTick } = await loadPoolTickState(LIVE_POOL_ID);
+    const range = computeOneSidedRange({
+      side,
+      currentTick,
+      tickSpacing: LIVE_POOL_KEY.tickSpacing,
+      preset: params.preset ?? "launch",
+    });
+    const liquidity = liquidityForOneSidedAmount({
+      side,
+      tickLower: range.tickLower,
+      tickUpper: range.tickUpper,
+      amount,
+    });
+    const deadline = BigInt(params.deadline ?? Math.floor(Date.now() / 1000) + 1800);
+    const args = buildOneSidedOpenArgs({ key: LIVE_POOL_KEY, side, range, liquidity, amount, deadline });
+    // The ON side's cap (amount + 1 wei of round-up headroom); the OFF side's cap is 0 by construction.
+    const onSideMax = side === "token0" ? args[4] : args[5];
+
+    // Approve exactly what open() may pull, and only if the standing allowance is short.
+    const allowance = (await pub.readContract({
+      address: token,
+      abi: erc20Abi as any,
+      functionName: "allowance",
+      args: [account, MOLE_ADDRESSES.molePositions],
+    })) as bigint;
+    if (allowance < onSideMax) {
+      onStep(0, "Approve token", "signing");
+      const ah = await wallet.writeContract({
+        address: token,
+        abi: erc20Abi as any,
+        functionName: "approve",
+        args: [MOLE_ADDRESSES.molePositions, onSideMax],
+        account,
+        chain: robinhoodChain,
+      });
+      const arcpt = await pub.waitForTransactionReceipt({ hash: ah });
+      if (arcpt.status !== "success") return { success: false, txHash: ah, error: "Approval reverted on-chain" };
+      onStep(0, "Approve token", "confirmed");
+    }
+
+    // THE SNAP RULE, re-checked with a FRESH tick right before the send: a price move between quote
+    // and signature must not silently turn this into a two-sided deposit. (Even if this race were
+    // lost, the 0 off-side cap makes the open revert rather than pull the other token.)
+    onStep(1, "Open position", "signing");
+    const fresh = await loadPoolTickState(LIVE_POOL_ID);
+    try {
+      assertStrictlyOneSided(side, fresh.currentTick, range);
+    } catch {
+      onStep(1, "Open position", "error");
+      return {
+        success: false,
+        error: "Price moved into your range before the deposit was sent — refresh and try again.",
+      };
+    }
+
+    // Simulate against live state so an obvious revert surfaces BEFORE the user signs and pays gas.
+    try {
+      await pub.simulateContract({
+        address: MOLE_ADDRESSES.molePositions,
+        abi: molePositionsAbi as any,
+        functionName: "open",
+        args: args as any,
+        account,
+      });
+    } catch (simErr) {
+      onStep(1, "Open position", "error");
+      return { success: false, error: getContractErrorMessage(simErr) };
+    }
+
+    const hash = await wallet.writeContract({
+      address: MOLE_ADDRESSES.molePositions,
+      abi: molePositionsAbi as any,
+      functionName: "open",
+      args: args as any,
+      account,
+      chain: robinhoodChain,
+    });
+    // waitForTransactionReceipt does NOT throw on a reverted tx — check status explicitly.
+    const receipt = await pub.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") {
+      onStep(1, "Open position", "error");
+      return {
+        success: false,
+        txHash: hash,
+        error: "Deposit reverted on-chain — the price may have moved into your range. Try again.",
+      };
+    }
+    onStep(1, "Open position", "confirmed");
+    return { success: true, txHash: hash, tickLower: range.tickLower, tickUpper: range.tickUpper };
+  } catch (err) {
+    onStep(1, "Open position", "error");
+    return { success: false, error: getContractErrorMessage(err) };
+  }
 }
 export async function removeLiquidity(_params: RemoveLiquidityParams): Promise<{ txHash: string; success: boolean; error?: string }> {
   return { txHash: "", success: false, error: "Liquidity provisioning is managed by the MoleSwap ALM." };

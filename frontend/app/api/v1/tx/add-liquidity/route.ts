@@ -16,12 +16,23 @@ import {
   formatUnitsDisplay,
 } from "@/lib/mole/format";
 import { getSqrtRatioAtTick, MIN_TICK, MAX_TICK } from "@/lib/aggregator/math/tickMath";
+// One-sided deposits share ONE math module with the browser (lib/mole/singleSided) so the range the
+// UI previews and the range this route encodes can never drift apart. Only the PURE functions are
+// used here — the module's RPC reader is viem-based and this route reads slot0 with ethers itself.
+import {
+  computeOneSidedRange,
+  liquidityForOneSidedAmount,
+  buildOneSidedOpenArgs,
+  assertStrictlyOneSided,
+  type OneSidedPreset,
+  type OneSidedSide,
+} from "@/lib/mole/singleSided";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * POST /api/v1/tx/add-liquidity — build the calldata that adds TWO-SIDED liquidity to the live pool.
+ * POST /api/v1/tx/add-liquidity — build the calldata that adds liquidity to the live pool.
  *
  * There is no user-facing v3 NonfungiblePositionManager on Robinhood Chain, so there is no `mint` to
  * encode. The two-sided entry point that IS deployed is `MolePositions.open(key, tickLower, tickUpper,
@@ -29,6 +40,16 @@ export const dynamic = "force-dynamic";
  * (lib/mole/seedLiquidity.ts, which is client-only; the liquidity math is re-derived here so this
  * server route pulls in no client module). This handler therefore returns real, executable steps:
  * wrap (native input only) → approve × 2 → open.
+ *
+ * ONE-SIDED DEPOSITS. A request with EXACTLY ONE zero amount plus a range — explicit tickLower AND
+ * tickUpper, or a `preset` ("launch" = widest legal 60000-tick width, "tight" ≈ 300 ticks, or
+ * { widthTicks: N }) — is a VALID single-token deposit: the range is placed strictly beyond the
+ * current tick on the deposit token's side (nonzero amount0 → range ABOVE spot, funded by token0
+ * only; nonzero amount1 → range BELOW spot, funded by token1 only — Uniswap v4 semantics), and the
+ * response is ONE approval plus the open(), with the off side's amountMax hard-coded to 0 so a
+ * range that straddles spot REVERTS instead of pulling both tokens. A zero leg WITHOUT a range is
+ * still a 400 — the route will not guess which side of spot you meant. Requests with both legs > 0
+ * behave exactly as before.
  *
  * WHAT THE PUBLISHED PARAMETER TABLE PROMISES THAT THE DEPLOYED CONTRACT CANNOT DO — reported back to
  * the caller in `parameterNotes`, never silently ignored:
@@ -129,6 +150,24 @@ function isInt(n: unknown): n is number {
   return typeof n === "number" && Number.isInteger(n);
 }
 
+/**
+ * Parse the optional one-sided `preset` body field. Accepted shapes:
+ *   "launch" | "tight" | { widthTicks: <positive int> } | <positive int> (shorthand for widthTicks).
+ */
+function parsePreset(raw: unknown): { value?: OneSidedPreset; error?: string } {
+  if (raw === undefined || raw === null) return {};
+  if (raw === "launch" || raw === "tight") return { value: raw };
+  if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return { value: { widthTicks: raw } };
+  if (
+    typeof raw === "object" &&
+    Number.isInteger((raw as any).widthTicks) &&
+    (raw as any).widthTicks > 0
+  ) {
+    return { value: { widthTicks: (raw as any).widthTicks as number } };
+  }
+  return { error: `preset must be "launch", "tight", or { widthTicks: <positive integer> }` };
+}
+
 export async function OPTIONS() {
   return corsPreflightResponse();
 }
@@ -170,11 +209,32 @@ export async function POST(req: NextRequest) {
     if (amt0.error) return apiError(amt0.error, 400);
     const amt1 = parseWei("amount1Desired", amount1Desired);
     if (amt1.error) return apiError(amt1.error, 400);
-    if (amt0.value === BigInt(0) || amt1.value === BigInt(0)) {
+    // Zero legs. Exactly ONE zero amount + a range (explicit ticks or a preset) is a valid ONE-SIDED
+    // deposit, handled below. A zero leg with no range, or two zero legs, is still a 400.
+    const zero0 = amt0.value === BigInt(0);
+    const zero1 = amt1.value === BigInt(0);
+    const oneSidedRequest = zero0 !== zero1;
+    if (zero0 && zero1) {
       return apiError(
-        "Both amount0Desired and amount1Desired must be > 0. A bounded range around the current price " +
-          "needs both legs; for a ONE-sided deposit use MolePositions.zapOpen (the /vault UI), which " +
-          "swaps half of a single token for you.",
+        "Both amount0Desired and amount1Desired are zero — nothing to deposit. Pass both legs for a " +
+          "two-sided open, or exactly one leg plus a range (tickLower + tickUpper, or `preset`) for a " +
+          "one-sided open.",
+        400,
+      );
+    }
+    const preset: { value?: OneSidedPreset; error?: string } = oneSidedRequest
+      ? parsePreset(body?.preset)
+      : {};
+    if (preset.error) return apiError(preset.error, 400);
+    const hasExplicitRange = isInt(tickLowerIn) && isInt(tickUpperIn);
+    if (oneSidedRequest && !hasExplicitRange && preset.value === undefined) {
+      return apiError(
+        "One amount is zero — that is a valid ONE-SIDED deposit, but it needs a range. Pass BOTH " +
+          "tickLower and tickUpper (a range entirely beyond the current tick on the deposit token's " +
+          `side), or a \`preset\`: "launch" (widest allowed width), "tight" (~300 ticks just beyond ` +
+          "spot), or { widthTicks: N }. The deposit token is the one with the nonzero amount: " +
+          "amount0 → the range sits ABOVE the current price, amount1 → BELOW it. With both amounts " +
+          "> 0 this endpoint builds the usual two-sided open.",
         400,
       );
     }
@@ -275,6 +335,238 @@ export async function POST(req: NextRequest) {
         `The WETH/USDG v4 pool (${LIVE_POOL_ID}) is not whitelisted by the vault right now — open() would revert.`,
         409,
       );
+    }
+
+    /* ─────────────────────────────── one-sided deposit path ─────────────────────────────── */
+
+    if (oneSidedRequest) {
+      // The deposit token is the leg with the nonzero amount, in the POOL's currency order
+      // (the caller may have passed token0/token1 in either order; legs are already mapped).
+      const side: OneSidedSide = leg0.amount > BigInt(0) ? "token0" : "token1";
+      const onLeg = side === "token0" ? leg0 : leg1;
+      const onMeta = side === "token0" ? meta0 : meta1;
+      const offMeta = side === "token0" ? meta1 : meta0;
+
+      // The range: from the preset (computed strictly beyond the live tick, snapped, clamped into
+      // the vault's width band), or the caller's explicit ticks (snapped, then REQUIRED to be
+      // strictly one-sided for this side at the live tick — never silently nudged across spot).
+      let osTickLower: number;
+      let osTickUpper: number;
+      try {
+        if (preset.value !== undefined) {
+          const r = computeOneSidedRange({
+            side,
+            currentTick,
+            tickSpacing: TICK_SPACING,
+            preset: preset.value,
+          });
+          osTickLower = r.tickLower;
+          osTickUpper = r.tickUpper;
+        } else {
+          osTickLower = snapToSpacing(tickLowerIn as number);
+          osTickUpper = snapToSpacing(tickUpperIn as number);
+          if (osTickLower >= osTickUpper) return apiError("tickLower must be strictly below tickUpper", 400);
+          const w = osTickUpper - osTickLower;
+          if (w < minRangeWidth || w > maxRangeWidth) {
+            return apiError(
+              `Range width ${w} ticks is outside the vault's bounds [${minRangeWidth}, ${maxRangeWidth}] and ` +
+                "open() would revert with RangeWidthOutOfBounds.",
+              400,
+            );
+          }
+          assertStrictlyOneSided(side, currentTick, { tickLower: osTickLower, tickUpper: osTickUpper });
+        }
+      } catch (e: any) {
+        return apiError(
+          `Not a valid one-sided range for a ${onMeta.symbol} deposit: ${e?.message || "range error"}. ` +
+            (side === "token0"
+              ? `A ${onMeta.symbol} (token0) deposit needs its whole range STRICTLY ABOVE the current tick (${currentTick}).`
+              : `A ${onMeta.symbol} (token1) deposit needs its whole range at or BELOW the current tick (${currentTick}).`) +
+            " Omit tickLower/tickUpper and pass a `preset` to have the range placed for you.",
+          400,
+        );
+      }
+
+      // Liquidity from the single amount — floored, so the pool can never pull more than stated (+1
+      // wei of v4 round-up headroom, which the on-side cap includes).
+      let osLiquidity: bigint;
+      try {
+        osLiquidity = liquidityForOneSidedAmount({
+          side,
+          tickLower: osTickLower,
+          tickUpper: osTickUpper,
+          amount: onLeg.amount,
+        });
+      } catch (e: any) {
+        return apiError(
+          `${e?.message || "liquidity error"} — increase ${onLeg.field} or narrow the range.`,
+          400,
+        );
+      }
+      if (minPosLiq !== BigInt(0) && osLiquidity < minPosLiq) {
+        return apiError(
+          `Position too small: ${osLiquidity.toString()} liquidity is below the vault's minPositionLiquidity ` +
+            `(${minPosLiq.toString()}). Increase the deposit amount or narrow the range.`,
+          400,
+        );
+      }
+      if (maxPosLiq !== BigInt(0) && osLiquidity > maxPosLiq) {
+        return apiError(
+          `Position too large: ${osLiquidity.toString()} liquidity exceeds the vault's maxPositionLiquidity ` +
+            `(${maxPosLiq.toString()}). Reduce the deposit amount or widen the range.`,
+          400,
+        );
+      }
+
+      // The exact open() argument tuple, from the shared module: on-side cap = amount + 1 wei of
+      // round-up headroom, OFF-SIDE CAP = 0 — the construction that makes a straddle revert.
+      const osArgs = buildOneSidedOpenArgs({
+        key: LIVE_POOL_KEY,
+        side,
+        range: { tickLower: osTickLower, tickUpper: osTickUpper },
+        liquidity: osLiquidity,
+        amount: onLeg.amount,
+        deadline: BigInt(txDeadline),
+      });
+      const osAmount0Max = osArgs[4];
+      const osAmount1Max = osArgs[5];
+      const onSideMax = side === "token0" ? osAmount0Max : osAmount1Max;
+
+      const osTxs: any[] = [];
+      const osWethIface = new ethers.Interface(WETH_DEPOSIT_ABI);
+      const osErc20Iface = new ethers.Interface(ERC20_APPROVE_ABI);
+      const osVaultIface = new ethers.Interface(VAULT_ABI);
+
+      // 1. wrap — only when the deposit leg was handed to us as native ETH. Wrap the CAP, not the
+      //    stated amount, so the +1 wei of round-up headroom is funded too.
+      if (onLeg.wasNative) {
+        osTxs.push({
+          to: WETH.address,
+          value: onSideMax.toString(),
+          data: osWethIface.encodeFunctionData("deposit"),
+          description: `Wrap ${formatUnitsDisplay(onSideMax, WETH.decimals, 6)} ETH → WETH (1:1)`,
+        });
+      }
+
+      // 2. approve — ONE token only. The off side needs no approval: its cap is 0.
+      osTxs.push({
+        to: onMeta.address,
+        value: "0",
+        data: osErc20Iface.encodeFunctionData("approve", [VAULT, onSideMax]),
+        description: `Approve ${formatUnitsDisplay(onSideMax, onMeta.decimals, 6)} ${onMeta.symbol} to MolePositions`,
+      });
+
+      // 3. open — the one-sided mint.
+      const osKey = [
+        LIVE_POOL_KEY.currency0,
+        LIVE_POOL_KEY.currency1,
+        LIVE_POOL_KEY.fee,
+        LIVE_POOL_KEY.tickSpacing,
+        LIVE_POOL_KEY.hooks,
+      ];
+      osTxs.push({
+        to: VAULT,
+        value: "0",
+        data: osVaultIface.encodeFunctionData("open", [
+          osKey,
+          osTickLower,
+          osTickUpper,
+          osLiquidity,
+          osAmount0Max,
+          osAmount1Max,
+          txDeadline,
+        ]),
+        description:
+          `MolePositions.open — mint ${osLiquidity.toString()} liquidity over ticks ` +
+          `[${osTickLower}, ${osTickUpper}] funded by ${onMeta.symbol} only`,
+        note: `MUST be sent from ${recipient} — open() credits the position to msg.sender and has no recipient argument.`,
+      });
+
+      const osParameterNotes = [
+        {
+          parameter: "recipient",
+          supported: false,
+          detail:
+            "MolePositions.open has no owner/recipient argument — the position owner is msg.sender, so a " +
+            "phished approval cannot open a position that pays elsewhere. Send every transaction below " +
+            `from ${recipient}; ownership cannot be redirected to another address.`,
+        },
+        {
+          parameter: side === "token0" ? "amount1Desired" : "amount0Desired",
+          supported: true,
+          detail:
+            `Zero — this is a ONE-SIDED ${onMeta.symbol} deposit. ${offMeta.symbol}'s amountMax in the ` +
+            "open() calldata is 0, so if the price moved into the range before the transaction landed, " +
+            `the open would need ${offMeta.symbol} and REVERTS instead of pulling it.`,
+        },
+        {
+          parameter: "tickLower / tickUpper / preset",
+          supported: true,
+          detail:
+            (preset.value !== undefined
+              ? `Range placed from the preset: ticks [${osTickLower}, ${osTickUpper}], `
+              : `Supplied ticks snapped to the pool's ${TICK_SPACING}-tick spacing: [${osTickLower}, ${osTickUpper}], `) +
+            (side === "token0"
+              ? `entirely ABOVE the current tick (${currentTick}) — funded by ${onMeta.symbol} (token0) only. `
+              : `entirely at or BELOW the current tick (${currentTick}) — funded by ${onMeta.symbol} (token1) only. `) +
+            `Width ${osTickUpper - osTickLower} ticks, inside the vault's [${minRangeWidth}, ${maxRangeWidth}] band.`,
+        },
+        {
+          parameter: "slippageBps",
+          supported: false,
+          detail:
+            "Not applied to a one-sided open: the amount a fully out-of-range position needs is " +
+            "price-independent, and the zero off-side cap already makes any straddle revert.",
+        },
+      ];
+
+      return apiResponse({
+        type: "add_liquidity",
+        depositMode: "one-sided",
+        side,
+        description: `Add ONE-SIDED ${onMeta.symbol} liquidity to the WETH/USDG v4 pool via MolePositions.open`,
+        venue: {
+          protocol: "Uniswap v4 (MoleSwap ALM)",
+          vault: VAULT,
+          poolManager: CONTRACTS.POOL_MANAGER,
+          hook: LIVE_POOL_KEY.hooks,
+          poolId: LIVE_POOL_ID,
+          positionManager: null,
+          positionManagerNote:
+            "No NonfungiblePositionManager is deployed on Robinhood Chain. The position is vault-custodied " +
+            "(not an ERC-721) and is read back with positionsOf(owner) / getPosition(id).",
+        },
+        positionOwner: recipient,
+        depositToken: {
+          address: onMeta.address,
+          symbol: onMeta.symbol,
+          decimals: onMeta.decimals,
+          amountDesired: onLeg.amount.toString(),
+          amountDisplay: formatUnitsDisplay(onLeg.amount, onMeta.decimals, onMeta.decimals),
+        },
+        fee: LIVE_POOL_KEY.fee,
+        feeTier: "dynamic (MoleHook)",
+        tickLower: osTickLower,
+        tickUpper: osTickUpper,
+        currentTick,
+        rangeWidthTicks: osTickUpper - osTickLower,
+        vaultRangeBounds: { minRangeWidth, maxRangeWidth },
+        liquidity: osLiquidity.toString(),
+        amount0Max: osAmount0Max.toString(),
+        amount1Max: osAmount1Max.toString(),
+        preset: preset.value ?? null,
+        deadline: txDeadline,
+        parameterNotes: osParameterNotes,
+        transactions: osTxs,
+        chainId: RH_CHAIN_ID,
+        rpc: RH_PUBLIC_RPC_URL,
+        note:
+          "Send the transactions sequentially from the recipient address, waiting for each to confirm. " +
+          "Skip the approval if the existing allowance to MolePositions already covers the cap. " +
+          `This position sits entirely ${side === "token0" ? "ABOVE" : "BELOW"} the current price and ` +
+          `earns nothing until the price ${side === "token0" ? "rises" : "falls"} into its range; it is ` +
+          `funded by ${onMeta.symbol} alone and can never pull ${offMeta.symbol}.`,
+      });
     }
 
     /* ──────────────────────────────────── the range ──────────────────────────────────── */

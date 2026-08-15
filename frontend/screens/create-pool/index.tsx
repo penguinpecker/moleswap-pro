@@ -9,7 +9,8 @@ import { ROBINHOOD_RPC_URL, MOLE_ADDRESSES } from "@/lib/mole/chain";
 import {
   POOL_CREATOR, createMolePool, poolIdOf, priceToSqrtPriceX96, orderCurrencies,
 } from "@/lib/mole/createPool";
-import { seedNewPool } from "@/lib/mole/seedLiquidity";
+import { seedNewPool, seedNewPoolOneSided, customOneSidedRange } from "@/lib/mole/seedLiquidity";
+import { computeOneSidedRange, type OneSidedSide, type OneSidedRange } from "@/lib/mole/singleSided";
 import { searchIndex, popularTokens, type IndexedToken } from "@/lib/chain/tokenSearch";
 import { CONTRACTS } from "@/lib/chain/contracts";
 import { getTickAtSqrtRatio } from "@/lib/aggregator/math/tickMath";
@@ -47,6 +48,14 @@ export default function CreatePoolPage() {
   const [seedAmt0, setSeedAmt0] = useState("");
   const [seedAmt1, setSeedAmt1] = useState("");
   const [seedResult, setSeedResult] = useState<any>(null);
+
+  // One-sided seed option (Meteora/Uniswap-style): deposit ONE token into a range strictly
+  // beyond the initial price. All range math lives in lib/mole — the screen only picks inputs.
+  const [seedMode, setSeedMode] = useState<"both" | "one">("both");
+  const [oneSide, setOneSide] = useState<OneSidedSide>("token0");
+  const [onePreset, setOnePreset] = useState<"launch" | "tight" | "custom">("launch");
+  const [customMin, setCustomMin] = useState("");
+  const [customMax, setCustomMax] = useState("");
 
   useEffect(() => {
     if (!picker) return;
@@ -94,7 +103,10 @@ export default function CreatePoolPage() {
     if (!isAddr(tokenA) || !isAddr(tokenB) || !metaA || !metaB) return null;
     if (tokenA.toLowerCase() === tokenB.toLowerCase()) return { error: "The two tokens must be different" };
     const price = Number(priceBperA);
-    if (!(price > 0)) return { error: "" };
+    // No price yet ⇒ no preview. (Returning { error: "" } here crashed the render: the empty
+    // string is falsy, so `preview && !preview.error` passed its guard and read `.ord` of a
+    // preview that has no ord.)
+    if (!(price > 0)) return null;
     const ord = orderCurrencies(tokenA as Address, metaA.decimals, tokenB as Address, metaB.decimals);
     // price0to1 = currency1 per currency0. User gave B-per-A; invert if sorting put B as currency0.
     const price0to1 = ord.currency0.toLowerCase() === tokenA.toLowerCase() ? price : 1 / price;
@@ -109,6 +121,41 @@ export default function CreatePoolPage() {
       return { error: e?.message || "Invalid price" };
     }
   }, [tokenA, tokenB, priceBperA, tickSpacing, metaA, metaB]);
+
+  // Live one-sided range preview. A NEW pool's spot IS the initial price the creator chose,
+  // so currentTick derives from the previewed sqrtPriceX96; the seed path re-reads the live
+  // tick right before sending regardless.
+  const oneRange = useMemo((): { range?: OneSidedRange; currentTick?: number; error?: string } | null => {
+    if (seedMode !== "one" || !preview || (preview as any).error) return null;
+    const p = preview as any;
+    try {
+      const currentTick = getTickAtSqrtRatio(p.sqrtPriceX96);
+      let range: OneSidedRange;
+      if (onePreset === "custom") {
+        const lo = Number(customMin), hi = Number(customMax);
+        if (!(lo > 0) || !(hi > 0)) return { error: "" };
+        range = customOneSidedRange({
+          side: oneSide,
+          currentTick,
+          tickSpacing: p.spacing,
+          boundTickA: getTickAtSqrtRatio(priceToSqrtPriceX96(lo, p.ord.dec0, p.ord.dec1)),
+          boundTickB: getTickAtSqrtRatio(priceToSqrtPriceX96(hi, p.ord.dec0, p.ord.dec1)),
+        });
+      } else {
+        range = computeOneSidedRange({ side: oneSide, currentTick, tickSpacing: p.spacing, preset: onePreset });
+      }
+      return { range, currentTick };
+    } catch (e: any) {
+      return { error: e?.message || "Invalid range" };
+    }
+  }, [seedMode, preview, oneSide, onePreset, customMin, customMax]);
+
+  // Display-only: human price (currency1 per currency0) at a tick.
+  const priceAtTick = (tick: number, dec0: number, dec1: number) => {
+    const v = Math.pow(1.0001, tick) * 10 ** (dec0 - dec1);
+    if (!Number.isFinite(v) || v <= 0) return "—";
+    return v >= 1 ? v.toLocaleString(undefined, { maximumFractionDigits: 4 }) : v.toPrecision(6);
+  };
 
   const onCreate = async () => {
     if (!preview || (preview as any).error || busy) return;
@@ -154,6 +201,32 @@ export default function CreatePoolPage() {
       initialTick,
       amount0: BigInt(Math.floor(a0 * 10 ** p.ord.dec0)),
       amount1: BigInt(Math.floor(a1 * 10 ** p.ord.dec1)),
+      onStep: setStatus,
+    });
+    setSeedResult(r);
+    setStatus(r.success ? "Pool seeded — it is now tradeable." : (r.error || "Seed failed"));
+    setSeeding(false);
+  };
+
+  // One-token seed: the deposit amount comes from the ACTIVE side's existing input; the other
+  // side's input is disabled (greyed, not removed) so the mechanic stays legible.
+  const onSeedOne = async () => {
+    if (!preview || (preview as any).error || seeding) return;
+    const p = preview as any;
+    if (!oneRange?.range) { setStatus(oneRange?.error || "Build a valid range first."); return; }
+    const amtStr = oneSide === "token0" ? seedAmt0 : seedAmt1;
+    const amt = Number(amtStr);
+    if (!(amt > 0)) { setStatus("Enter an amount of the token you are depositing."); return; }
+    setSeeding(true);
+    setSeedResult(null);
+    const dec = oneSide === "token0" ? p.ord.dec0 : p.ord.dec1;
+    const r = await seedNewPoolOneSided({
+      currency0: p.ord.currency0,
+      currency1: p.ord.currency1,
+      tickSpacing: p.spacing,
+      side: oneSide,
+      amount: BigInt(Math.floor(amt * 10 ** dec)),
+      range: oneRange.range,
       onStep: setStatus,
     });
     setSeedResult(r);
@@ -284,19 +357,106 @@ export default function CreatePoolPage() {
                     one-tap zap can&apos;t bootstrap it — that swaps half your deposit inside this very
                     pool, and there is nothing here to swap against. Put in both sides once and it goes live.
                   </p>
+                  <div className="p-field" style={{ marginTop: 12 }}>
+                    <div className="lbl"><span>Deposit mode</span></div>
+                    <div className="seg" role="radiogroup" aria-label="Deposit mode">
+                      <button className={`seg-btn ${seedMode === "both" ? "on" : ""}`} onClick={() => setSeedMode("both")}>
+                        Both tokens
+                      </button>
+                      <button className={`seg-btn ${seedMode === "one" ? "on" : ""}`} onClick={() => setSeedMode("one")}>
+                        One token
+                      </button>
+                    </div>
+                  </div>
+
+                  {seedMode === "one" && (
+                    <>
+                      <div className="p-field" style={{ marginTop: 10 }}>
+                        <div className="lbl"><span>Deposit token</span></div>
+                        <div className="seg" role="radiogroup" aria-label="Deposit token">
+                          <button className={`seg-btn ${oneSide === "token0" ? "on" : ""}`} onClick={() => setOneSide("token0")}>
+                            {(preview as any)?.sym0 ?? "currency0"}
+                          </button>
+                          <button className={`seg-btn ${oneSide === "token1" ? "on" : ""}`} onClick={() => setOneSide("token1")}>
+                            {(preview as any)?.sym1 ?? "currency1"}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="p-field" style={{ marginTop: 10 }}>
+                        <div className="lbl"><span>Range preset</span></div>
+                        <div className="seg" role="radiogroup" aria-label="Range preset">
+                          {(["launch", "tight", "custom"] as const).map((k) => (
+                            <button key={k} className={`seg-btn ${onePreset === k ? "on" : ""}`} onClick={() => setOnePreset(k)}>
+                              {k === "launch" ? "Launch" : k === "tight" ? "Tight" : "Custom"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+
                   {[
-                    { label: `${(preview as any)?.sym0 ?? "currency0"} amount`, val: seedAmt0, set: setSeedAmt0 },
-                    { label: `${(preview as any)?.sym1 ?? "currency1"} amount`, val: seedAmt1, set: setSeedAmt1 },
-                  ].map((f, i) => (
-                    <div key={f.label} className="p-field" style={{ marginTop: i === 0 ? 12 : 10 }}>
-                      <div className="lbl"><span>{f.label}</span></div>
-                      <div className="amt">
-                        <input className="big" inputMode="decimal" value={f.val} placeholder="0.0"
-                          onChange={(e) => f.set(e.target.value.replace(/[^0-9.]/g, ""))} aria-label={f.label} />
+                    { side: "token0" as const, label: `${(preview as any)?.sym0 ?? "currency0"} amount`, val: seedAmt0, set: setSeedAmt0 },
+                    { side: "token1" as const, label: `${(preview as any)?.sym1 ?? "currency1"} amount`, val: seedAmt1, set: setSeedAmt1 },
+                  ].map((f, i) => {
+                    const off = seedMode === "one" && oneSide !== f.side;
+                    return (
+                      <div key={f.label} className={`p-field${off ? " field-off" : ""}`} style={{ marginTop: i === 0 ? 12 : 10 }}>
+                        <div className="lbl">
+                          <span>{f.label}</span>
+                          {off && <span className="meta">not needed — one-token seed</span>}
+                        </div>
+                        <div className="amt">
+                          <input className="big" inputMode="decimal" value={f.val} placeholder="0.0" disabled={off}
+                            onChange={(e) => f.set(e.target.value.replace(/[^0-9.]/g, ""))} aria-label={f.label} />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {seedMode === "one" && onePreset === "custom" && (
+                    <div className="p-grid p-2" style={{ marginTop: 10 }}>
+                      {[
+                        { label: `Min price (${(preview as any)?.sym1 ?? "c1"} per ${(preview as any)?.sym0 ?? "c0"})`, val: customMin, set: setCustomMin, aria: "Minimum price bound" },
+                        { label: `Max price (${(preview as any)?.sym1 ?? "c1"} per ${(preview as any)?.sym0 ?? "c0"})`, val: customMax, set: setCustomMax, aria: "Maximum price bound" },
+                      ].map((f) => (
+                        <div key={f.aria} className="p-field">
+                          <div className="lbl"><span>{f.label}</span></div>
+                          <div className="amt">
+                            <input className="big" inputMode="decimal" value={f.val} placeholder="0.0"
+                              onChange={(e) => f.set(e.target.value.replace(/[^0-9.]/g, ""))} aria-label={f.aria} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {seedMode === "one" && oneRange?.range && (
+                    <div className="prev mono">
+                      <div>
+                        ticks [{oneRange.range.tickLower}, {oneRange.range.tickUpper}] · spot tick {oneRange.currentTick}
+                      </div>
+                      <div>
+                        price {priceAtTick(oneRange.range.tickLower, (preview as any).ord.dec0, (preview as any).ord.dec1)} –{" "}
+                        {priceAtTick(oneRange.range.tickUpper, (preview as any).ord.dec0, (preview as any).ord.dec1)}{" "}
+                        {(preview as any).sym1} per {(preview as any).sym0}
+                      </div>
+                      <div>
+                        {oneSide === "token0"
+                          ? `Sits just above the launch price, funded by ${(preview as any).sym0} only — sells your ${(preview as any).sym0} as the price rises through the range.`
+                          : `Sits just below the launch price, funded by ${(preview as any).sym1} only — buys ${(preview as any).sym0} as the price falls through the range.`}
                       </div>
                     </div>
-                  ))}
-                  <button className="p-btn up" onClick={onSeed} disabled={seeding || !onRH}>
+                  )}
+                  {seedMode === "one" && oneRange?.error && oneRange.error.length > 0 && (
+                    <div className="statline err" style={{ textAlign: "left" }}>{oneRange.error}</div>
+                  )}
+
+                  <button
+                    className="p-btn up"
+                    onClick={seedMode === "both" ? onSeed : onSeedOne}
+                    disabled={seeding || !onRH || (seedMode === "one" && !oneRange?.range)}
+                  >
                     {seeding ? "Seeding…" : "Seed liquidity"}
                   </button>
                 </div>
@@ -374,6 +534,15 @@ export default function CreatePoolPage() {
           background: linear-gradient(180deg, #ffcd7d, var(--amber)); color: #3d2410;
           box-shadow: 0 3px 0 #8c4a14, inset 0 1px 0 rgba(255,255,255,.5); }
         .seed-btn:active { transform: translateY(1px); box-shadow: 0 1px 0 #8c4a14, inset 0 1px 0 rgba(255,255,255,.5); }
+        .seg { display: flex; gap: 6px; }
+        .seg-btn { flex: 1 1 0; height: 36px; border-radius: 11px; cursor: pointer;
+          font-family: var(--font-ui); font-weight: 800; font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+          background: rgba(255,255,255,.5); border: 1px solid rgba(44,26,12,.14); color: var(--ink-2); }
+        .seg-btn:hover { background: rgba(255,255,255,.8); }
+        .seg-btn.on { background: linear-gradient(180deg, #ffcd7d, var(--amber)); color: #3d2410;
+          border-color: rgba(140,74,20,.45); box-shadow: inset 0 1px 0 rgba(255,255,255,.5); }
+        .field-off { opacity: .45; }
+        .field-off .amt input:disabled { cursor: default; }
         .p-btn:disabled { opacity: .6; cursor: default; }
         .p-btn:disabled:active { transform: none; }
         .p-btn.up { text-transform: uppercase; letter-spacing: .05em; font-size: 14px; }
