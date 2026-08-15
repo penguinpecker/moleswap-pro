@@ -66,6 +66,9 @@ const POOL_MANAGER = (process.env.POOL_MANAGER || "0x8366a39CC670B4001A1121B8F6A
 // keccak("Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)")
 const V4_INITIALIZE_TOPIC = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438";
 const NATIVE_ADDR = "0x0000000000000000000000000000000000000000";
+// MoleSwap's own hook — pools carrying it are operator-registered as venue mole_v4 and are
+// deliberately invisible to the generic v4 scan (see discoverV4).
+const MOLE_HOOK = "0xb2c9a0af48df8858f3765385e733cd8776a138c4";
 // A hook whose address carries either return-delta bit can move tokens the tick math never sees, so
 // such a pool cannot be honestly priced from ticks. Indexed but marked inactive: discoverable and
 // auditable, never routed, until the quote layer can price it by simulation.
@@ -299,6 +302,13 @@ async function discoverV4(from, to) {
       let tickSpacing = parseInt(d.slice(64, 128), 16);
       if (tickSpacing >= 0x800000) tickSpacing -= 0x1000000; // int24, two's complement
       const hooks = lc("0x" + d.slice(128, 192).slice(-40));
+      // MoleSwap's own pools appear in this same Initialize stream (same PoolManager). They are
+      // registered as venue mole_v4 by the operator create-pool flow and routed through the hook-aware
+      // path, so the generic scan must not touch them: on 2026-08-15 the history backfill classified
+      // them by the generic hook rules (MoleHook's address carries a return-delta bit), upserted
+      // active=false over the operator rows, and silently unrouted the DEX's own pools. The upsert RPC
+      // now refuses to overwrite mole_v4 rows as well — this skip keeps the writer honest regardless.
+      if (hooks === MOLE_HOOK) continue;
       const hookLow = Number(BigInt(hooks) & 0x3fffn);
       const takesDelta = (hookLow & HOOK_BEFORE_SWAP_RETURNS_DELTA) !== 0 || (hookLow & HOOK_AFTER_SWAP_RETURNS_DELTA) !== 0;
       // MoleRouter settles v4 currencies as ERC-20s; a native currency (address(0)) cannot be paid by
