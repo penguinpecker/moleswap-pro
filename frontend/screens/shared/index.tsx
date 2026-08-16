@@ -25,25 +25,21 @@ export const MoleGlyph = ({ size = 18 }: { size?: number }) => (
   </svg>
 );
 
-/** The hero mascot — a full drawn mole, replaces the pixel sprites. */
+/**
+ * The site mascot — the brand mark, used at ~25 call sites from a 92px avatar to the 132px hero peek.
+ *
+ * Swapped from a drawn SVG to the real asset on 2026-08-16, keeping the export name, the `className`
+ * contract and the default `.mole` class byte-for-byte — so every existing sizing rule (`.mole`,
+ * `.mole2`, `.suc-mole`, `.pf-avatar .mole`, `.mole-spot .mole`) keeps applying untouched and no call
+ * site changed. `object-fit: contain` is what makes that safe: those rules set width AND height
+ * independently, and an <img> would otherwise stretch where the SVG's viewBox used to preserve ratio.
+ *
+ * The drawn version carried its own shadow ellipse; the artwork has none, so the shadow moves to a CSS
+ * filter (see `.mole` in burrow.css) and stays proportional at every size.
+ */
 export const MoleMascot = ({ className }: { className?: string }) => (
-  <svg className={className ?? "mole"} viewBox="0 0 120 120" aria-hidden="true">
-    <ellipse cx="60" cy="104" rx="46" ry="11" fill="rgba(42,24,10,.28)" />
-    <path d="M22 104c0-24 17-42 38-42s38 18 38 42Z" fill="#6b4423" />
-    <path d="M30 104c0-20 13-34 30-34s30 14 30 34Z" fill="#8a5c33" />
-    <circle cx="49" cy="86" r="4.2" fill="#2a180a" />
-    <circle cx="71" cy="86" r="4.2" fill="#2a180a" />
-    <circle cx="50.4" cy="84.6" r="1.4" fill="#fff" opacity=".85" />
-    <circle cx="72.4" cy="84.6" r="1.4" fill="#fff" opacity=".85" />
-    <ellipse cx="60" cy="95" rx="6" ry="4.4" fill="#e88f8f" />
-    <path
-      d="M34 96c-6 2-10 5-12 9M86 96c6 2 10 5 12 9"
-      stroke="#5c3a1e"
-      strokeWidth="3"
-      strokeLinecap="round"
-      fill="none"
-    />
-  </svg>
+  // eslint-disable-next-line @next/next/no-img-element
+  <img className={className ?? "mole"} src="/mole-logo.png" alt="" aria-hidden="true" />
 );
 
 export const NavBar = () => {

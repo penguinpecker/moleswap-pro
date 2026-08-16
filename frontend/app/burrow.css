@@ -186,8 +186,12 @@ h1 .under { color: #fff0d6; text-shadow: 0 2px 0 rgba(42,24,10,.35); }
 }
 .hero .sub.above { color: #5c3c1e; }
 
-/* A mole poking out of the soil, drawn not imported. */
+/* The mole poking out of the soil. Now the brand asset rather than a drawn SVG.
+   object-fit keeps the aspect ratio the old viewBox used to guarantee — the sizing rules across the
+   app set width and height independently, so without it the mark stretches wherever they disagree.
+   The drop-shadow replaces the shadow ellipse the drawing carried inside itself. */
 .mole { position: absolute; right: 2%; top: 6px; width: 132px; height: 132px; }
+.mole, .mole2, .suc-mole { object-fit: contain; filter: drop-shadow(0 6px 10px rgba(42,24,10,.38)); }
 @media (max-width: 760px) { .mole { display: none; } }
 
 /* ---------------------------- Stat chambers ---------------------------- */
