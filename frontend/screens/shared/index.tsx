@@ -73,9 +73,9 @@ export const NavBar = () => {
     <div className="chrome" id="chrome">
       <div className="chrome-in">
         <Link className="brand" href="/" aria-label="MoleSwap home">
-          <div className="glyph" aria-hidden="true">
-            <MoleGlyph />
-          </div>
+          {/* The mole mark. A real asset rather than the drawn MoleGlyph, which stays exported and is
+              still used elsewhere. Sized 2x the 32px slot so it stays crisp on retina. */}
+          <img className="glyph" src="/mole-logo.png" alt="" width={64} height={64} aria-hidden="true" />
           <div className="name">MoleSwap</div>
         </Link>
 

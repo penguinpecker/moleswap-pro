@@ -102,12 +102,17 @@ body {
   box-shadow: var(--sh-1), inset 0 1px 0 rgba(255,214,150,.22);
 }
 .brand { display: flex; align-items: center; gap: 10px; }
+/* The mole mark. The old brown radial-gradient disc is gone: the artwork carries its own body and
+   silhouette, so a disc behind it only clipped the ears and muddied the outline. A soft drop-shadow
+   does the lifting the inset highlights used to, and object-fit keeps it honest if the asset is ever
+   swapped for one that is not square. */
 .brand .glyph {
-  width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
-  background: radial-gradient(circle at 32% 28%, #b8794a, #6b4423 70%);
-  box-shadow: inset 0 -2px 4px rgba(0,0,0,.4), inset 0 2px 3px rgba(255,255,255,.25);
-  color: #ffd9a8;
+  width: 34px; height: 34px; display: block;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 3px rgba(0,0,0,.45));
+  transition: transform 180ms cubic-bezier(.34,1.56,.64,1);
 }
+.brand:hover .glyph { transform: translateY(-1px) scale(1.06) rotate(-3deg); }
 .brand .name {
   font-weight: 800; font-size: 15px; letter-spacing: .04em; text-transform: uppercase;
   color: #ffe6c4; white-space: nowrap;

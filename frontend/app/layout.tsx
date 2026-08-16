@@ -30,16 +30,30 @@ export const metadata: Metadata = {
       { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
     ],
     apple: "/apple-touch-icon.png",
+    // The square mark, for anything that wants a profile picture rather than a wide card.
+    shortcut: "/mole-logo.png",
   },
+  manifest: "/site.webmanifest",
   openGraph: {
     title: "MoleSwap - Dex Aggregator & AMM Protocol",
     description: "DEX aggregator & AMM on Robinhood Chain. Swap tokens, earn XP, climb the leaderboard.",
+    siteName: "MoleSwap",
     images: [
       {
-        url: `${siteUrl}/mole-card.webp`,
+        // PNG, not the old .webp: X/Twitter has historically been unreliable at rendering webp cards,
+        // and every other scraper handles PNG. Cache-busted because social platforms cache the
+        // previous artwork against this URL for a long time.
+        url: `${siteUrl}/mole-card.png?v=2`,
         width: 1200,
         height: 630,
-        alt: "MoleSwap - Dex Aggregator & AMM Protocol",
+        alt: "MoleSwap - DEX aggregator & AMM on Robinhood Chain",
+      },
+      {
+        // The square mark, which is what Discord/Slack and profile-style embeds prefer.
+        url: `${siteUrl}/android-chrome-512x512.png?v=2`,
+        width: 512,
+        height: 512,
+        alt: "MoleSwap",
       },
     ],
     type: "website",
@@ -49,7 +63,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "MoleSwap - Dex Aggregator & AMM Protocol",
     description: "DEX aggregator & AMM on Robinhood Chain. Swap tokens, earn XP, climb the leaderboard.",
-    images: [`${siteUrl}/mole-card.webp`],
+    images: [`${siteUrl}/mole-card.png?v=2`],
     creator: "@moleswapcom",
   },
 };

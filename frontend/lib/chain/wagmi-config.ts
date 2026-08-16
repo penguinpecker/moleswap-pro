@@ -31,7 +31,9 @@ export const wagmiConfig = createConfig({
   multiInjectedProviderDiscovery: true, // EIP-6963: list every installed browser wallet separately
   connectors: [
     injected({ shimDisconnect: true }),
-    coinbaseWallet({ appName: "MoleSwap", appLogoUrl: "https://moleswap-pro.vercel.app/moleswap-logo.png" }),
+    // The logo the wallet shows while connecting. Points at the live domain and the current mark —
+    // it was still on the old moleswap-pro.vercel.app host and the pre-2026-08-16 artwork.
+    coinbaseWallet({ appName: "MoleSwap", appLogoUrl: "https://www.moleswap.com/android-chrome-512x512.png" }),
     ...(wcProjectId ? [walletConnect({ projectId: wcProjectId, showQrModal: true })] : []),
   ],
   transports: {

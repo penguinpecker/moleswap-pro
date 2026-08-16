@@ -1,19 +1,29 @@
 {
-  "name": "MoleSwap",
+  "name": "MoleSwap - Dex Aggregator & AMM Protocol",
   "short_name": "MoleSwap",
+  "description": "DEX aggregator & AMM on Robinhood Chain. Swap tokens, earn XP, climb the leaderboard.",
   "icons": [
     {
       "src": "/android-chrome-192x192.png",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
     },
     {
       "src": "/android-chrome-512x512.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ],
   "theme_color": "#8B5E3C",
   "background_color": "#8B5E3C",
-  "display": "standalone"
+  "display": "standalone",
+  "start_url": "/dapp"
 }
