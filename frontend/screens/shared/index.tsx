@@ -48,12 +48,11 @@ export const NavBar = () => {
 
   // DEX destinations on the left, game/profile on the right. QUEUE lives only
   // in the expanded menu — the original app's deliberate asymmetry, preserved.
+  // Vault, DCA and Limit were taken out of the nav on 2026-08-22 (product call);
+  // their routes still exist, they are just no longer offered from the chrome.
   const LEFT = [
     { href: "/dapp", label: "Swap" },
     { href: "/pools", label: "Pools" },
-    { href: "/vault", label: "Vault" },
-    { href: "/dca", label: "DCA" },
-    { href: "/limit", label: "Limit" },
   ];
   const RIGHT = [
     { href: "/quests", label: "Quests" },
