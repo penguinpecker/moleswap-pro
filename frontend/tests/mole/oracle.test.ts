@@ -281,7 +281,6 @@ describe("one stale state, identical copy everywhere", () => {
     expect(badge).toMatch(/\{ORACLE_STALE_COPY\}/);
     const consumers = [
       "screens/dapp/ExchangePage.tsx", // swap card: impact denominator on our venue
-      "screens/pools/MoleEngine.tsx", // engine range bar + batch heartbeat
       "screens/queue/index.tsx", // queue countdown / TWAP
       "screens/pools/index.tsx", // deposit panel reachable from /pools
       "screens/vault/index.tsx", // deposit page reachable from /pools
@@ -290,9 +289,12 @@ describe("one stale state, identical copy everywhere", () => {
       const src = readFileSync(path.join(root, c), "utf8");
       expect(src, c).toMatch(/<OracleStaleBadge[\s/]/); // rendered, not merely imported
     }
-    // And nobody reads the TWAP behind the helper's back any more.
-    const engine = readFileSync(path.join(root, "screens/pools/MoleEngine.tsx"), "utf8");
-    expect(engine).not.toMatch(/functionName:\s*"consult"/);
+    // And nobody reads the TWAP behind the helper's back any more: no surface may call consult()
+    // directly. (The /pools engine panel that used to do so was removed with the panel itself.)
+    for (const c of consumers) {
+      const src = readFileSync(path.join(root, c), "utf8");
+      expect(src, c).not.toMatch(/functionName:\s*"consult"/);
+    }
   });
 
   it("the vitest harness cannot reach an RPC, so readOracleHealth is only ever exercised through a stub here", () => {

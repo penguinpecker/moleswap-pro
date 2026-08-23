@@ -51,7 +51,6 @@ vi.mock("next/link", async () => {
   return { default: ({ href, children, ...rest }: any) => R.createElement("a", { href: String(href), ...rest }, children) };
 });
 
-import { MoleEngine } from "../../screens/pools/MoleEngine";
 import QueuePage from "../../screens/queue";
 
 const T0 = 1_787_400_948;
@@ -99,47 +98,8 @@ async function mount(view: OracleHealthView, el: React.ReactElement) {
 const badges = () => container.querySelectorAll('[data-testid="oracle-stale"]').length;
 const text = () => container.textContent ?? "";
 
-describe("MoleEngine (/pools: batch heartbeat + range bar) renders the badge iff the oracle is stale", () => {
-  it("STALE: the badge shows on BOTH the heartbeat clock and the twap label, with the shared copy and the age", async () => {
-    await mount(STALE, <MoleEngine />);
-    expect(badges()).toBe(2); // the batch crosses AT the twap: the clock and the range-bar label both carry it
-    expect(text()).toContain("ORACLE STALE");
-    expect(text()).toContain("61h 58m");
-    // The twap it shows is the helper's mid — not a bare consult(), not slot0.
-    expect(text()).toContain(`▲ twap ${MID}`);
-    expect(h.useOracleHealth).toHaveBeenCalledWith(expect.objectContaining({ crossCheck: true }));
-  });
-
-  it("ATTACK: FRESH must NOT show the badge — a badge on the wrong state is the inverted-condition bug", async () => {
-    await mount(FRESH, <MoleEngine />);
-    expect(badges()).toBe(0);
-    expect(text()).not.toContain("ORACLE STALE");
-    expect(text()).toContain(`▲ twap ${MID}`); // the twap still shows; only the warning is absent
-  });
-
-  it("exactly at the threshold is fresh: no badge (the boundary belongs to the helper, the screen only obeys)", async () => {
-    await mount(AT_THRESHOLD, <MoleEngine />);
-    expect(badges()).toBe(0);
-  });
-
-  it("not yet read: no mid, no badge — a dash, never a fresh-looking number", async () => {
-    await mount(UNREAD, <MoleEngine />);
-    expect(badges()).toBe(0);
-    expect(text()).toContain("▲ twap —");
-    expect(text()).not.toContain(String(MID));
-  });
-
-  it("the Chainlink cross-check line says DEVIATION iff warn, and is absent when there is no reference", async () => {
-    await mount(STALE, <MoleEngine />);
-    expect(text()).toContain("twap $1970.27 vs chainlink $2426.01");
-    expect(text()).toContain("DEVIATION");
-    await mount(FRESH, <MoleEngine />);
-    expect(text()).toContain("twap $1970.27 vs chainlink $1975.00");
-    expect(text()).not.toContain("DEVIATION");
-    await mount(AT_THRESHOLD, <MoleEngine />);
-    expect(text()).not.toContain("vs chainlink");
-  });
-});
+// The /pools "MoleSwap Engine" panel (batch heartbeat + range bar + provenance) was removed from the
+// product on 2026-08-23; its badge cases lived here. The remaining surfaces below still carry the badge.
 
 describe("QueuePage (/queue: epoch card TWAP) renders the badge iff the oracle is stale", () => {
   it("STALE: one badge under the cutoff clock, next to the TWAP dollar price it would cross at", async () => {

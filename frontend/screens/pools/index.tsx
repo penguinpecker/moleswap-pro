@@ -18,7 +18,6 @@ import {
 } from "@/lib/chain/amm";
 import { ethers } from "ethers";
 import { createClient } from "@/lib/supabase/client";
-import { MoleEngine } from "./MoleEngine";
 import { ProvenanceCard } from "./ProvenanceCard";
 // Which engine can serve a pool is decided from its hook ADDRESS (== MoleHook or not), read from the
 // key — never from the registry label. Provide / Queue are offered only on MoleHook-served pools.
@@ -607,10 +606,6 @@ const PoolsContent = () => {
         <PoolDetail pool={selectedPool} onBack={() => setSelectedPool(null)} address={address} isConnected={isConnected} walletCtx={walletCtx} chainClient={chainClient} />
       ) : tab === "markets" ? (
         <>
-          {/* The ALM vault and the MoleQueue are how a MoleSwap pool works, not separate products — so
-              the engine panel sits at the head of the markets list, above the pools it drives. */}
-          <MoleEngine />
-
           <div className="stats" style={{ marginTop: 0 }}>
             {[
               { l: "Total value locked", v: loading ? "..." : `$${fmt(totalTvl)}` },
