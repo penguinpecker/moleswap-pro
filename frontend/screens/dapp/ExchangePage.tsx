@@ -23,6 +23,7 @@ import { useSwapSettings } from "@/hooks/use-swap-settings";
 import { diagnostics } from "@/lib/diagnostics";
 import { MoleMascot } from "../shared";
 import { noQuoteCopy } from "./quoteCopy";
+import { OracleStaleBadge } from "../shared/OracleStale";
 
 // Minimal ERC-20 metadata surface for importing an arbitrary token by address.
 const ERC20_META_ABI = [
@@ -2029,6 +2030,16 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                               <span className="k">Slippage</span>
                               <span className="v">{(quote.slippageBps / 100).toFixed(2)}%</span>
                             </div>
+                            {/* A route through a MoleHook pool measures impact against the hook's TWAP mid;
+                                when that mid is stale there is no honest number, only the shared stale state. */}
+                            {quote.oracleStale && (
+                              <div className="p-row">
+                                <span className="k">Price impact</span>
+                                <span className="v">
+                                  <OracleStaleBadge ageSec={quote.oracleAgeSec} />
+                                </span>
+                              </div>
+                            )}
                             {priceImpactLabel && (
                               <div className="p-row">
                                 <span className="k">Price impact</span>

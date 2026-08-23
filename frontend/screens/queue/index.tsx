@@ -5,6 +5,11 @@ import { BackgroundImage, NavBar, MoleMascot } from "../shared";
 import { useWallet } from "@/lib/chain/provider";
 import { WETH, USDG } from "@/lib/mole/chain";
 import { QueuePhase, secondsUntilCutoff, type QueueSchedule, type EpochState } from "@/lib/mole/queue";
+// The batch crosses at the TWAP, so the clock shows the TWAP it will cross at — through the ONE
+// staleness helper, with the shared stale badge when the observation series has not advanced.
+import { useOracleHealth } from "@/lib/mole/useOracleHealth";
+import { usdPerWethFromTick } from "@/lib/mole/oracle";
+import { OracleStaleBadge } from "../shared/OracleStale";
 import {
   getQueueSchedule,
   getEpoch,
@@ -50,6 +55,7 @@ export default function QueuePage() {
   const [busy, setBusy] = useState(false);
   const [nowTick, setNowTick] = useState(Math.floor(Date.now() / 1000));
   const [loading, setLoading] = useState(true);
+  const { oracle } = useOracleHealth();
 
   const nowRef = useRef(nowTick);
   nowRef.current = nowTick;
@@ -199,6 +205,14 @@ export default function QueuePage() {
             <div className="ep-right">
               <div className="ep-k">Cutoff in</div>
               <div className={`ep-clock ${secLeft <= 10 ? "urgent" : ""}`}>{mmss(secLeft)}</div>
+              {/* The price this batch crosses at, with its age. A stale TWAP is the last tick, extended. */}
+              <div className="ep-twap">
+                <span className="ep-k">TWAP</span>
+                <span className="mono">
+                  {oracle?.mid != null ? `$${usdPerWethFromTick(oracle.mid).toFixed(2)}` : "—"}
+                </span>
+                {oracle?.stale && <OracleStaleBadge ageSec={oracle.ageSec} />}
+              </div>
             </div>
           </div>
 
@@ -324,6 +338,8 @@ export default function QueuePage() {
         .ep-clock { margin-top: 4px; font-family: var(--font-num); font-variant-numeric: tabular-nums;
           font-size: 1.7rem; font-weight: 700; letter-spacing: -.02em; color: var(--clay); }
         .ep-clock.urgent { color: var(--rust); }
+        .ep-twap { margin-top: 6px; display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+          font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 12.5px; font-weight: 700; }
 
         .tok-toggle { display: flex; gap: 8px; }
         .tok-toggle button {

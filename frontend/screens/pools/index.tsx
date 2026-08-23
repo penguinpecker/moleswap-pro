@@ -26,6 +26,10 @@ import { poolServiceTag, engineActionsAllowed, SERVICE_TAG_LABEL, type PoolServi
 // One-sided deposit option in the add-liquidity modal: range/width math comes from the shared
 // singleSided module (the same one lib/chain/amm.addLiquidityOneSided signs with) — never re-derived.
 import { LIVE_POOL_KEY } from "@/lib/mole/chain";
+// The live pool's deposit panel shows the hook's TWAP with its age through the ONE staleness helper;
+// a deposit priced around a mid nobody has observed for hours should say so, in the same words everywhere.
+import { useOracleHealth } from "@/lib/mole/useOracleHealth";
+import { OracleStaleBadge } from "../shared/OracleStale";
 import {
   computeOneSidedRange,
   MIN_RANGE_WIDTH,
@@ -1374,6 +1378,8 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   const isLivePool =
     pool.token0.address.toLowerCase() === LIVE_POOL_KEY.currency0.toLowerCase() &&
     pool.token1.address.toLowerCase() === LIVE_POOL_KEY.currency1.toLowerCase();
+  // {mid, observedAt, ageSec, stale} for the live pool's hook oracle — only that pool has one.
+  const { oracle } = useOracleHealth({ enabled: isLivePool });
   const oneSidedSide: OneSidedSide = oneSide === 0 ? "token0" : "token1";
   const oneSidedPreset: OneSidedPreset =
     oneSidedPresetKey === "custom"
@@ -1845,6 +1851,17 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                         <span className={`font-display text-base ${c || "text-peach-300"}`}>{v}</span>
                       </div>
                     ))}
+                    {/* The hook's TWAP mid with its observation age — the number the vault re-centres on
+                        and the queue crosses at. Stale = the last tick, extended, not an average. */}
+                    {isLivePool && (
+                      <div className="flex items-center justify-between py-0.5">
+                        <span className="font-display text-base text-gray-200">ORACLE</span>
+                        <span className={`font-display flex items-center gap-2 text-base ${oracle?.stale ? "text-red-400" : "text-[#5b9bd5]"}`}>
+                          {oracle?.mid != null ? `TWAP TICK ${oracle.mid}` : "—"}
+                          {oracle?.stale && <OracleStaleBadge ageSec={oracle.ageSec} />}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   <button

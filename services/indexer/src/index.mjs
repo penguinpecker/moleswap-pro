@@ -19,6 +19,7 @@
 
 import http from "node:http";
 import { createClient } from "@supabase/supabase-js";
+import { checkOracleLiveness, oracleHealthView, LIVE_POOL_ID as ORACLE_LIVE_POOL_ID, ORACLE_STALE_SECONDS } from "./oracleHealth.mjs";
 
 /* ---------------------------------------------------------------------------------------------- config */
 const RPC = process.env.RH_RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
@@ -122,6 +123,16 @@ if (!SUPABASE_URL || !ANON_KEY || !WRITE_SECRET) {
 const supabase = createClient(SUPABASE_URL, ANON_KEY, { auth: { persistSession: false } });
 
 let status = { lastRun: null, lastRunMs: 0, cursor: 0, latest: 0, newPools: 0, newTokens: 0, refreshed: 0, verified: 0, error: null };
+
+/* ---- oracle observation liveness (its OWN health signal) ----------------------------------------
+ * Per mole pool: age of the newest MoleHook ring observation, its TWAP mid, and a stale flag; plus the
+ * Chainlink ETH/USD cross-check for the live pool. Starts STALE (never checked) on purpose — the
+ * never-ran case must not read as healthy. Not folded into `ok`/503: a quiet pool is not a wedged
+ * process, and restarting this service cannot un-stale a ring nobody has swapped on. Alert on
+ * `oracle.stale` separately. Extra ids via ORACLE_POOLS (comma-separated bytes32); the live pool and
+ * every mp_pools row with venue mole_v4 are always included. */
+const ORACLE_POOLS = (process.env.ORACLE_POOLS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+let oracleStatus = { checkedAt: null, checkedAtMs: 0, thresholdSec: ORACLE_STALE_SECONDS, stale: true, pools: {}, crossCheck: null, error: null };
 
 /* ------------------------------------------------------------------------------------------- rpc utils */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -632,6 +643,36 @@ async function refreshVolume() {
   return { from, to, swaps: swapCount };
 }
 
+/**
+ * Observation liveness for every mole pool. Reads the hook's oracle head (`poolStates`) and `consult`
+ * per pool plus Chainlink for the live pool — three or four eth_calls, no writes, no DB dependency
+ * beyond a best-effort read of the mole_v4 ids (the live pool is checked even if that read fails).
+ * Errors surface in `oracle.error`; a failed pass leaves the previous pass's data standing and lets
+ * `checkStale` (below) say how old it is.
+ */
+async function refreshOracle() {
+  const ids = new Set([ORACLE_LIVE_POOL_ID, ...ORACLE_POOLS]);
+  try {
+    const { data, error } = await supabase.from("mp_pools").select("id").eq("venue", "mole_v4");
+    if (!error) for (const r of data || []) if (/^0x[0-9a-f]{64}$/i.test(r.id || "")) ids.add(lc(r.id));
+  } catch {
+    /* registry read is best-effort: the live pool is always in the set */
+  }
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const r = await checkOracleLiveness({
+    call: (to, data) => rpc("eth_call", [{ to, data }, "latest"]),
+    poolIds: [...ids],
+    nowSeconds,
+  });
+  oracleStatus = { ...r, checkedAt: new Date(nowSeconds * 1000).toISOString(), checkedAtMs: Date.now(), error: null };
+  const staleIds = Object.entries(r.pools).filter(([, p]) => p.stale).map(([id]) => id.slice(0, 10));
+  const x = r.crossCheck;
+  console.log(
+    `[oracle] ${Object.keys(r.pools).length} pool(s) · stale ${staleIds.length ? staleIds.join(",") : "none"}` +
+      (x && x.error === null ? ` · twap $${x.ourUsd.toFixed(2)} vs chainlink $${x.chainlinkUsd.toFixed(2)} (${(x.deviationBps / 100).toFixed(2)}%${x.warn ? " WARN" : ""})` : x ? ` · cross-check error: ${x.error}` : ""),
+  );
+}
+
 async function loop() {
   const started = Date.now();
   try {
@@ -639,6 +680,15 @@ async function loop() {
   } catch (e) {
     status.error = e instanceof Error ? e.message : String(e);
     console.error("refresh failed:", status.error);
+  }
+
+  // Oracle liveness runs INDEPENDENTLY too, for the same reason as volume: a discovery failure must not
+  // hide a stalled oracle, and a stalled oracle must not be mistaken for an indexer fault.
+  try {
+    await refreshOracle();
+  } catch (e) {
+    oracleStatus.error = e instanceof Error ? e.message : String(e);
+    console.error("oracle liveness failed:", oracleStatus.error);
   }
 
   // Volume runs INDEPENDENTLY of discovery/liquidity: it has its own cursor + idempotent apply, so a
@@ -663,8 +713,12 @@ http
     if (req.url === "/health" || req.url === "/") {
       const stale = status.lastRunMs > 0 && Date.now() - status.lastRunMs > STALE_MULTIPLIER * REFRESH_MS;
       const ok = !status.error && !stale;
+      // The oracle signal is its own: `checkStale` = this service has not completed a liveness pass
+      // recently (or ever), `stale` = a mole pool's newest observation is older than thresholdSec, OR
+      // the pass itself is too old to vouch for anything. Neither gates `ok` — see oracleStatus.
+      const oracle = oracleHealthView(oracleStatus, Date.now(), STALE_MULTIPLIER * REFRESH_MS);
       res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok, stale, ...status }));
+      res.end(JSON.stringify({ ok, stale, ...status, oracle }));
     } else {
       res.writeHead(404);
       res.end();

@@ -17,9 +17,12 @@ import { decodeSlot0, decodeUint, decodePopulatedTicks, INDEXER_SELECTORS, DEFAU
 import { fetchV4Pool, fetchV4PoolByKey } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
 import { MOLE_ADDRESSES, PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
-import type { V4PoolKey } from "../mole/poolId";
+import { poolIdOf, type V4PoolKey } from "../mole/poolId";
 import { getAggFeeBps, cachedAggFeeBps } from "../mole/aggFee";
 import { v4VenueLabel } from "../mole/hookBitmap";
+// The impact denominator on OUR venue is the hook's TWAP mid, read through the one staleness helper —
+// impact against slot0 reads ~0% on a manipulated pool, and a stale TWAP is the last tick, not a mean.
+import { oracleClient, oracleStaleness, readOracleHealth, type OracleHealth } from "../mole/oracle";
 // The aggregate3 machinery lives in ./multicall — one implementation, shared with the cold quote path.
 import { MULTICALL3, encAddress, encInt16, encodeAggregate3, decodeAggregate3, rpcCall, type RawCall } from "./multicall";
 
@@ -51,8 +54,15 @@ export interface LiveQuote {
   minAmountOut: bigint;
   slippageBps: number;
   routes: LiveRoute[];
-  /** Execution vs spot, percent (0.42 = 0.42% worse than spot). Null when spot is unavailable. */
+  /** Execution vs spot, percent (0.42 = 0.42% worse than spot). Null when spot is unavailable — which
+   *  includes a route through a MoleHook pool whose TWAP denominator is stale (see `oracleStale`). */
   priceImpactPct: number | null;
+  /** True when a hop in the chosen route is a MoleHook pool whose oracle is stale or unread. The impact
+   *  denominator on our venue is the TWAP mid, so no impact figure is shown; the card shows the one
+   *  shared stale state instead. An unread oracle counts as stale — unknown must not look fresh. */
+  oracleStale: boolean;
+  /** Seconds since that pool's newest observation (Infinity when never read) — for the stale badge. */
+  oracleAgeSec: number;
   /** tokenOut per tokenIn, decimals-adjusted (for "1 ETH = 1,918.4 USDG"). */
   execRate: number;
   /** The aggregator fee the router skims from the output: bps + amount in the output token. amountOut is
@@ -92,6 +102,9 @@ export class LivePairSession {
   private refreshing = false;
   private gasPriceAge = 0;
   private feeBps = cachedAggFeeBps();
+  /** {mid, observedAt, ageSec, stale} per MoleHook pool in the set, keyed by lowercase PoolId. Absent =
+   *  never read successfully, which spotRateRaw treats exactly like stale. */
+  private oracle = new Map<string, OracleHealth>();
   readonly tokenIn: string;
   readonly tokenOut: string;
   readonly weth: string;
@@ -137,7 +150,45 @@ export class LivePairSession {
     );
     // Read the live aggregator fee before the first quote so minAmountOut is built on the post-fee output.
     this.feeBps = await getAggFeeBps(Date.now());
+    // And the oracle age of every MoleHook pool in the set, so the FIRST quote already knows whether the
+    // TWAP denominator on our venue can be trusted — an unread oracle would otherwise flash stale.
+    await this.refreshOracle(true);
     await this.refreshGasPrice();
+  }
+
+  /** The staleness contract for every MoleHook pool in the set, keyed by lowercase PoolId. */
+  get oracleHealth(): ReadonlyMap<string, OracleHealth> {
+    return this.oracle;
+  }
+
+  private oracleAge = 0;
+  private static readonly ORACLE_REFRESH_MS = 15_000;
+
+  /**
+   * Re-read {mid, observedAt, ageSec, stale} for each MoleHook pool in the set, at most every 15s (the
+   * ring advances at most once per minObservationInterval, so a per-tick read buys nothing). A failed
+   * read keeps the prior entry — its `ageSec` is re-derived from the clock at quote time, so it cannot
+   * go fresh on its own; a pool never read has no entry and is treated as stale.
+   */
+  private async refreshOracle(force = false): Promise<void> {
+    if (!force && Date.now() - this.oracleAge < LivePairSession.ORACLE_REFRESH_MS) return;
+    const molePools = this.states.filter(
+      (s) => s.venue === "UniswapV4" && s.poolKey && lc(s.poolKey.hooks) === lc(MOLE_ADDRESSES.moleHook),
+    );
+    if (molePools.length === 0) return;
+    this.oracleAge = Date.now();
+    const c = oracleClient();
+    const nowSec = Math.floor(Date.now() / 1000);
+    await Promise.all(
+      molePools.map(async (p) => {
+        const id = lc(poolIdOf(p.poolKey as V4PoolKey));
+        try {
+          this.oracle.set(id, await readOracleHealth(c, id as `0x${string}`, nowSec));
+        } catch {
+          /* keep the prior entry, or none */
+        }
+      }),
+    );
   }
 
   private async refreshGasPrice(): Promise<void> {
@@ -269,6 +320,7 @@ export class LivePairSession {
       next.push(...v4Fresh);
 
       this.states = next;
+      await this.refreshOracle();
       if (Date.now() - this.gasPriceAge > 30_000) await this.refreshGasPrice();
     } finally {
       this.refreshing = false;
@@ -336,11 +388,13 @@ export class LivePairSession {
       amountOut: part.amountOut,
     }));
 
-    // Price impact: execution rate vs the spot rate composed across each part's hops, weighted by
-    // each part's input share. All raw-unit ratios, so decimals cancel.
-    const spot = this.spotRateRaw(q);
+    // Price impact: execution rate vs the reference rate composed across each part's hops, weighted by
+    // each part's input share. All raw-unit ratios, so decimals cancel. On a MoleHook hop the reference
+    // is the TWAP mid, not slot0; if that mid is stale there is no honest denominator and the card shows
+    // the shared stale state instead of a number.
+    const { spot, oracleStale, oracleAgeSec } = this.spotRateRaw(q);
     const execRaw = Number(q.amountOut) / Number(q.amountIn);
-    const priceImpactPct = spot && spot > 0 ? Math.max(0, (1 - execRaw / spot) * 100) : null;
+    const priceImpactPct = !oracleStale && spot && spot > 0 ? Math.max(0, (1 - execRaw / spot) * 100) : null;
 
     const decimalsAdj = Math.pow(10, params.decimalsIn - params.decimalsOut);
     const execRate = execRaw * decimalsAdj;
@@ -362,6 +416,8 @@ export class LivePairSession {
       slippageBps: params.slippageBps,
       routes,
       priceImpactPct,
+      oracleStale,
+      oracleAgeSec,
       execRate,
       usdPerWeth: this.usdPerWeth(),
       gasUnits,
@@ -374,21 +430,47 @@ export class LivePairSession {
   }
 
   /** Spot rate (tokenOut per tokenIn, RAW units) composed across the quote's hops, split-weighted. */
-  private spotRateRaw(q: Quote): number | null {
+  /**
+   * The reference rate the impact is measured against, composed across hops. A v3 hop contributes its
+   * slot0 price. A MoleHook (our v4) hop contributes the hook's TWAP MID — measured against slot0 a
+   * manipulated pool shows ~0% impact, because slot0 IS the manipulated number; the TWAP is the only
+   * manipulation-resistant reference our venue has. If that mid is stale or was never read, the route is
+   * flagged and no reference is returned: unknown must not read as fresh (S-50, fail-closed).
+   */
+  private spotRateRaw(q: Quote): { spot: number | null; oracleStale: boolean; oracleAgeSec: number } {
     let weighted = 0;
+    let oracleStale = false;
+    let oracleAgeSec = 0;
+    const nowSec = Math.floor(Date.now() / 1000);
     for (const part of q.split.parts) {
       let rate = 1;
       for (const h of part.hops) {
-        const p = Number(h.pool.sqrtPriceX96) / 2 ** 96;
-        const price1per0 = p * p;
+        let price1per0: number;
+        const isMole =
+          h.pool.venue === "UniswapV4" && !!h.pool.poolKey && lc(h.pool.poolKey.hooks) === lc(MOLE_ADDRESSES.moleHook);
+        if (isMole) {
+          const o = this.oracle.get(lc(poolIdOf(h.pool.poolKey as V4PoolKey)));
+          // Re-derive the age at quote time: the entry may be up to ORACLE_REFRESH_MS old, and the
+          // boundary must flip on the clock, not on the next successful read.
+          const age = o ? oracleStaleness(o.observedAt, nowSec) : { ageSec: Number.POSITIVE_INFINITY, stale: true };
+          oracleAgeSec = Math.max(oracleAgeSec, age.ageSec);
+          if (!o || o.mid === null || age.stale) {
+            oracleStale = true;
+            return { spot: null, oracleStale, oracleAgeSec };
+          }
+          price1per0 = Math.pow(1.0001, o.mid as number);
+        } else {
+          const p = Number(h.pool.sqrtPriceX96) / 2 ** 96;
+          price1per0 = p * p;
+        }
         const zeroForOne = lc(h.tokenIn) === lc(h.pool.token0) ||
           (lc(h.tokenIn) === lc(NATIVE) && lc(this.weth) === lc(h.pool.token0));
         rate *= zeroForOne ? price1per0 : 1 / price1per0;
       }
-      if (!isFinite(rate) || rate <= 0) return null;
+      if (!isFinite(rate) || rate <= 0) return { spot: null, oracleStale, oracleAgeSec };
       weighted += rate * (Number(part.amountIn) / Number(q.amountIn));
     }
-    return weighted > 0 && isFinite(weighted) ? weighted : null;
+    return { spot: weighted > 0 && isFinite(weighted) ? weighted : null, oracleStale, oracleAgeSec };
   }
 
   /** USD per WETH from the deepest live WETH/USDG pool in the snapshot (USDG ≈ $1). */
