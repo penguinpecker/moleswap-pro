@@ -33,6 +33,18 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeab
 /// submitted. The route is UNTRUSTED input: a hostile route can waste the user's own gas and, at worst,
 /// produce a bad price — which `minAmountOut` then rejects. It can never move funds the user did not send.
 ///
+/// THE 2026-08-23 AUDIT FOUND THAT LAST SENTENCE WAS PROSE, NOT CODE, and it is worth saying exactly how,
+/// because the repair is what the venue branches now look like. "We only call pools" is a weaker claim
+/// than it sounds: a hop's pool address, and a v4 hop's whole PoolKey, are caller data, so "a pool" meant
+/// "any contract the route names". Both venues then took NUMBERS from that contract and acted on them —
+/// v3 paid whatever its callback demanded and reported whatever output it liked, v4 spent whichever
+/// currency its key named for whatever amount its (attacker-supplied) hook made the delta say. The route
+/// could not reach a third party's approval, but it could reach anything the ROUTER itself was holding.
+/// The fix is one rule applied at every venue boundary: a hop may spend at most the input the route
+/// declared for it, and produces at most what it measurably delivered in the currency the route declared.
+/// Untrusted addresses are still called; nothing they say is believed. See `_ACTIVE_BUDGET_SLOT`,
+/// `_swapV3`'s measured delta, and `_swapV4`'s currency binding.
+///
 /// ─────────────────────────────────────────────────────────────────────────────────────────────────────
 /// THE TWO INVARIANTS THAT MAKE THAT TRUE, both asserted by the test suite rather than asserted in prose:
 ///
@@ -45,6 +57,13 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeab
 ///      output token — the output goes to the recipient, the unspent input is refunded to the payer.
 ///      Nothing accumulates for a later caller to sweep. This is the same property the vault enforces on
 ///      itself, and it is what makes the router safe to leave standing approvals against.
+///
+///      Stated precisely, because "holds nothing" was the loose reading that hid two defects: the sweep
+///      is over NET CHANGE, not final balance. What the router was already holding before the swap — an
+///      airdrop, a mis-sent transfer, force-fed ETH — is preserved, not harvested by whoever calls next;
+///      what the swap caused to arrive leaves with the payer. Native ETH is included in that as of the
+///      2026-08-23 audit fix: it used to have no sweep leg at all, so ETH pushed in mid-swap (which
+///      `receive()` permits, since the lock is held) sat here permanently.
 ///
 /// ─────────────────────────────────────────────────────────────────────────────────────────────────────
 /// UPGRADEABLE — AND THIS IS THE CONTRACT'S LARGEST TRUST ASSUMPTION. READ IT BEFORE APPROVING.
@@ -205,6 +224,19 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
     // call the callback with crafted data naming any token the router holds; with it, the callback's
     // payment token is fixed by us before the pool is ever called.
     bytes32 private constant _ACTIVE_IN_SLOT = keccak256("molerouter.active.tokenIn");
+    // The CEILING on what the active v3 swap may be made to pay, and the half the pin above was missing.
+    //
+    // WHY (audit 2026-08-23, F-08 mechanism A): the pool address in a hop is untrusted caller input, and
+    // the v3 calling convention is "the pool tells us what we owe in a callback". Pinning only the TOKEN
+    // bounded WHICH token a hostile pool could demand but not HOW MUCH — `amountIn` was not even in scope
+    // inside `_payV3Callback`, so a fake pool could call back demanding the router's ENTIRE balance of the
+    // pinned token and be paid it, then return (0,0). Worse, the callback may be invoked repeatedly inside
+    // one `pool.swap()` (the active pin is only cleared after the call returns), so within a multi-path
+    // route path 1's pool could consume path 2's slice. The budget is set to exactly the amount this hop
+    // was allotted and is DECREMENTED as it is paid, so the cumulative demand across any number of
+    // callback invocations can never exceed what the route declared for this one hop. A real V3 pool never
+    // asks for more than the exact input it was offered, so this costs the honest path nothing.
+    bytes32 private constant _ACTIVE_BUDGET_SLOT = keccak256("molerouter.active.budget");
     // Reentrancy guard, also transient. `swap` is the only unguarded entry; unlockCallback and the swap
     // callbacks are only reachable while it holds the lock and are pinned to their expected caller.
     bytes32 private constant _LOCK_SLOT = keccak256("molerouter.lock");
@@ -222,6 +254,9 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
     error SameToken();
     error TransferFailed();
     error PayerReentrancy();
+    /// @dev A v3 pool's callback demanded more than the hop it belongs to was allotted. `budget` is what
+    ///      remained of this hop's input after any earlier demand in the same `pool.swap()` call.
+    error HopInputExceeded(uint256 demanded, uint256 budget);
     /// @dev msg.value must equal amountIn for a native-in swap, and be zero otherwise — no stray ETH.
     error BadValue();
     /// @dev Only WETH may send the router native ETH (during an unwrap). Everything else is refused.
@@ -426,6 +461,17 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
         uint256[] memory startBal = new uint256[](tokens.length);
         for (uint256 i = 0; i < tokens.length; ++i) startBal[i] = _balance(tokens[i]);
 
+        // NATIVE ETH GETS THE SAME NET-CHANGE TREATMENT AS AN ERC-20 (audit 2026-08-23, F-10, router half).
+        // `receive()` accepts ETH from anyone while the lock is held — i.e. from any hostile token, any
+        // route-named "pool", or any v4 hook reached mid-swap — but `_sweep` only ever walked ERC-20s, so
+        // ETH pushed in mid-swap sat here forever with no recovery path: dead value, and the standing
+        // balance the F-08 drain existed to monetise. The baseline is deliberately the balance we came in
+        // with MINUS this swap's own attached msg.value, not zero: sweeping the whole balance to the caller
+        // would hand any force-fed ETH (SELFDESTRUCT, a block fee recipient) to whoever called next, which
+        // is the same whole-balance-to-msg.sender shape the audit faults elsewhere. Net change only — so a
+        // pre-existing native donation is preserved exactly as a pre-existing token airdrop is.
+        uint256 nativeBase = address(this).balance - (plan.tokenIn == NATIVE ? plan.amountIn : 0);
+
         _acquireInput(plan, payer, effIn);
 
         // The fee comes off the INPUT, immediately after acquisition and before any hop runs, so the
@@ -436,6 +482,18 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
         userOut = _deliverOutput(plan, effOut, _runPaths(plan, fee, effIn, effOut));
 
         _sweep(tokens, startBal, payer, plan.tokenIn == NATIVE || plan.tokenOut == NATIVE);
+
+        // Last, because `_sweep`'s WETH leg unwraps and forwards and so passes through the native balance
+        // on its way out. Anything still above the baseline arrived during this swap and belongs to the
+        // payer, not to the contract.
+        _sweepNative(nativeBase, payer);
+    }
+
+    /// @dev Return native ETH received during this swap to the payer. See the baseline's derivation in
+    ///      `_execute`: this is a NET-CHANGE sweep, never a whole-balance one.
+    function _sweepNative(uint256 base, address payer) internal {
+        uint256 nowBal = address(this).balance;
+        if (nowBal > base) _sendNative(payer, nowBal - base);
     }
 
     /// @dev Acquire the input AFTER the balance snapshot so it counts as this swap's own contribution.
@@ -603,6 +661,11 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
         for (uint256 i = 0; i < hn; ++i) {
             Hop memory hop = path.hops[i];
             if (i > 0 && hop.tokenIn != path.hops[i - 1].tokenOut) revert HopChainBroken();
+            // A hop that claims to swap a token for ITSELF is not a hop. It is also the one shape that
+            // would make the v3 branch's measured output delta ambiguous — the payment and the proceeds
+            // would net inside one balance read — so refusing it keeps that measurement meaning exactly
+            // "what this hop produced". No real pool has token0 == token1, so nothing legitimate is lost.
+            if (hop.tokenIn == hop.tokenOut) revert HopChainBroken();
             amount = hop.venue == Venue.PancakeV3 ? _swapV3(hop, amount) : _swapV4(hop, amount);
         }
         if (path.hops[hn - 1].tokenOut != finalToken) revert HopChainBroken();
@@ -614,8 +677,16 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
     ///      guarantee is enforced once, at the end, by minAmountOut — a per-hop limit here would only
     ///      turn a bad route into a revert instead of a rejected quote, with no safety gain.
     function _swapV3(Hop memory hop, uint256 amountIn) internal returns (uint256 amountOut) {
-        // Pin BOTH the authorised pool and the token it may be paid, before the pool can call back.
-        _setActive(hop.pool, hop.tokenIn);
+        // MEASURE, DO NOT TAKE THE POOL'S WORD (audit 2026-08-23, F-08 mechanism B). `hop.pool` is an
+        // arbitrary caller-supplied address; before this snapshot the hop's output was read straight out
+        // of the return value of a call to that address. A contract that transfers nothing could therefore
+        // DECLARE an output, and `_deliverOutput` would push that many tokens to the recipient out of the
+        // router's own balance — a standing airdrop, a mis-sent transfer, or a future residual drained by
+        // whoever noticed it first, with `minAmountOut = 0` waving the result through. Bracketing the call
+        // with a balance read turns "what the pool says it paid" into "what the pool actually paid".
+        uint256 outBefore = _balance(hop.tokenOut);
+        // Pin the authorised pool, the token it may be paid, and the CEILING on how much of it (F-08 A).
+        _setActive(hop.pool, hop.tokenIn, amountIn);
         (int256 amount0, int256 amount1) = IPancakeV3Pool(hop.pool).swap(
             address(this),
             hop.zeroForOne,
@@ -629,10 +700,20 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
         // Kept so that between two hops the authorised set is empty rather than "the previous pool" — the
         // narrowest possible window, which is the right default for a value that gates who we will pay.
         _clearActive();
-        // The negative delta is what the pool paid us.
+        // The negative delta is what the pool CLAIMS it paid us.
         int256 outDelta = hop.zeroForOne ? -amount1 : -amount0;
         if (outDelta < 0) revert HopChainBroken();
-        amountOut = uint256(outDelta);
+
+        // The claim is kept only as a CEILING, and the measurement decides. Both directions matter:
+        //   - measured < claimed is the lie above, and taking the measurement refuses to hand out tokens
+        //     the route never produced;
+        //   - measured > claimed is the honest over-receive (a generous pool, or a token airdropped
+        //     mid-swap), and keeping the claim is what stops an untracked windfall inflating the tracked
+        //     output. `_sweep` returns the excess to the payer, exactly as it did before.
+        uint256 nowBal = _balance(hop.tokenOut);
+        uint256 measured = nowBal > outBefore ? nowBal - outBefore : 0;
+        uint256 claimed = uint256(outDelta);
+        amountOut = measured < claimed ? measured : claimed;
     }
 
     /// @dev The PancakeSwap V3 / Uniswap V3 swap callback. The pool calls back demanding payment; we pay
@@ -658,17 +739,49 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
         address tokenIn = _activeTokenIn();
         // Exactly one delta is positive: what we owe. We never owe both, and paying the positive side
         // only means we cannot be tricked into paying more than the swap requires.
+        uint256 owed;
         if (amount0Delta > 0) {
-            _push(tokenIn, msg.sender, uint256(amount0Delta));
+            owed = uint256(amount0Delta);
         } else if (amount1Delta > 0) {
-            _push(tokenIn, msg.sender, uint256(amount1Delta));
+            owed = uint256(amount1Delta);
+        } else {
+            return;
         }
+        // AND NOT MORE THAN THIS HOP WAS ALLOTTED (audit 2026-08-23, F-08 mechanism A). The pin above
+        // fixed the token; this fixes the amount. Before it, the only ceiling on a hostile pool's demand
+        // was the router's whole balance of the pinned token, and the demand could be repeated inside one
+        // `pool.swap()` because the pin is not cleared until the call returns — so a route's first path
+        // could eat the second path's slice, and any standing balance was payable in full. An honest
+        // exact-input pool asks for exactly what it was offered, so the honest path is untouched; the
+        // budget is decremented rather than merely compared so repeats are bounded in aggregate.
+        uint256 budget = _activeBudget();
+        if (owed > budget) revert HopInputExceeded(owed, budget);
+        _spendBudget(owed);
+        _push(tokenIn, msg.sender, owed);
     }
 
     /// @dev A Uniswap v4 exact-input swap, inside the router's unlock. We owe the input currency (negative
     ///      delta) and are owed the output (positive delta); settle the first, take the second, so the
     ///      hop nets to zero v4 delta and the unlock can close.
     function _swapV4(Hop memory hop, uint256 amountIn) internal returns (uint256 amountOut) {
+        // THE EXECUTED CURRENCIES MUST BE THE DECLARED ONES (audit 2026-08-23, F-09). `_runPath` verifies
+        // the hop chain — first hop consumes the input, hop i feeds hop i+1, last hop produces the output —
+        // and `_touchedTokens` builds the snapshot/sweep set, and BOTH read `hop.tokenIn`/`hop.tokenOut`.
+        // This function used to read neither: it took the real currencies from `hop.key`, which is
+        // unvalidated caller data, so the labels that were validated and the currencies that actually moved
+        // were two different sets. That made the chain check and the zero-residual invariant vacuous on
+        // this venue — a plan could declare (A, B), execute (C, D), pay out C from a balance nothing
+        // snapshotted, and strand D forever because nothing swept it. Binding them here is what makes the
+        // v4 branch as tight as the v3 one, where the payment token is pinned before the pool is called.
+        // It costs the honest path nothing: the off-chain planner derives tokenIn/tokenOut from the very
+        // currency ordering it puts in the key, so for a real route these are already equal.
+        (Currency declaredIn, Currency declaredOut) = hop.zeroForOne
+            ? (hop.key.currency0, hop.key.currency1)
+            : (hop.key.currency1, hop.key.currency0);
+        if (Currency.unwrap(declaredIn) != hop.tokenIn || Currency.unwrap(declaredOut) != hop.tokenOut) {
+            revert HopChainBroken();
+        }
+
         BalanceDelta delta = poolManager.swap(
             hop.key,
             SwapParams({
@@ -687,7 +800,17 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
 
         if (owed > 0 || received < 0) revert HopChainBroken();
 
-        _settle(inCur, uint256(uint128(-owed)));
+        // AND NOT MORE THAN THIS HOP WAS ALLOTTED — the v4 twin of the v3 callback budget, and the second
+        // half of F-09. `amountIn` used to appear only in `amountSpecified` and never bounded what we then
+        // paid, while the guard above rejects only a POSITIVE owed. `hop.key.hooks` is attacker-supplied,
+        // and a hook carrying BEFORE_SWAP_RETURNS_DELTA has its returned delta applied to the swapper's
+        // deltas by v4-core — so `owed` is hook-controlled, not pool-math-controlled, and could be made
+        // arbitrarily negative to make `_settle` hand an attacker-chosen amount to the PoolManager where
+        // the hook collects it. An exact-input swap can never legitimately spend more than it specified.
+        uint256 spend = uint256(uint128(-owed));
+        if (spend > amountIn) revert HopInputExceeded(spend, amountIn);
+
+        _settle(inCur, spend);
         amountOut = uint256(uint128(received));
         poolManager.take(outCur, address(this), amountOut);
     }
@@ -764,21 +887,27 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
         }
     }
 
-    function _setActive(address pool, address tokenIn) internal {
+    /// @dev Pin the pool, the token it may be paid, AND the most it may be paid — all three before the
+    ///      pool can call back. See `_ACTIVE_BUDGET_SLOT` for why the third one is load-bearing.
+    function _setActive(address pool, address tokenIn, uint256 budget) internal {
         bytes32 poolSlot = _ACTIVE_POOL_SLOT;
         bytes32 inSlot = _ACTIVE_IN_SLOT;
+        bytes32 budgetSlot = _ACTIVE_BUDGET_SLOT;
         assembly ("memory-safe") {
             tstore(poolSlot, pool)
             tstore(inSlot, tokenIn)
+            tstore(budgetSlot, budget)
         }
     }
 
     function _clearActive() internal {
         bytes32 poolSlot = _ACTIVE_POOL_SLOT;
         bytes32 inSlot = _ACTIVE_IN_SLOT;
+        bytes32 budgetSlot = _ACTIVE_BUDGET_SLOT;
         assembly ("memory-safe") {
             tstore(poolSlot, 0)
             tstore(inSlot, 0)
+            tstore(budgetSlot, 0)
         }
     }
 
@@ -793,6 +922,23 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
         bytes32 slot = _ACTIVE_IN_SLOT;
         assembly ("memory-safe") {
             tokenIn := tload(slot)
+        }
+    }
+
+    function _activeBudget() internal view returns (uint256 budget) {
+        bytes32 slot = _ACTIVE_BUDGET_SLOT;
+        assembly ("memory-safe") {
+            budget := tload(slot)
+        }
+    }
+
+    /// @dev Spend against the active hop's budget. Writing the remainder back is what makes the ceiling
+    ///      CUMULATIVE across repeated callback invocations inside a single `pool.swap()`, rather than a
+    ///      per-invocation limit a pool could simply ask for twice.
+    function _spendBudget(uint256 amount) internal {
+        bytes32 slot = _ACTIVE_BUDGET_SLOT;
+        assembly ("memory-safe") {
+            tstore(slot, sub(tload(slot), amount))
         }
     }
 }

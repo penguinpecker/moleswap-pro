@@ -557,9 +557,25 @@ contract ExitPathStaticTest is SourceReader {
 
     /// @notice `withdraw(uint256 id, uint128 liquidityToRemove)` and `withdrawAll(uint256 id)`: no `address`
     ///         anywhere in either signature. And, totally: the vault's external/public surface is exactly the
-    ///         eighteen functions below, by name and parameter list — so no function, under any name and
+    ///         twenty-two functions below, by name and parameter list — so no function, under any name and
     ///         with any parameter type, can be added that sends a position's tokens to a caller-supplied
     ///         address, and only three of the pinned ones take an address at all (none of them moves a token).
+    ///
+    /// PIN UPDATED 2026-08-24, and here is the whole of why. The 2026-08-23 audit fixes added four external
+    /// functions: `withdrawWithMinimums` (a SECOND exit, whose extra parameters are a floor the CALLER
+    /// supplies), and three root-key setters — `setPoolLiquidityCap`, `seedPoolLiquidity`, `setEjectionCap` —
+    /// that exist because `maxEjectionBps` and the new aggregate `poolLiquidity` counter are otherwise
+    /// unreachable on the two proxies that already hold money (F-07 mechanisms C and D). Each was judged
+    /// against the two things this pin protects, not merely added to make it green:
+    ///   - NONE TAKES AN ADDRESS, so none can name a recipient. The three address-taking functions are still
+    ///     `setFeeRecipient`, `transferUpgradeAdmin` and the initializer's struct, exactly as before.
+    ///   - NONE IS READ ON THE EXIT. `maxPoolLiquidity` is read only by `_addPoolLiquidity` (the deposit
+    ///     side); `maxEjectionBps` only by `rebalance`; `poolLiquidity` is touched on the exit only by
+    ///     `_subPoolLiquidity`, which SATURATES at zero and cannot revert. That is proven, not asserted,
+    ///     by the identifier allowlists in
+    ///     `test_static_vaultExitBodiesReadNoKeeperOracleAdminWhitelistClockOrBound` below: if any of these
+    ///     three names ever appears in an exit body, that test goes red.
+    /// A setter that could reach the exit would have to be REMOVED, not pinned.
     function test_static_withdrawAbiHasNoRecipientAndNoExternalFunctionCanNameOne() public view {
         bytes memory src = _vault();
 
@@ -567,8 +583,14 @@ contract ExitPathStaticTest is SourceReader {
         assertEq(string(_params(hWithdraw)), "uint256 id, uint128 liquidityToRemove", "withdraw's parameters changed");
         (bytes memory hAll,) = _header(src, "function", "withdrawAll");
         assertEq(string(_params(hAll)), "uint256 id", "withdrawAll's parameters changed");
+        (bytes memory hMin,) = _header(src, "function", "withdrawWithMinimums");
+        assertEq(
+            string(_params(hMin)),
+            "uint256 id, uint128 liquidityToRemove, uint256 amount0Min, uint256 amount1Min",
+            "withdrawWithMinimums' parameters changed"
+        );
 
-        string[] memory want = new string[](18);
+        string[] memory want = new string[](22);
         want[0] = "initialize(InitParams memory p_)";
         want[1] = "setKeeperExpiry(uint64 expiry)";
         want[2] = "setFeeRecipient(address to)"; // repoints where ERC-6909 fee claims are minted
@@ -588,7 +610,31 @@ contract ExitPathStaticTest is SourceReader {
         want[15] = "ownerOf(uint256 id)";
         want[16] = "positionsOf(address owner)"; // a view
         want[17] = "poolKeyOf(PoolId id)";
+        // The second exit. Extra parameters, no extra authority: the floor is the CALLER's own number, so
+        // the only person it can ever stop is the person who passed it.
+        want[18] = "withdrawWithMinimums(uint256 id, uint128 liquidityToRemove, uint256 amount0Min, uint256 amount1Min)";
+        // F-07 mechanism D: the aggregate per-pool ceiling and its one-off seeding, both root-key-only.
+        // Read on the deposit side only — see the header above.
+        want[19] = "setPoolLiquidityCap(uint128 cap)";
+        want[20] = "seedPoolLiquidity(PoolId poolId, uint128 total)";
+        // F-07 mechanism C: `maxEjectionBps` is initializer-set and ships DISABLED on both live proxies,
+        // so without a setter the cap that answers the finding is unreachable there. Read by `rebalance`
+        // only.
+        want[21] = "setEjectionCap(uint16 bps)";
         _assertSurfaceIs(src, want, "the vault");
+
+        // NON-VACUITY OF THE "no recipient" HALF: exactly three of the twenty-two spell `address` in their
+        // parameter list, and the count is pinned so a fourth cannot arrive without this line moving. Two
+        // are admin plumbing and the third is a view that returns ids. Neither of the two exits, and none
+        // of the four functions added in 2026-08-24's pin update, is among them.
+        uint256 withAddress;
+        for (uint256 i = 0; i < want.length; i++) {
+            if (_contains(bytes(want[i]), "address ")) withAddress++;
+        }
+        assertEq(withAddress, 3, "the number of address-taking entry points changed");
+        assertTrue(_hasToken(want, "setFeeRecipient(address to)"), "setFeeRecipient is no longer one of them");
+        assertTrue(_hasToken(want, "transferUpgradeAdmin(address to)"), "transferUpgradeAdmin is no longer one of them");
+        assertTrue(_hasToken(want, "positionsOf(address owner)"), "positionsOf is no longer one of them");
 
         // P-69's forbidden primitive, by name, anywhere in the vault.
         assertFalse(_contains(src, "rescue"), "the vault grew a rescue function");
@@ -598,11 +644,29 @@ contract ExitPathStaticTest is SourceReader {
 
     /* ================================== (c) the exit bodies read no keeper / oracle / admin / whitelist */
 
-    /// @notice The BODIES of the exit graph — `withdrawAll`, `withdraw`, the callback's exit region, and the
-    ///         four helpers it calls — use ONLY the identifiers listed for each, and revert ONLY where and
-    ///         with what is pinned for each. So none may reach the keeper or any keeper bound, the oracle,
-    ///         the root key, the whitelist, the clock, the size band, a pause flag under any name, a new
-    ///         helper, a `require`, an `assert` or an `assembly` block.
+    /// @notice The BODIES of the exit graph — `withdrawAll`, `withdraw`, `withdrawWithMinimums`, the shared
+    ///         `_withdraw`, the two hops it makes (`_subPoolLiquidity`, `_guardedUnlock`), the callback's
+    ///         exit region, and the four helpers it calls — use ONLY the identifiers listed for each, and
+    ///         revert ONLY where and with what is pinned for each. So none may reach the keeper or any
+    ///         keeper bound, the oracle, the root key, the whitelist, the clock, the size band, the new
+    ///         aggregate liquidity cap, a pause flag under any name, a new helper, a `require` or an
+    ///         `assert`.
+    ///
+    /// THE GRAPH GREW THREE HOPS ON 2026-08-24, and this test FOLLOWS them rather than blessing them. The
+    /// audit fixes split the exit into `withdraw`/`withdrawWithMinimums` -> `_withdraw`, and `_withdraw`
+    /// now calls `_subPoolLiquidity` (the F-07 mechanism D counter) and `_guardedUnlock` (the unlock-
+    /// initiator sentinel) instead of `poolManager.unlock` directly. Following a hop is only legitimate if
+    /// the hop is pinned as hard as the caller was, so each of the three gets its own total allowlist and
+    /// its own revert pin below. What that buys, concretely:
+    ///   - `_subPoolLiquidity` CANNOT REVERT — pinned to zero reverts, and its body is pinned as text to
+    ///     the saturating form. A checked `-=` there would brick every exit on a vault upgraded in place
+    ///     over an existing book, which is exactly the reason the saturation is written that way.
+    ///   - `_guardedUnlock` is the ONE place on the exit path where `assembly` is permitted, and only
+    ///     because the total allowlist makes it a narrower statement than prose could be: the only opcode
+    ///     it may name is `tstore` on `_UNLOCK_SLOT`. `sload`, `sstore`, `extcodesize`, `call`, `delegatecall`
+    ///     — any of them, under any name — fail the allowlist. Both assembly blocks are pinned as text too.
+    ///   - `_withdraw` may revert in exactly three places, all of them the caller's own arithmetic:
+    ///     ZeroLiquidity, InsufficientLiquidity, and the caller-supplied floor. No fourth can appear.
     function test_static_vaultExitBodiesReadNoKeeperOracleAdminWhitelistClockOrBound() public view {
         bytes memory src = _vault();
 
@@ -610,17 +674,69 @@ contract ExitPathStaticTest is SourceReader {
         _assertOnlyIdentifiers(all, string.concat(SYNTAX, " withdraw id _positions liquidity"), "withdrawAll");
         _assertRevertsAre(all, "", "withdrawAll");
 
+        // The two public exits are now thin: each forwards to `_withdraw` and does nothing else. Pinned as
+        // text as well as by allowlist, so neither can grow a gate of its own above the shared body.
         bytes memory w = _body(src, "function", "withdraw");
+        _assertOnlyIdentifiers(w, string.concat(SYNTAX, " _withdraw id liquidityToRemove"), "withdraw");
+        _assertRevertsAre(w, "", "withdraw");
+        assertTrue(_contains(w, "_withdraw(id, liquidityToRemove, 0, 0);"), "withdraw no longer exits with no floor");
+
+        bytes memory wm = _body(src, "function", "withdrawWithMinimums");
         _assertOnlyIdentifiers(
-            w,
+            wm, string.concat(SYNTAX, " _withdraw id liquidityToRemove amount0Min amount1Min"), "withdrawWithMinimums"
+        );
+        _assertRevertsAre(wm, "", "withdrawWithMinimums");
+        assertTrue(
+            _contains(wm, "_withdraw(id, liquidityToRemove, amount0Min, amount1Min);"),
+            "withdrawWithMinimums no longer forwards the caller's own floor"
+        );
+
+        // THE SHARED EXIT BODY. Everything the old `withdraw` body proved is proved here instead.
+        bytes memory inner = _body(src, "function", "_withdraw");
+        _assertOnlyIdentifiers(
+            inner,
             string.concat(
                 SYNTAX,
                 " Position p _positions id liquidityToRemove revert ZeroLiquidity liquidity InsufficientLiquidity",
-                " res poolManager unlock abi encode Action Withdraw owner amount0 amount1 decode PositionWithdrawn"
+                " _subPoolLiquidity poolId res _guardedUnlock abi encode Action Withdraw owner amount0 amount1",
+                " amount0Min amount1Min decode WithdrawBelowMinimum PositionWithdrawn"
             ),
-            "withdraw"
+            "_withdraw"
         );
-        _assertRevertsAre(w, "ZeroLiquidity InsufficientLiquidity", "withdraw");
+        _assertRevertsAre(inner, "ZeroLiquidity InsufficientLiquidity WithdrawBelowMinimum", "_withdraw");
+        // The floor is compared against what came BACK, and against nothing else.
+        assertTrue(
+            _contains(inner, "if (amount0 < amount0Min || amount1 < amount1Min) revert WithdrawBelowMinimum();"),
+            "the exit's only price check is no longer the caller's own floor"
+        );
+
+        // HOP 1: the aggregate counter. Saturating, so it cannot revert; pinned to zero reverts AND to the
+        // exact saturating expression, because a checked subtraction here would brick every pre-upgrade
+        // position's exit.
+        bytes memory sub = _body(src, "function", "_subPoolLiquidity");
+        _assertOnlyIdentifiers(
+            sub, string.concat(SYNTAX, " unchecked uint128 cur poolLiquidity pid amount"), "_subPoolLiquidity"
+        );
+        _assertRevertsAre(sub, "", "_subPoolLiquidity");
+        assertTrue(
+            _contains(sub, "poolLiquidity[pid] = amount >= cur ? 0 : cur - amount;"),
+            "the exit's liquidity decrement no longer saturates at zero"
+        );
+        // And the CAP is not read here: the ceiling belongs to the deposit side only.
+        assertFalse(_contains(sub, "maxPoolLiquidity"), "the exit reads the aggregate liquidity cap");
+
+        // HOP 2: the unlock sentinel. The only assembly on the exit path, and the allowlist above is what
+        // makes that safe — `tstore` is the one opcode it may name.
+        bytes memory gu = _body(src, "function", "_guardedUnlock");
+        _assertOnlyIdentifiers(
+            gu,
+            string.concat(SYNTAX, " slot _UNLOCK_SLOT assembly tstore res poolManager unlock data"),
+            "_guardedUnlock"
+        );
+        _assertRevertsAre(gu, "", "_guardedUnlock");
+        assertTrue(_contains(gu, "tstore(slot, 1)"), "the unlock sentinel is no longer armed");
+        assertTrue(_contains(gu, "tstore(slot, 0)"), "the unlock sentinel is no longer cleared");
+        assertEq(_count(gu, "assembly"), 2, "the sentinel grew an assembly block");
 
         bytes memory region = _callbackExitRegion(src);
         _assertOnlyIdentifiers(
@@ -630,11 +746,17 @@ contract ExitPathStaticTest is SourceReader {
                 " msg sender poolManager revert NotPoolManager abi decode data Action ZapOpen action id owner",
                 " liquidityDelta newLower newUpper amount0Max amount1Max Position p _positions PoolKey key _pools",
                 " poolId Open Withdraw BalanceDelta delta exitFees _modify tickLower tickUpper exitCut0 exitCut1",
-                " _takePerformanceFee a0 a1 _collectTo toBalanceDelta encode"
+                " _takePerformanceFee a0 a1 _collectTo toBalanceDelta encode",
+                // The unlock-initiator sentinel, added 2026-08-23. It reads a TRANSIENT slot this contract
+                // set two frames earlier in the same transaction — not storage, not an admin flag, not a
+                // clock — and `tload` is the only opcode the allowlist lets it name.
+                " slot _UNLOCK_SLOT armed assembly tload UnexpectedCallback"
             ),
             "unlockCallback (exit region)"
         );
-        _assertRevertsAre(region, "NotPoolManager", "unlockCallback (exit region)");
+        _assertRevertsAre(region, "NotPoolManager UnexpectedCallback", "unlockCallback (exit region)");
+        assertTrue(_contains(region, "armed := tload(slot)"), "the callback's sentinel read changed shape");
+        assertEq(_count(region, "assembly"), 1, "the callback's exit region grew an assembly block");
         // The three calls the branch makes, in order, and the payout target: the STORED owner, read through
         // the position — pinned as text so a refactor to `owner` (the decoded calldata value) or to a
         // parameter is caught.
@@ -690,10 +812,22 @@ contract ExitPathStaticTest is SourceReader {
 
     /// @notice T-5 (c): the position owner is set exactly at creation, from `msg.sender`, at both entry points,
     ///         and is never reassigned anywhere. No transfer, no setter, no rescue can change who is paid.
+    ///
+    /// PIN UPDATED 2026-08-24. The old form was `_count(src, "owner:") == 2`, which read as "the only two
+    /// `owner:` field initializers in the vault are the two Position literals". The rebalance arithmetic
+    /// moved into `ZapLogic.rebalance` for EIP-170 headroom, and its parameter struct carries an `owner:`
+    /// field too — so the count is now three. The PROPERTY is unchanged and is still stated totally: every
+    /// `owner:` in the file is pinned by its exact right-hand side, and the total is pinned so a fourth
+    /// cannot appear unpinned. The third one reads `p.owner` — the STORED owner, out of storage — which is
+    /// the one source this contract is allowed to take a payout target from; a literal spelling
+    /// `owner: msg.sender` in that struct, or `owner:` set from a parameter or a decoded payload anywhere,
+    /// still fails.
     function test_static_positionOwnerIsWrittenOnceFromMsgSenderAndNeverReassigned() public view {
         bytes memory src = _vault();
         assertEq(_count(src, "owner: msg.sender"), 2, "the owner is not set from msg.sender at exactly open and zapOpen");
-        assertEq(_count(src, "owner:"), 2, "a Position literal sets the owner from something else");
+        assertEq(_count(src, "Position({"), 2, "the vault builds a Position literal somewhere new");
+        assertEq(_count(src, "owner: p.owner"), 1, "the rebalance payload no longer reads the stored owner");
+        assertEq(_count(src, "owner:"), 3, "a struct literal sets an owner from something else");
         assertEq(_memberWrites(src, ".owner"), 0, "a position's owner is reassigned somewhere");
     }
 
@@ -744,7 +878,8 @@ contract ExitPathStaticTest is SourceReader {
     function test_static_queueExitGraphCarriesNoModifierAndReadsNoOracleNoPoolNoAdmin() public view {
         bytes memory src = _queue();
 
-        string[6] memory graph = ["cancel", "claim", "timeout", "_phase", "_push", "_rawTransfer"];
+        string[7] memory graph =
+            ["cancel", "claim", "timeout", "_phase", "_push", "_rawTransfer", "_requireMovableCurrency"];
         for (uint256 i = 0; i < graph.length; i++) {
             (bytes memory h,) = _header(src, "function", graph[i]);
             _assertOnlyModifiers(h, _none(), graph[i]);
@@ -808,15 +943,56 @@ contract ExitPathStaticTest is SourceReader {
             string.concat(
                 SYNTAX,
                 " ok ret Currency unwrap c call abi encodeWithSelector IERC20Minimal transfer selector to amount length",
-                " decode revert TransferFailed"
+                " decode revert TransferFailed",
+                // F-03's payout-side guard, added 2026-08-23. Followed into its own body below rather than
+                // waved through here.
+                " _requireMovableCurrency"
             ),
             "_rawTransfer"
         );
         _assertRevertsAre(rawBody, "TransferFailed", "_rawTransfer");
 
+        // THE ONE NEW HOP ON THE QUEUE'S EXIT, AND WHY IT IS NOT A TRAP. `_requireMovableCurrency` puts a
+        // REVERT on the payout path, which is normally the thing this file exists to forbid, so it was
+        // judged rather than pinned:
+        //   - It can only fire when `Currency.unwrap(c).code.length == 0`. `initialize` already refuses a
+        //     codeless currency at deploy (`UnsupportedCurrency`, asserted below), and under Cancun's
+        //     EIP-6780 an account that was created in an earlier transaction can NEVER lose its code. So
+        //     for every queue that can exist, this cannot fire on a legitimate payout.
+        //   - When it does fire, the token is provably gone and the transfer it guards would have moved
+        //     nothing while marking the order withdrawn. Reverting strands nothing that was not already
+        //     unreachable; the old behaviour paid the honest side zero and closed their claim forever.
+        //   - `_push` short-circuits on a zero amount BEFORE reaching it, so a dead currency0 cannot block
+        //     a currency1-only payout. That ordering is pinned as text.
+        // Its body is then pinned totally, so nothing else can be smuggled in behind the same name.
+        bytes memory movable = _body(src, "function", "_requireMovableCurrency");
+        _assertOnlyIdentifiers(
+            movable,
+            string.concat(SYNTAX, " Currency unwrap c code length revert UnsupportedCurrency"),
+            "_requireMovableCurrency"
+        );
+        _assertRevertsAre(movable, "UnsupportedCurrency", "_requireMovableCurrency");
+        assertTrue(
+            _contains(movable, "if (Currency.unwrap(c).code.length == 0) revert UnsupportedCurrency();"),
+            "the payout-side currency guard tests something other than the currency having code"
+        );
+        assertTrue(_contains(pushBody, "if (amount == 0) return;"), "a zero-amount payout no longer short-circuits");
+        assertTrue(
+            _contains(_body(src, "function", "initialize"), "revert UnsupportedCurrency();"),
+            "the queue no longer refuses a currency it cannot move at deploy, so the payout guard became reachable"
+        );
+
         // The queue's entire external surface, pinned. Only `initialize` and `transferUpgradeAdmin` take an
         // address (admin plumbing); no exit names a payee, and nothing can be added that does.
-        string[] memory want = new string[](12);
+        //
+        // PIN UPDATED 2026-08-24 with the five entry points the F-04 settlement-guard fix added: one
+        // root-key setter and four views of what it set. Judged, not waved through — none takes an
+        // address, so none can name a payee; and none of `shortTwapWindow`, `maxOracleStaleness`,
+        // `maxClearingJumpTicks` or `minSettleLiquidity` appears in `cancel`, `claim`, `timeout`,
+        // `_phase`, `_push`, `_rawTransfer` or `_requireMovableCurrency`, which the total identifier
+        // allowlists above prove rather than assert. They bind the SETTLER, and a settler that refuses is
+        // exactly what `timeout` exists to survive.
+        string[] memory want = new string[](17);
         want[0] =
             "initialize(IPoolManager _poolManager, IMoleOracle _oracle, PoolKey memory _key, uint32 _epochDuration, uint32 _freezeDuration, uint32 _maxEpochLife, uint32 _twapWindow, int24 _maxTwapDeviationTicks, uint16 _maxResidualSlippageBps, address _upgradeAdmin)";
         want[1] = "transferUpgradeAdmin(address to)";
@@ -830,7 +1006,22 @@ contract ExitPathStaticTest is SourceReader {
         want[9] = "phaseOf(uint64 e)";
         want[10] = "orderCount(uint64 e)";
         want[11] = "unlockCallback(bytes calldata data)";
+        want[12] =
+            "setSettlementGuards(uint32 _shortTwapWindow, uint32 _maxOracleStaleness, int24 _maxClearingJumpTicks, uint128 _minSettleLiquidity)";
+        want[13] = "effectiveShortTwapWindow()";
+        want[14] = "effectiveMaxOracleStaleness()";
+        want[15] = "effectiveMaxClearingJumpTicks()";
+        want[16] = "effectiveMinSettleLiquidity()";
         _assertSurfaceIs(src, want, "the queue");
+
+        // Same non-vacuity check as the vault's surface: exactly two of the queue's seventeen entry points
+        // spell `address`, both of them admin plumbing, and the count is pinned so a third cannot arrive
+        // quietly. No payout leg has ever taken one and none can be added that does.
+        uint256 withAddress;
+        for (uint256 i = 0; i < want.length; i++) {
+            if (_contains(bytes(want[i]), "address ")) withAddress++;
+        }
+        assertEq(withAddress, 2, "the queue's number of address-taking entry points changed");
 
         // Every payout leg names the stored owner, never msg.sender or a parameter: five pushes (in-kind,
         // two output legs, two Q-3 refund legs) and the event, all on `o.owner`.

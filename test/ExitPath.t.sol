@@ -278,11 +278,17 @@ contract ExitPathVaultTest is Test, Deployers {
     ///         refusals is proven live before the owner exits. Then the owner withdraws half, then the rest,
     ///         and the zap-opened position too, each paying the stored owner and leaving the vault empty.
     function test_exit_survivesEveryHostileLeverAndTheBurnedRootKey() public {
+        // THE ORACLE IS WARMED FIRST NOW, and the fee-earning swaps moved to a SECOND round after A and B
+        // open. `open`/`zapOpen` gained a spot-vs-TWAP gate on 2026-08-23 (F-07 mechanism A) and `consult`
+        // fails closed on a pool younger than the window, so a deposit can no longer precede the warm-up.
+        // What the original ordering was for — A and B holding REALIZED fees when they exit, so the
+        // performance-fee leg of the exit is exercised rather than trivially zero — is preserved by the
+        // second round, and is asserted rather than assumed at the end of this test (`refusedClaims > 0`).
+        _warmOracle(hookKey);
+
         uint256 aliceStart = _value(alice);
         uint256 bobStart = _value(bob);
 
-        // Positions opened BEFORE the oracle warms: A and B earn fees through the warm-up swaps, so the
-        // performance-fee leg of the exit is exercised rather than trivially zero.
         uint256 idA = _open(vault, hookKey, alice, 1e18);
         uint256 idB = _zapOpen(vault, hookKey, bob, 1e18);
         _warmOracle(hookKey);
@@ -403,19 +409,58 @@ contract ExitPathVaultTest is Test, Deployers {
        2. THE ORACLE CANNOT ANSWER — the keeper is blind, the owner is not.
        ========================================================================== */
 
-    /// @notice A young pool: `consult(twapWindow)` reverts, which fails the keeper CLOSED (the TWAP bound
-    ///         refuses to act blind). The exit reads no oracle and must not notice.
+    /// @notice An oracle that CANNOT ANSWER the vault's window, which fails the keeper CLOSED (the TWAP
+    ///         bound refuses to act blind). The exit reads no oracle and must not notice.
+    ///
+    /// HOW THE UNANSWERABLE STATE IS BUILT, and why it is no longer "a young pool" (rewritten 2026-08-24).
+    /// The original fixture opened into a brand-new pool and asserted that `consult(1800)` reverted. Two
+    /// things about that went stale on 2026-08-23, in opposite directions:
+    ///   - `open` gained the spot-vs-TWAP deposit gate (F-07 mechanism A), so a position can no longer be
+    ///     created while the oracle is refusing at all. The position has to exist FIRST.
+    ///   - `consult` gained the quiet-tail path, so a pool that has simply never traded now ANSWERS any
+    ///     window inside its own life — correctly: with no swap in the window the mean IS `lastTick`.
+    /// So the premise is rebuilt from the refusal that survives, and it is the one MoleHook's header calls
+    /// out as cheaply reachable: THE SUB-INTERVAL BAND. A swap landing inside a ring write-gap advances
+    /// `lastTimestamp` without writing an observation, and a window whose left edge falls into that gap has
+    /// exact endpoints on both sides but an UNRECORDED tick path between them — so it takes the bracketed
+    /// path, finds nothing newer than itself in the ring, and fails closed. Below: the ring is warmed
+    /// (writes 300s apart), a dust swap lands 30s past the last write (60s interval, so no write), the
+    /// position is opened while the oracle still answers, and the clock is then advanced until the window's
+    /// left edge sits inside that 30-second gap. Nothing touches the pool after the position opens, which
+    /// is what keeps the wei-exact recovery assertion meaningful.
     function test_exit_survivesAnOracleThatCannotAnswer() public {
+        uint32 window = vault.twapWindow();
+        PoolId pid = hookKey.toId();
+
+        // Ring writes at T0, T0+300 ... T0+2400. `lastTimestamp == lastObsTimestamp == T0+2400`.
+        _warmOracle(hookKey);
+
+        // The dust swap that opens the band: 30 seconds past the last ring write, which is less than the
+        // 60-second observation interval, so it moves `lastTimestamp` and writes NOTHING.
+        _advance(30, 3);
+        _swap(hookKey, true, 1e12);
+
+        // The position is opened while the oracle can still answer — it has to be, now that the deposit is
+        // gated on the same read the keeper uses.
         uint256 before = _value(alice);
         uint256 id = _open(vault, hookKey, alice, 1e18);
         uint256 deposited = before - _value(alice);
 
-        // PREMISE: the oracle really cannot answer the vault's window yet...
-        uint32 window = vault.twapWindow();
-        PoolId pid = hookKey.toId();
+        // Advance until `block.timestamp - window` lands strictly inside the write gap: the left edge is
+        // then newer than the newest observation and older than the last swap. No swap here, so the
+        // position is untouched.
+        _advance(window - 15, 150);
+
+        // PREMISE: the oracle really cannot answer the vault's window...
         vm.expectRevert(MoleHook.InsufficientObservations.selector);
         hook.consult(pid, window);
-        // ...and that is exactly what stops the keeper.
+        // ...and it is THE WINDOW that cannot be covered, not the oracle that is dead — a shorter window
+        // clears the gap into the quiet tail and a longer one reaches back over it into the ring, and both
+        // answer. Without this the test would also pass against an oracle that simply reverted always.
+        hook.consult(pid, window - 60);
+        hook.consult(pid, window + 60);
+
+        // ...and the refusal is exactly what stops the keeper.
         vm.prank(KEEPER);
         vm.expectRevert(MoleHook.InsufficientObservations.selector);
         vault.rebalance(id, -540, 660);
@@ -446,12 +491,30 @@ contract ExitPathVaultTest is Test, Deployers {
         int24 drift = spot > twap ? spot - twap : twap - spot;
         assertGt(drift, vault.maxTwapDeviationTicks(), "premise: the market move did not outrun the TWAP");
 
-        // The keeper steps towards the market by its full recenter allowance (old mid 60 -> 660, exactly
-        // 600, so the price-independent bound is satisfied) and the TWAP bound refuses it: the new mid is
-        // 660 from an anchor that still reads ~0. The oracle's staleness is what is deciding here.
+        // TWO REFUSALS, BOTH PROVEN, because the keeper's bounds were reworked on 2026-08-23 for F-07 and
+        // the FIRST one to fire changed. Read them in the order the contract checks them.
+        //
+        // 1. THE PRICE-INDEPENDENT BOUND, now measured on the EDGES rather than the midpoint (F-07
+        //    mechanism C: [-1000,1000] -> [540,660] moved a lower edge 1,540 ticks while the midpoint read
+        //    600, which stepped a position clean off spot inside a bound that was satisfied on paper).
+        //    (-540, 660) -> (360, 960) moves the lower edge 900, so this refusal now comes first. It was
+        //    NOT the refusal this test used to get, and that is the whole change: the old assertion asked
+        //    for a range that a midpoint bound admitted and an edge bound does not.
         vm.prank(KEEPER);
-        vm.expectRevert(MolePositions.RangeTooFarFromTwap.selector);
+        vm.expectRevert(MolePositions.RecenterTooFar.selector);
         vault.rebalance(id, 360, 960);
+
+        // 2. THE STALE ORACLE, which is what this test is about. (-540, 660) -> (60, 1260) moves BOTH edges
+        //    by exactly the 600-tick allowance, so the price-independent bound is satisfied and the keeper
+        //    reaches the TWAP block — where the new spot-vs-TWAP gate (F-07 mechanism A) refuses, because
+        //    the market has run 30 days ahead of an anchor that still reads ~0. That is the oracle's
+        //    staleness deciding, exactly as before; it is a different error only because a STRICTER guard
+        //    now stands in front of the one this test used to name. `RangeTooFarFromTwap` — the keeper
+        //    picked a bad place to stand — is unreachable on this fixture once spot itself is out of band,
+        //    and stays pinned in KeeperBounds.t.sol and the AttackKeeperBounds suites.
+        vm.prank(KEEPER);
+        vm.expectRevert(MolePositions.SpotTooFarFromTwap.selector);
+        vault.rebalance(id, 60, 1260);
 
         // ...and the owner, whose position is now one-sided, leaves anyway.
         uint256 before = _value(alice);
@@ -484,9 +547,31 @@ contract ExitPathVaultTest is Test, Deployers {
         vm.expectPartialRevert(CustomRevert.WrappedError.selector);
         _swap(hookKey, true, 1e15);
 
+        // NEW DEPOSITS REVERT — and WHERE they revert moved on 2026-08-23. `open` now consults the oracle
+        // before it touches the pool (F-07 mechanism A), so a deposit dies at the gate and never reaches
+        // `beforeAddLiquidity`; a high-level call into code that is `PUSH1 0 PUSH1 0 REVERT` bubbles a
+        // revert with NO DATA, which is why the old `expectPartialRevert(WrappedError)` here now fails with
+        // "reverted as expected, but without data". Asserted as what it actually is — a refusal carrying
+        // zero bytes — rather than loosened to a bare `expectRevert()` that any revert would satisfy.
         vm.prank(alice);
+        (bool openOk, bytes memory openRet) = address(vault).call(
+            abi.encodeCall(
+                MolePositions.open,
+                (hookKey, -600, 600, 1e18, type(uint256).max, type(uint256).max, block.timestamp + 1)
+            )
+        );
+        assertFalse(openOk, "a deposit succeeded against a dead oracle");
+        assertEq(openRet.length, 0, "the dead hook's refusal arrived with data");
+
+        // ...and the hook would refuse the add anyway, which is the fact the assertion above used to carry:
+        // a direct add through the PoolManager still dies inside `beforeAddLiquidity`, wrapped by v4. So
+        // both doors are still proven shut, they are just no longer the same door.
         vm.expectPartialRevert(CustomRevert.WrappedError.selector);
-        vault.open(hookKey, -600, 600, 1e18, type(uint256).max, type(uint256).max, block.timestamp + 1);
+        modifyLiquidityRouter.modifyLiquidity(
+            hookKey,
+            ModifyLiquidityParams({tickLower: -600, tickUpper: 600, liquidityDelta: 1e18, salt: 0}),
+            ZERO_BYTES
+        );
 
         vm.prank(KEEPER);
         vm.expectRevert(); // the TWAP bound consults the hook, which now cannot answer at all
@@ -563,6 +648,10 @@ contract ExitPathVaultTest is Test, Deployers {
     ///         root key then burned), the hook's code is erased outright (not even a revert — empty), ten
     ///         years and a million L1 blocks go by. `withdraw` reads none of it.
     function test_exit_needsNoKeeperCodeNoAdminCodeNoHookCodeAndNoClock() public {
+        // The deposit needs a warm oracle (see `test_exit_isIndifferentToTheWhitelist`). The hook is erased
+        // AFTER the position exists, which is the state this test is actually about.
+        _warmOracle(hookKey);
+
         address codelessKeeper = makeAddr("codeless.keeper");
         address codelessTreasury = makeAddr("codeless.treasury");
         assertEq(codelessKeeper.code.length, 0, "premise: keeper has code");
@@ -604,6 +693,11 @@ contract ExitPathVaultTest is Test, Deployers {
     ///         position. A re-listing of the SAME pool id is refused, so the stored key of a position's pool
     ///         can never be swapped out from under its exit.
     function test_exit_isIndifferentToTheWhitelist() public {
+        // Warm the oracle before depositing. `open` gained a spot-vs-TWAP gate on 2026-08-23 (F-07
+        // mechanism A) and `consult` fails closed on a pool younger than the window, so a DEPOSIT into a
+        // cold pool is now refused. That is a deposit-side change and this test is about the whitelist, so
+        // the fixture warms up; nothing about the exit under test moved.
+        _warmOracle(hookKey);
         uint256 id = _open(vault, hookKey, alice, 1e18);
 
         // The same id cannot be re-registered (so `_pools[id]` is write-once).
@@ -871,6 +965,19 @@ contract ExitPathQueueTest is Test, Deployers {
         queue.freeze();
         (, uint64 frozenAt,,,,,,) = queue.epochs(0);
         assertEq(frozenAt, _epochStart + EPOCH, "freeze stamped the button press, not the cutoff");
+
+        // THE F-05 DELAY FIRES FIRST, and that is the guard working rather than a stale expectation.
+        // `freeze()` backdates `frozenAt` to the scheduled cutoff, so a delay anchored there would be
+        // ALREADY ELAPSED after a press this late — `freeze(e); settle(e);` would fit in one transaction
+        // and the settler would pick the exact block, and therefore the exact price, the batch is measured
+        // against. The delay now runs from whichever came LATER, the cutoff or the press, so a late press
+        // buys the settler nothing. Proven here before the oracle is killed, so the refusal below is
+        // attributable to the ORACLE and not to a timer that would have refused anyway.
+        vm.expectRevert(MoleQueue.TooEarly.selector);
+        queue.settle(0);
+        // Exactly the delay, not a second more: settlement is available the instant the wait elapses, so
+        // the refusal that follows cannot be this one still running.
+        _advance(FREEZE);
 
         // The oracle dies: settlement is now impossible for anyone, pinned to the oracle's own error.
         vm.mockCallRevert(

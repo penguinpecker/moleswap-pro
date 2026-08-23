@@ -151,6 +151,12 @@ contract AttackFinalEconomicsTest is Test, Deployers {
         manager.initialize(pk, SQRT_PRICE_1_1);
         positions.whitelistPool(pk);
 
+        // AGE THE POOL PAST THE TWAP WINDOW BEFORE ANYONE DEPOSITS. `open`/`zapOpen` now gate SPOT
+        // against the oracle, and `consult` fails closed while the pool is younger than the window, so a
+        // pool takes no deposits during its first `D_TWAP_WINDOW` seconds. Deliberate, and what a real
+        // deployment sees; aged here so the economics measured below are the same ones as before.
+        _advance(D_TWAP_WINDOW + 1);
+
         _fund(alice);
         _fund(jit);
         _fund(victimSwapper);

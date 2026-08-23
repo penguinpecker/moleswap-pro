@@ -218,21 +218,38 @@ contract KeeperBoundsTest is Test, Deployers {
     ///      was satisfied at an absurd tick and a compromised keeper took 100% of a position's principal —
     ///      the exact outcome this contract's security claim denies. A relative bound cannot be moved by
     ///      manipulating anything, because it compares the new range only to the old one.
+    /// @dev THE BOUND MEASURES EDGES, NOT THE MIDPOINT, since 2026-08-23. A midpoint is an average, and an
+    ///      average hides a reshape: [-600, 600] -> [300, 900] moves the LOWER edge 900 ticks while the old
+    ///      `moved` read exactly 600 and passed. F-07 mechanism C is that observation taken to its
+    ///      conclusion — [-1000, 1000] -> [540, 660] moves an edge 1,540 ticks with `moved` reading 600 —
+    ///      and it ends with spot outside the new range and a whole leg ejected. So the accepted case below
+    ///      is a TRANSLATION at constant width, which is what "moved 600 ticks" was always supposed to mean.
     function test_recenterBoundLimitsHowFarOneRebalanceMayMoveAPosition() public {
         MolePositions m = deployMoleVault(manager, KEEPER, 0, MIN_W, MAX_W, address(0), 0, 0, 0, 0, 10_000, 600, 0, address(0));
         m.whitelistPool(key);
         _approve(alice, address(m));
-        uint256 id = _open(m, key, alice, 1e18); // midpoint 0
+        uint256 id = _open(m, key, alice, 1e18); // [-600, 600]
 
-        // 600 ticks of movement is allowed...
+        // 600 ticks of movement is allowed, on both edges at once...
         vm.prank(KEEPER);
-        m.rebalance(id, 300, 900); // midpoint 600
-        assertEq(m.getPosition(id).tickLower, 300, "a rebalance inside the recenter bound was refused");
+        m.rebalance(id, 0, 1200);
+        assertEq(m.getPosition(id).tickLower, 0, "a rebalance inside the recenter bound was refused");
 
         // ...601 is not. The boundary itself is pinned, not merely the direction.
         vm.prank(KEEPER);
         vm.expectRevert(MolePositions.RecenterTooFar.selector);
-        m.rebalance(id, 960, 1560); // midpoint 1260, i.e. 660 away
+        m.rebalance(id, 660, 1860); // both edges 660 away
+
+        // A RESHAPE THAT BARELY MOVES THE MIDPOINT IS STILL MOVEMENT, and this is F-07 mechanism C at the
+        // widths it was measured on: [-960, 960] -> [540, 660] moves the midpoint exactly 600, which the
+        // old bound accepted because the midpoint was the only thing it measured — while the LOWER EDGE
+        // travels 1,500 ticks and the position lands entirely on one side of spot, where the burn returns
+        // a single token and a whole leg is ejected.
+        vm.prank(alice);
+        uint256 wide = m.open(key, -960, 960, 1e18, type(uint256).max, type(uint256).max, block.timestamp + 1);
+        vm.prank(KEEPER);
+        vm.expectRevert(MolePositions.RecenterTooFar.selector);
+        m.rebalance(wide, 540, 660);
 
         // And a far jump — the shape of the C9/C12 attack — is refused however legal its width.
         vm.prank(KEEPER);
@@ -304,6 +321,9 @@ contract KeeperBoundsTest is Test, Deployers {
             deployMoleVault(manager, KEEPER, 0, MIN_W, MAX_W, address(h), 600, 300, 0, 0, 10_000, 0, 0, address(0));
         m.whitelistPool(k);
         _approve(alice, address(m));
+        // The pool has to be older than the window before it takes a deposit: `open` now gates spot
+        // against the oracle and `consult` fails closed on a pool younger than its window.
+        _advance(301, 25);
         uint256 id = _open(m, k, alice, 1e18);
 
         // Warm the oracle so a 300s window is genuinely covered.
@@ -331,20 +351,43 @@ contract KeeperBoundsTest is Test, Deployers {
     }
 
     /// @notice The bound must FAIL CLOSED when the oracle cannot answer. A keeper that can rebalance
-    ///         blind whenever the window is uncovered is not bounded at all.
+    ///         blind whenever the window is uncovered is not bounded at all — and as of 2026-08-23 the
+    ///         same is true of a DEPOSIT, which is the half this test gained.
     function test_twapBoundFailsClosedWhenTheOracleCannotCoverTheWindow() public {
         (MoleHook h, PoolKey memory k) = _hookWorld(2);
         MolePositions m =
             deployMoleVault(manager, KEEPER, 0, MIN_W, MAX_W, address(h), 600, 3600, 0, 0, 10_000, 0, 0, address(0));
         m.whitelistPool(k);
         _approve(alice, address(m));
-        uint256 id = _open(m, k, alice, 1e18);
 
-        // The pool is far younger than the 1h window, so consult() reverts and the rebalance must too.
+        // THE DEPOSIT SIDE. The pool is far younger than the 1h window, so `consult` reverts — and `open`
+        // now consults, because it mints against slot0 and had no anchor for it. The cold-start cost is
+        // real and is the intended trade: a deposit refused strands nobody, a deposit priced blind does.
         _advance(61, 6);
+        vm.prank(alice);
+        vm.expectRevert(MoleHook.InsufficientObservations.selector);
+        m.open(k, -600, 600, 1e18, type(uint256).max, type(uint256).max, block.timestamp + 1);
+
+        // Age the pool so a position can exist at all, then take the oracle away again.
+        _advance(3601, 300);
+        uint256 id = _open(m, k, alice, 1e18);
+        vm.mockCallRevert(
+            address(h),
+            abi.encodeWithSelector(MoleHook.consult.selector),
+            abi.encodeWithSelector(MoleHook.InsufficientObservations.selector)
+        );
+
+        // THE KEEPER SIDE, unchanged: no oracle, no rebalance.
         vm.prank(KEEPER);
         vm.expectRevert(MoleHook.InsufficientObservations.selector);
         m.rebalance(id, -540, 660);
+
+        // THE EXIT IS NEVER GATED ON THE ORACLE, and that is deliberate rather than incidental — a gate on
+        // the exit is a censorship lever for whoever can move spot. Pinned here, next to the two paths
+        // that ARE gated, so the asymmetry is visible in one place.
+        vm.prank(alice);
+        m.withdrawAll(id);
+        assertEq(m.getPosition(id).liquidity, 0, "a dead oracle blocked an exit");
     }
 
     /// @notice A TWAP bound with no oracle behind it is protection in name only, so it cannot deploy.

@@ -81,6 +81,20 @@ contract AttackQueueSafety is Test, Deployers {
     uint32 internal constant MAX_EPOCH_LIFE = 3600;
     uint32 internal constant TWAP_WINDOW = 300;
 
+    /// @dev THE ESCAPE HATCH ON A FROZEN EPOCH OPENS HERE, NOT AT `MAX_EPOCH_LIFE` — F-06. Lenient
+    ///      `settle` unlocks at `frozenAt + maxEpochLife`; `timeout` unlocks one freeze window later, at
+    ///      `frozenAt + maxEpochLife + freezeDuration`. While both doors opened on the SAME second the set
+    ///      of moments where the deadline fallback could run and settle could not was EMPTY, so any
+    ///      participant who disliked the cross could veto a settleable batch by racing `timeout` first and
+    ///      the crossed portion — which needs no pool and was already priced at the anchor — simply never
+    ///      happened. The fixtures below carry the deadline as this one constant rather than each
+    ///      re-deriving it, so a future change to the clock moves them together instead of leaving some
+    ///      of them silently testing a moment that is no longer the boundary.
+    ///
+    ///      The escape hatch on a NEVER-FROZEN epoch is a different clock (`epochStartedAt + duration +
+    ///      maxEpochLife`) and deliberately does not use this.
+    uint32 internal constant TIMEOUT_AFTER_FREEZE = MAX_EPOCH_LIFE + FREEZE_DURATION;
+
     /// @dev The two price guards. Both must be non-zero or the constructor refuses. The values are chosen
     ///      to be comfortably wider than anything these escrow tests do to the pool, so that a settlement
     ///      here can only fail for an escrow-accounting reason and never because a price bound tripped.
@@ -362,7 +376,7 @@ contract AttackQueueSafety is Test, Deployers {
         _advance(60);
         _swap(poolKey, true, 20_000e18);
 
-        _advance(MAX_EPOCH_LIFE);
+        _advance(TIMEOUT_AFTER_FREEZE);
         queue.timeout(0);
         assertEq(uint8(queue.phaseOf(0)), uint8(MoleQueue.Phase.Refunding), "timeout did not open the refund exit");
 
@@ -422,8 +436,8 @@ contract AttackQueueSafety is Test, Deployers {
         _advance(FREEZE_DURATION + 1);
         assertEq(uint8(queue.phaseOf(0)), uint8(MoleQueue.Phase.Frozen), "epoch should be awaiting settlement");
 
-        // Still hostage right up to the last second of maxEpochLife.
-        _advance(MAX_EPOCH_LIFE - FREEZE_DURATION - 2);
+        // Still hostage right up to the last second before the escape hatch opens.
+        _advance(MAX_EPOCH_LIFE - 2);
         vm.prank(stranger);
         vm.expectRevert(MoleQueue.NotTimedOut.selector);
         queue.timeout(0);
@@ -482,8 +496,16 @@ contract AttackQueueSafety is Test, Deployers {
         vm.expectRevert(MoleQueue.NotTimedOut.selector);
         queue.timeout(0);
 
+        // AT `maxEpochLife` — the second lenient `settle` unlocks — timeout is STILL refused. This is
+        // F-06 itself: the deadline fallback gets a window in which it is the only door open, so a
+        // participant who dislikes the cross cannot veto a settleable batch by racing timeout.
+        _advance(MAX_EPOCH_LIFE);
+        vm.prank(stranger);
+        vm.expectRevert(MoleQueue.NotTimedOut.selector);
+        queue.timeout(0);
+
         // One second short of the deadline.
-        _advance(MAX_EPOCH_LIFE - 1);
+        _advance(TIMEOUT_AFTER_FREEZE - MAX_EPOCH_LIFE - 1);
         vm.prank(stranger);
         vm.expectRevert(MoleQueue.NotTimedOut.selector);
         queue.timeout(0);
@@ -504,7 +526,7 @@ contract AttackQueueSafety is Test, Deployers {
 
         _advance(EPOCH_DURATION);
         queue.freeze();
-        _advance(MAX_EPOCH_LIFE);
+        _advance(TIMEOUT_AFTER_FREEZE);
 
         vm.prank(stranger);
         queue.timeout(0);
@@ -585,7 +607,7 @@ contract AttackQueueSafety is Test, Deployers {
         // Drive the epoch to a state where a claim actually pays, so this is theft and not a no-op.
         _advance(EPOCH_DURATION);
         queue.freeze();
-        _advance(MAX_EPOCH_LIFE);
+        _advance(TIMEOUT_AFTER_FREEZE);
         vm.prank(stranger);
         queue.timeout(0);
 
@@ -756,7 +778,7 @@ contract AttackQueueSafety is Test, Deployers {
 
         _advance(EPOCH_DURATION);
         queue.freeze();
-        _advance(MAX_EPOCH_LIFE);
+        _advance(TIMEOUT_AFTER_FREEZE);
         vm.prank(stranger);
         queue.timeout(0);
 
@@ -788,7 +810,7 @@ contract AttackQueueSafety is Test, Deployers {
 
         _advance(EPOCH_DURATION);
         queue.freeze();
-        _advance(MAX_EPOCH_LIFE);
+        _advance(TIMEOUT_AFTER_FREEZE);
         vm.prank(stranger);
         queue.timeout(0);
 
@@ -861,7 +883,7 @@ contract AttackQueueSafety is Test, Deployers {
 
         _advance(EPOCH_DURATION);
         queue.freeze();
-        _advance(MAX_EPOCH_LIFE);
+        _advance(TIMEOUT_AFTER_FREEZE);
         vm.prank(stranger);
         queue.timeout(0);
 
@@ -942,7 +964,7 @@ contract AttackQueueSafety is Test, Deployers {
 
         _advance(EPOCH_DURATION);
         queue.freeze();
-        _advance(MAX_EPOCH_LIFE);
+        _advance(TIMEOUT_AFTER_FREEZE);
         vm.prank(stranger);
         queue.timeout(0);
 
@@ -1063,7 +1085,7 @@ contract AttackQueueSafety is Test, Deployers {
 
         _advance(EPOCH_DURATION);
         queue.freeze();
-        _advance(MAX_EPOCH_LIFE);
+        _advance(TIMEOUT_AFTER_FREEZE);
         vm.prank(stranger);
         queue.timeout(0);
 

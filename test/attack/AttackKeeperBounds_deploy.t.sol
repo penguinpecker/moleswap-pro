@@ -54,7 +54,8 @@ contract Create2Factory {
 ///     never was a JIT defence, and a sole-LP pool has zero-liquidity regions that make the oracle
 ///     walkable), hookFee 0, feeRecipient == deployer, minRebalanceInterval 1 day,
 ///     range width [120, 60000], maxTwapDev 600, twapWindow 1800, minDwellL1Blocks 300,
-///     maxRebalancesPerL1Block 10, maxEjectionBps 10000 (residual cap off), maxRecenterTicks 600,
+///     maxRebalancesPerL1Block 10, maxEjectionBps 7500 (residual cap ON as of 2026-08-23; it shipped at
+///     10000 = off and that is what F-07 mechanism C exploited), maxRecenterTicks 600,
 ///     keeper == deployer.
 ///
 /// WHAT HELD (tests D1, D3, D4, D8): the defaults are usable. A user can open and fully withdraw, the
@@ -109,8 +110,12 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
     ///      describing the shipped deployment — which is the whole point of them.
     uint64 internal constant D_DWELL = 300;
     uint16 internal constant D_BUDGET = 10;
-    /// @dev MOLE_MAX_EJECTION_BPS default: 10_000 = residual cap deliberately OFF at deploy.
-    uint16 internal constant D_EJECT = 10_000;
+    /// @dev MOLE_MAX_EJECTION_BPS. READ from DeployConfig rather than restated, which is the rule the rest
+    ///      of this file already follows — and the reason it is read now is that the literal here was
+    ///      10_000 (OFF) and stayed 10_000 while the shipped default changed. The 2026-08-23 audit named
+    ///      the disabled residual cap as the thing that let one legal keeper step eject a whole leg
+    ///      (F-07 mechanism C); the default is now 7_500 and this constant follows it by construction.
+    uint16 internal constant D_EJECT = DeployConfig.DEFAULT_MAX_EJECTION_BPS;
     /// @dev MOLE_MAX_RECENTER_TICKS default: the price-independent bound on how far one rebalance may
     ///      move a position's midpoint.
     int24 internal constant D_RECENTER = 600;
@@ -257,6 +262,13 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
         // NEXT step 2: whitelist it on the custody core (permissionless).
         positions.whitelistPool(pk);
 
+        // NEXT step 2b, which a real deployment cannot skip either: WAIT. `open`/`zapOpen` now gate spot
+        // against the oracle (the Arrakis-class fix), and `consult` fails closed until the pool is older
+        // than D_TWAP_WINDOW — so the shipped deployment has a 30-minute cold start during which it takes
+        // no deposits. That is a real, deliberate property of the defaults this file exists to describe,
+        // and it belongs in the world-building step rather than hidden in each test.
+        _advance(D_TWAP_WINDOW + 1);
+
         _fund(alice);
         _fund(jit);
         _approve(alice, address(positions));
@@ -326,6 +338,27 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
     function _centred(int24 anchor) internal pure returns (int24 lo, int24 hi) {
         lo = ((anchor - 300) / SPACING) * SPACING;
         hi = lo + 600;
+    }
+
+    /// @dev A LEGAL keeper step from the +/-30,000 range these tests open: SAME WIDTH, translated toward
+    ///      the anchor by at most `D_RECENTER` ticks and rounded onto spacing.
+    ///
+    ///      `_centred` stopped being a legal step on 2026-08-23, and the reason is worth stating because it
+    ///      is a real behaviour change rather than a test repair. The recenter bound now measures EDGE
+    ///      movement instead of the midpoint: a midpoint is an average and an average hides a reshape, so
+    ///      `_centred` — which narrows a 60,000-tick position to 600 in ONE call — moves each edge 29,700
+    ///      ticks while the old `moved` read exactly zero. That is F-07 mechanisms B and C in a single
+    ///      line: same midpoint, legal width, every price bound satisfied, and the stored liquidity
+    ///      multiplied by two orders of magnitude. Narrowing is still available to the keeper; it now costs
+    ///      more than one rebalance, which is the point.
+    ///
+    ///      Never returns a no-op, so an assertion that the range moved is still able to fail.
+    function _step(int24 anchor) internal pure returns (int24 lo, int24 hi) {
+        int24 delta = anchor > D_RECENTER ? D_RECENTER : (anchor < -D_RECENTER ? -D_RECENTER : anchor);
+        delta = (delta / SPACING) * SPACING;
+        if (delta == 0) delta = anchor < 0 ? -SPACING : SPACING;
+        lo = -30_000 + delta;
+        hi = 30_000 + delta;
     }
 
     /* ================================================================== D1 =========
@@ -421,6 +454,8 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
         vm.prank(DEPLOYER);
         manager.initialize(rpk, SQRT_PRICE_1_1);
         rvault.whitelistPool(rpk);
+        // Same cold start as the shipped pool above: a brand-new pool takes no deposits.
+        _advance(D_TWAP_WINDOW + 1);
         _approve(alice, address(rvault));
 
         // The allowlisted vault provides.
@@ -489,7 +524,7 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
 
         // Just short of the cadence: refused on the cadence, not on anything else.
         _advance(1 days - 60);
-        (int24 lo0, int24 hi0) = _centred(0);
+        (int24 lo0, int24 hi0) = _step(0);
         vm.prank(DEPLOYER); // keeper == deployer, per MOLE_KEEPER's default
         vm.expectRevert(MolePositions.RebalanceTooSoon.selector);
         positions.rebalance(id, lo0, hi0);
@@ -497,7 +532,7 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
         // Past it. The oracle has been idle the whole time, which is the realistic cold case.
         _advance(120);
         int24 twap = hook.consult(pid, D_TWAP_WINDOW);
-        (int24 lo, int24 hi) = _centred(twap);
+        (int24 lo, int24 hi) = _step(twap);
         assertEq(int256(lo) % SPACING, 0, "lo off spacing");
         assertEq(int256(hi) % SPACING, 0, "hi off spacing");
 
@@ -521,14 +556,28 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
        ============================================================================== */
 
     function test_D4_oracleWarmsUpInExactlyTheWindowWithNoSwapsAtAll() public {
+        // MEASURED ON A POOL CREATED HERE. setUp now ages the shipped pool past the window before anyone
+        // deposits — it has to, because `open` gates spot against the oracle and a cold oracle refuses the
+        // deposit — and this test is about the interval from pool CREATION, so it needs a pool of its own.
+        PoolKey memory fresh = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            tickSpacing: 10,
+            hooks: IHooks(address(hook))
+        });
+        vm.prank(DEPLOYER);
+        manager.initialize(fresh, SQRT_PRICE_1_1);
+        PoolId freshId = fresh.toId();
+
         // One second short of the window: fails closed.
         _advance(D_TWAP_WINDOW - 1);
         vm.expectRevert(MoleHook.InsufficientObservations.selector);
-        hook.consult(pid, D_TWAP_WINDOW);
+        hook.consult(freshId, D_TWAP_WINDOW);
 
         // Exactly the window after pool creation, with zero swaps ever: answerable.
         _advance(1);
-        int24 t = hook.consult(pid, D_TWAP_WINDOW);
+        int24 t = hook.consult(freshId, D_TWAP_WINDOW);
         assertEq(int256(t), 0, "an idle pool should average to its initial tick");
         console2.log("D4 seconds from pool creation to a usable 1800s TWAP:", D_TWAP_WINDOW);
     }
@@ -571,6 +620,10 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
         _approve(alice, address(vaultAtCeiling));
         _approve(alice, address(vaultBelow));
 
+        // Both vaults gate deposits on a window LONGER than the one setUp aged the pool past, so age it
+        // the rest of the way: a cold oracle refuses a deposit exactly as it refuses a rebalance.
+        _advance(uint256(accepted) + 1);
+
         uint256 idCeiling = _open(vaultAtCeiling, alice, -30_000, 30_000, 20_000e18);
         uint256 idBelow = _open(vaultBelow, alice, -30_000, 30_000, 20_000e18);
 
@@ -601,7 +654,7 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
         // Consequence: the vault deployed at the once-accepted ceiling can no longer rebalance
         // ANYTHING, permanently, while the identically configured vault one interval below is fine.
         int24 twap = hook.consult(pid, real);
-        (int24 lo, int24 hi) = _centred(twap);
+        (int24 lo, int24 hi) = _step(twap);
 
         vm.prank(DEPLOYER);
         vaultBelow.rebalance(idBelow, lo, hi);
@@ -849,7 +902,7 @@ contract AttackKeeperBoundsDeploy is Test, Deployers {
         // The first instant the cadence allows a rebalance.
         _advance(1 days);
         int24 twap = hook.consult(pid, D_TWAP_WINDOW);
-        (int24 lo, int24 hi) = _centred(twap);
+        (int24 lo, int24 hi) = _step(twap);
 
         // Shipped dwell of 300 and no dwell at all are indistinguishable: both go through.
         vm.prank(DEPLOYER);

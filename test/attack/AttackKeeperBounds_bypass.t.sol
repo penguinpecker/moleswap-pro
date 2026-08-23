@@ -456,6 +456,13 @@ contract AttackKeeperBoundsBypassTest is Test, Deployers {
             ModifyLiquidityParams({tickLower: -60_000, tickUpper: 60_000, liquidityDelta: 5_000e18, salt: 0}),
             ZERO_BYTES
         );
+        // AGE THE POOL PAST THE LONGEST WINDOW THIS FILE USES. `open`/`zapOpen` now gate SPOT against the
+        // oracle and `consult` fails closed on a pool younger than its window, so a deposit into a
+        // brand-new pool is refused. That is the deliberate cold start; every bound this file attacks is
+        // about what happens AFTER a position exists, so the world is aged here rather than per test.
+        // Left idle: with no swaps the tick cumulative stays flat and `consult` still returns exactly 0,
+        // which is what keeps every midpoint assertion below exact.
+        _advanceRH(1801);
     }
 
     /// @notice ATTACK — place a legal-width range whose MIDPOINT sits inside the band while the range

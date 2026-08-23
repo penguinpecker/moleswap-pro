@@ -82,9 +82,12 @@ contract Deploy is Script {
         // backstop. This is the floor an ordering-privileged party genuinely cannot move.
         uint64 minDwellL1 = uint64(vm.envOr("MOLE_MIN_DWELL_L1_BLOCKS", uint256(DeployConfig.DEFAULT_MIN_DWELL_L1_BLOCKS)));
         uint16 maxRebalPerL1 = uint16(vm.envOr("MOLE_MAX_REBALANCES_PER_L1_BLOCK", uint256(DeployConfig.DEFAULT_MAX_REBALANCES_PER_L1_BLOCK)));
-        // 10_000 = disabled. Left OFF by default deliberately: after a large move ANY recentre produces a
-        // large residual, so a tight cap would refuse the keeper in exactly the case it is most needed.
-        // Set it once monitoring shows what residuals this pool actually produces (see RebalanceResidualPaid).
+        // 10_000 = disabled, and it is no longer the default: this ships ON at 7_500 (see the derivation
+        // on DeployConfig.DEFAULT_MAX_EJECTION_BPS). It is a per-rebalance STEP limit, not a budget —
+        // legal steps compound — so read that note before tightening it. Override with MOLE_MAX_EJECTION_BPS
+        // anywhere in (0, 10_000] once monitoring shows what residuals this pool actually produces (see
+        // RebalanceResidualPaid). The LIVE vaults are still at 10_000: this value is initializer-only, so
+        // changing it here moves NEW deployments only and the existing ones need MolePositions.setEjectionCap.
         uint16 maxEjectionBps = uint16(vm.envOr("MOLE_MAX_EJECTION_BPS", uint256(DeployConfig.DEFAULT_MAX_EJECTION_BPS)));
         // The price-independent bound. Default 600 ticks per rebalance: at the 1-day cadence a keeper
         // needs months to walk a position anywhere meaningful, and the owner can exit at any point.
@@ -107,7 +110,12 @@ contract Deploy is Script {
         _requireFits("MOLE_MAX_TWAP_DEVIATION_TICKS", uint24(DeployConfig.DEFAULT_MAX_TWAP_DEVIATION_TICKS), uint256(uint24(type(int24).max)));
         _requireFits("MOLE_MIN_DWELL_L1_BLOCKS", DeployConfig.DEFAULT_MIN_DWELL_L1_BLOCKS, type(uint64).max);
         _requireFits("MOLE_MAX_REBALANCES_PER_L1_BLOCK", DeployConfig.DEFAULT_MAX_REBALANCES_PER_L1_BLOCK, type(uint16).max);
-        _requireFits("MOLE_MAX_EJECTION_BPS", DeployConfig.DEFAULT_MAX_EJECTION_BPS, DeployConfig.DEFAULT_MAX_EJECTION_BPS);
+        // THE CEILING IS THE TYPE'S LEGAL MAXIMUM, NOT THE DEFAULT. `DeployConfig.validate` accepts
+        // anything in (0, 10_000], so 10_000 is the bound to check against. Passing the DEFAULT as its own
+        // ceiling was harmless only while the default WAS the maximum; once it moved to 7_500 every env
+        // override above 7_500 — including the 10_000 the live vaults actually carry — was refused here,
+        // and refused with "does not fit its type", which is not what went wrong.
+        _requireFits("MOLE_MAX_EJECTION_BPS", DeployConfig.DEFAULT_MAX_EJECTION_BPS, 10_000);
         _requireFits("MOLE_MAX_RECENTER_TICKS", uint24(DeployConfig.DEFAULT_MAX_RECENTER_TICKS), uint256(uint24(type(int24).max)));
         _requireFits("MOLE_PERFORMANCE_FEE_BPS", DeployConfig.DEFAULT_PERFORMANCE_FEE_BPS, DeployConfig.MAX_PERFORMANCE_FEE_BPS);
 

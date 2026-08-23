@@ -162,6 +162,14 @@ contract AttackFinalComposition is Test, Deployers {
         manager.initialize(pk, SQRT_PRICE_1_1); // sender == poolCreator
         positions.whitelistPool(pk); // permissionless
 
+        // AGE THE POOL PAST THE TWAP WINDOW BEFORE ANYONE DEPOSITS. `open`/`zapOpen` now gate SPOT
+        // against the oracle (the Arrakis-class fix: mint and burn used to read slot0 with no anchor
+        // while only rebalance consulted the average), and `consult` fails closed while the pool is
+        // younger than the window. So a pool has a cold-start period during which it takes no deposits —
+        // that is deliberate, and it is what a real deployment sees too. Aged here rather than in each
+        // test so this file goes on measuring what it was written to measure.
+        _advance(D_TWAP_WINDOW + 1);
+
         _fund(alice);
         _fund(bob);
         _fund(jit);
@@ -354,6 +362,9 @@ contract AttackFinalComposition is Test, Deployers {
             hooks: IHooks(address(hook))
         });
         manager.initialize(other, SQRT_PRICE_1_1); // poolCreator only
+        // Cold-start: a deposit gate now reads the oracle, so a freshly created pool takes nothing until
+        // it is older than the window. The bypass under test is about ADMISSION, not about age.
+        _advance(D_TWAP_WINDOW + 1);
         PoolId otherId = other.toId();
 
         // The unlisted JIT bot cannot provide to it directly.
@@ -1021,6 +1032,8 @@ contract AttackFinalComposition is Test, Deployers {
         });
         manager.initialize(k, SQRT_PRICE_1_1);
         v.whitelistPool(k);
+        // Same cold-start as every other pool this file builds: age it past the window before depositing.
+        _advance(D_TWAP_WINDOW + 1);
         _approve(alice, address(v));
         vm.prank(alice);
         v.open(k, -600, 600, 20_000e18, type(uint256).max, type(uint256).max, block.timestamp);

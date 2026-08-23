@@ -12,7 +12,6 @@ import {ModifyLiquidityParams, SwapParams} from "v4-core/types/PoolOperation.sol
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {TransientStateLibrary} from "v4-core/libraries/TransientStateLibrary.sol";
-import {LiquidityAmounts} from "v4-periphery/libraries/LiquidityAmounts.sol";
 import {HookPermissions} from "./config/HookPermissions.sol";
 import {DeployConfig} from "./config/DeployConfig.sol";
 import {ZapLogic} from "./libraries/ZapLogic.sol";
@@ -32,32 +31,58 @@ interface IMoleOracle {
 ///
 /// THE SECURITY CLAIM, stated so it can be checked rather than believed:
 ///
-///   1. No code path in this contract sends a token to an address that was supplied by a caller.
+///   1. No code path in this contract sends a POOL token to an address that was supplied by a caller.
 ///      Every payout target is read from `positions[id].owner` in storage. `take()` is called with
 ///      that stored owner and nothing else. There is no `to`, `recipient` or `receiver` parameter
 ///      anywhere in this contract's external surface.
+///      THE ONE EXCEPTION, named rather than glossed: `_refundNative` returns native change to
+///      `msg.sender`. That used to be a whole-balance sweep resting on "this contract holds no ETH
+///      between transactions", which is true for voluntary sends and NOT enforceable against forced ETH
+///      (a SELFDESTRUCT beneficiary, or the proxy being named a block's fee recipient). It now refunds
+///      `msg.value` minus what the deposit actually consumed, measured against a balance snapshot taken
+///      at entry, so the only value that can leave by that path is the caller's own unspent change.
 ///   2. `owner` is written exactly once, at open(), and there is no setter and no transfer function.
 ///      A position cannot change hands, so the payout target of a given id is fixed for all time.
 ///   3. The keeper can call exactly one state-changing function, `rebalance`, which cannot change
-///      liquidity ownership, cannot move value out of the pool, and is bounded by SEVEN immutable limits
-///      set at construction, none of which it can widen because there is no setter:
+///      liquidity ownership, cannot move value out of the pool, and is bounded by the limits below,
+///      none of which it can widen because it holds no setter for any of them:
 ///        - `minRebalanceInterval` — per-position cadence, in block.timestamp seconds;
 ///        - `minDwellL1Blocks` — position age in ETHEREUM blocks, which the sequencer cannot fast-forward
 ///          and which is therefore the only bound still standing if the timestamp clock is manipulated;
 ///        - `maxRebalancesPerL1Block` — a global budget, so one transaction cannot reshape the whole book;
 ///        - `minRangeWidth` / `maxRangeWidth` — how wide a range may be;
-///        - `maxTwapDeviationTicks` (+ `twapWindow`) — where the range may sit, measured against the
-///          time-averaged tick from our own oracle rather than slot0, and failing CLOSED when the oracle
-///          cannot cover the window;
-///        - `maxEjectionBps` — optional cap on how much of a leg one rebalance may return to the owner;
-///        - `maxRecenterTicks` — how far ONE rebalance may move the position from where it already is.
-///          This is the only bound that reads no price, and therefore the only one that still holds when
-///          the oracle itself has been manipulated. Do not disable it; see DeployConfig.
+///        - `maxTwapDeviationTicks` (+ `twapWindow`) — TWO checks off one number, and the second was
+///          missing until 2026-08-23. It bounds where the range may SIT, measured against the
+///          time-averaged tick from our own oracle rather than slot0; and it now also bounds SPOT
+///          against that same average, because the re-mint derives liquidity from `getSlot0`. Both fail
+///          CLOSED when the oracle cannot cover the window;
+///        - the position size band (`minPositionLiquidity`/`maxPositionLiquidity`), re-checked on the
+///          liquidity the re-mint actually derives, not only on what a depositor declared at open();
+///        - `maxEjectionBps` — cap on how much of a leg one rebalance may return to the owner;
+///        - `maxRecenterTicks` — how far ONE rebalance may move EITHER EDGE of the position from where
+///          it already is. This is the only bound that reads no price, and therefore the only one that
+///          still holds when the oracle itself has been manipulated. Do not disable it; see DeployConfig.
 ///   4. Withdrawal does not depend on the keeper, on any off-chain service, or on the hook — the
 ///      pool's hook deliberately does not carry the remove-liquidity permission bits, so the
 ///      PoolManager cannot even call it on this path. See HookPermissions.
 ///
-/// Consequence: a fully compromised keeper key can degrade returns. It cannot take a token.
+/// Consequence, stated at the width it is actually true — the old one-liner ("a fully compromised keeper
+/// key can degrade returns. It cannot take a token") was audited on 2026-08-23 and found to be measuring
+/// the wrong thing. It was literally true and materially misleading: no token ever leaves to the keeper,
+/// but a keeper that is ALSO the pool's counterparty does not need one to leave. The measured attack:
+/// walk spot above the position's range, rebalance (midpoint unmoved, TWAP deviation zero, width legal,
+/// net delta (0,0) so nothing could fire), and the re-mint derives liquidity from a single leg at a price
+/// the keeper manufactured — 62.96% of the depositor's principal, taken back on the round trip as the
+/// pool's only counterparty. So:
+///
+///   - the keeper is never PAID by this contract. Every `take` names `positions[id].owner`. Unchanged,
+///     and still worth having.
+///   - the keeper cannot force a re-mint at a price it made. That is what the spot-vs-TWAP gate below
+///     buys, and it is the half that was missing.
+///   - the keeper can still choose a poor legal range, and can still profit from any degradation it
+///     causes by trading against it. That is bounded by cadence, dwell, budget, band, ejection cap and
+///     the edge-measured recenter limit — bounded, not eliminated. Calling that "cannot take a token"
+///     was the error; the bounds are the guarantee.
 ///
 /// ────────────────────────────────────────────────────────────────────────────────────────────────────
 /// READ THIS BEFORE BELIEVING ANY OF THE ABOVE. THIS CONTRACT IS UPGRADEABLE.
@@ -335,6 +360,23 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
     /// @dev Was `ExceedsMaxAmount`, whose name says the OPPOSITE of what it tests and would mislead an
     ///      integrator decoding a revert.
     error MintedBelowMinimum();
+    /// @dev SPOT is too far from the TWAP. Deliberately NOT `RangeTooFarFromTwap`: that one says the
+    ///      keeper picked a bad place to stand, this one says the PRICE the pool is quoting right now is
+    ///      not one we are willing to value a mint against. Different attacker, different remedy, and an
+    ///      integrator decoding a revert should be able to tell them apart.
+    error SpotTooFarFromTwap();
+    /// @dev The vault's own liquidity in one pool would exceed `maxPoolLiquidity`.
+    error PoolTooLarge();
+    /// @dev `msg.value` on a pool with no native leg. Nothing here can spend it, so accepting it silently
+    ///      is how a caller loses ETH to a rounding of the truth. MoleRouter already refuses the same way.
+    error UnexpectedNativeValue();
+    /// @dev The deposit tried to settle more native currency than this caller sent, i.e. it would have
+    ///      been funded out of ETH belonging to somebody else (or to nobody).
+    error NativeValueOverspent();
+    /// @dev `unlockCallback` reached without this contract having opened the unlock.
+    error UnexpectedCallback();
+    /// @dev The exit's OPTIONAL, caller-supplied floor. Never protocol state — see `withdraw`.
+    error WithdrawBelowMinimum();
 
     /* ---------------------------------------------------------------- constructor */
 
@@ -532,7 +574,74 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
     /// @dev Reserved so a future version can add state without colliding with anything below it.
     uint256[45] private __gap;
 
+    /* ----------------------------------------------------- appended 2026-08-23 (F-07 mechanism D) */
+    //
+    // APPENDED AFTER THE GAP, NOT CARVED OUT OF IT, and that is a deliberate choice rather than an
+    // oversight. Consuming the gap is the OZ-blessed pattern and it is layout-safe in the abstract — but
+    // it changes `__gap`'s declared TYPE (uint256[45] -> uint256[43]) and its slot, so a byte-for-byte
+    // `forge inspect storage-layout` diff of the live implementation against the new one no longer shows
+    // "every pre-existing entry identical". These proxies are upgraded in place over funded positions on
+    // two chains; the review that gates that upgrade is exactly that diff, and a fix that makes the diff
+    // harder to read is a fix that makes the upgrade harder to trust. Nothing is inherited below this
+    // contract, so appending costs nothing real: the gap remains available to anyone who later wants it.
+
+    /// @notice How much liquidity THIS VAULT holds in a given pool, summed across every position.
+    ///
+    /// WHY A COUNTER AND NOT A DERIVATION. `maxPositionLiquidity` is a PER-POSITION, OPEN-TIME ceiling,
+    /// and this file used to describe it as the thing that stops "THIS VAULT becoming the pool's dominant
+    /// LP". It never was: one address opening K positions at the cap contributes K x cap, and there was no
+    /// ceiling on K. A dominance cap has to be an aggregate or it is not a dominance cap.
+    ///
+    /// THE UPGRADE HAZARD, because this ships onto vaults that already hold money. This counter starts at
+    /// ZERO for every position opened before the upgrade, so immediately after it the number under-states
+    /// reality by exactly the pre-existing book. Two consequences, both handled rather than hoped away:
+    /// the decrement SATURATES at zero (`_subPoolLiquidity`) so withdrawing a pre-upgrade position cannot
+    /// underflow and brick the only exit path, and `seedPoolLiquidity` lets the operator write the true
+    /// starting total once, at upgrade time, so the cap is measured against the real book instead of
+    /// against the part of it this implementation happened to watch.
+    mapping(PoolId => uint128) public poolLiquidity;
+
+    /// @notice Ceiling on `poolLiquidity` for every pool. 0 disables it.
+    /// @dev Ships disabled and must: switching it on with the counter under-seeded would refuse deposits
+    ///      for a reason nobody could see. Seed first, then cap.
+    uint128 public maxPoolLiquidity;
+
     event UpgradeAdminTransferred(address indexed from, address indexed to);
+    event PoolLiquidityCapSet(uint128 cap);
+    event PoolLiquiditySeeded(PoolId indexed poolId, uint128 from, uint128 to);
+    event EjectionCapSet(uint16 bps);
+
+    /// @notice Set the aggregate per-pool liquidity ceiling. 0 disables. `upgradeAdmin` only.
+    function setPoolLiquidityCap(uint128 cap) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        maxPoolLiquidity = cap;
+        emit PoolLiquidityCapSet(cap);
+    }
+
+    /// @notice Write the aggregate counter directly. `upgradeAdmin` only.
+    /// @dev THIS EXISTS FOR EXACTLY ONE JOB: the in-place upgrade that introduced `poolLiquidity`, where
+    ///      the counter is zero and the book is not. It is a root-key function on a contract whose root key
+    ///      can already replace `withdraw`, so it grants no new power — and it emits both the old and the
+    ///      new value, which a silent code-diff seeding would not. Emitting `from` is the point: an
+    ///      operator can be audited for having re-written a live counter.
+    function seedPoolLiquidity(PoolId poolId, uint128 total) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        emit PoolLiquiditySeeded(poolId, poolLiquidity[poolId], total);
+        poolLiquidity[poolId] = total;
+    }
+
+    /// @notice Set the per-rebalance ejection cap. 10_000 = disabled. `upgradeAdmin` only.
+    /// @dev NEEDED, not convenient. `maxEjectionBps` is initializer-only and there is no re-initializer,
+    ///      so the vaults live on Robinhood Chain 4663 and Arc 5042 are pinned at 10_000 — DISABLED —
+    ///      for as long as they exist. An implementation upgrade cannot reach an initializer-set value;
+    ///      only a setter can. Without this, the cap that answers F-07 mechanism C is unreachable on
+    ///      precisely the two deployments that hold real money.
+    function setEjectionCap(uint16 bps) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        if (bps > 10_000) revert BadEjectionCap();
+        maxEjectionBps = bps;
+        emit EjectionCapSet(bps);
+    }
 
     error NotUpgradeAdmin();
 
@@ -637,6 +746,11 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         if (minPositionLiquidity != 0 && z.minLiquidity < minPositionLiquidity) revert PositionTooSmall();
         if (maxPositionLiquidity != 0 && z.minLiquidity > maxPositionLiquidity) revert PositionTooLarge();
         _validateRange(z.key, z.tickLower, z.tickUpper);
+        // The zap reads spot TWICE — once implicitly, in the swap it performs, and once explicitly, when
+        // ZapLogic derives liquidity from `getSlot0` — so it is the more exposed of the two deposit paths,
+        // not the less. Same gate, same anchor.
+        _requireSpotNearTwap(poolId);
+        uint256 outside = _nativeEntry(z.key.currency0);
 
         id = ++positionCount;
         _positions[id] = Position({
@@ -650,7 +764,7 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         });
         _ownerPositions[msg.sender].push(id);
 
-        bytes memory res = poolManager.unlock(abi.encode(Action.ZapOpen, id, z));
+        bytes memory res = _guardedUnlock(abi.encode(Action.ZapOpen, id, z));
         uint128 minted = abi.decode(res, (uint128));
         if (minted < z.minLiquidity) revert MintedBelowMinimum();
 
@@ -680,8 +794,13 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         // which is exactly the bypass an adversarial test measured at more than 10x the configured cap.
         if (maxPositionLiquidity != 0 && minted > maxPositionLiquidity) revert PositionTooLarge();
 
-        _refundNative();
+        // Aggregate on what was MINTED, for the same reason the ceiling above is: `z.minLiquidity` is a
+        // number the caller chose and `minted` is the number the pool produced.
+        _addPoolLiquidity(poolId, minted);
+
+        // Emit before the refund. See the identical note in `open`.
         emit PositionOpened(id, msg.sender, poolId, z.tickLower, z.tickUpper, minted);
+        _refundNative(outside);
     }
 
 
@@ -713,6 +832,13 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         if (minPositionLiquidity != 0 && liquidity < minPositionLiquidity) revert PositionTooSmall();
         if (maxPositionLiquidity != 0 && liquidity > maxPositionLiquidity) revert PositionTooLarge();
         _validateRange(key, tickLower, tickUpper);
+        // The aggregate ceiling, after the cheap structural checks so a bad range still reports as a bad
+        // range. See `poolLiquidity`: the per-position cap was never the dominance cap it was described as.
+        _addPoolLiquidity(poolId, liquidity);
+        // Spot must be somewhere the time-average agrees with before we mint against it. See
+        // `_requireSpotNearTwap` — this is the deposit half of the gate that only `rebalance` used to have.
+        _requireSpotNearTwap(poolId);
+        uint256 outside = _nativeEntry(key.currency0);
 
         id = ++positionCount;
         _positions[id] = Position({
@@ -726,12 +852,16 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         });
         _ownerPositions[msg.sender].push(id);
 
-        poolManager.unlock(
+        _guardedUnlock(
             abi.encode(Action.Open, id, msg.sender, int256(uint256(liquidity)), int24(0), int24(0), amount0Max, amount1Max)
         );
 
-        _refundNative();
+        // EMIT BEFORE THE REFUND, because the refund is a raw call to `msg.sender` and therefore a
+        // reentrancy point. A contract depositor could re-enter and withdraw the position it just opened,
+        // after which PositionOpened would be emitted describing liquidity the position no longer holds —
+        // and this contract's own docs say the indexer and the DefiLlama TVL adapter read these events.
         emit PositionOpened(id, msg.sender, poolId, tickLower, tickUpper, liquidity);
+        _refundNative(outside);
     }
 
     /// @notice Withdraw the entire position in one call.
@@ -747,19 +877,66 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
     /// @notice Withdraw liquidity. Proceeds go to `positions[id].owner`, read from storage.
     /// @dev The only exit path, and it needs neither the keeper nor any off-chain component. If every
     ///      service this project runs disappeared, this function would still work.
+    ///
+    /// THE EXIT IS NOT PRICE-GATED, AND THAT IS A DECISION, NOT AN OVERSIGHT. Every other pool-touching
+    /// path in this contract now refuses to act when spot has walked away from the TWAP — `open`,
+    /// `zapOpen` and `rebalance` all call `_requireSpotNearTwap`. This one deliberately does not. Three
+    /// reasons, in order of how much they matter:
+    ///
+    ///   1. A GATE ON THE EXIT IS A CENSORSHIP LEVER. `consult` fails closed, and spot is precisely what
+    ///      an ordering-privileged party moves for free on a thin pool. Gating here would mean that
+    ///      whoever can walk spot can revert every withdrawal in the vault for as long as they care to
+    ///      hold it — trading a bounded, self-inflicted, avoidable loss for an unbounded, involuntary
+    ///      one. The pool cannot block a withdrawal (that is guaranteed by the hook's permission BITS,
+    ///      which live in its address and survive any upgrade); this contract must not become the thing
+    ///      that can.
+    ///   2. THERE IS NOTHING HERE FOR A MANIPULATED SPOT TO MIS-VALUE ACROSS USERS. Arrakis' burn was
+    ///      mispriced because it converted a fungible SHARE into a pro-rata slice of a pooled position
+    ///      valued at slot0. There are no shares here: `liquidityToRemove` is this position's own L, and
+    ///      `modifyLiquidity` pays exactly the tokens that L holds. Spot changes the MIX the exiting user
+    ///      receives, not the amount anyone else is owed, so the harm is confined to the one party who
+    ///      chose to press the button.
+    ///   3. The exposure is bounded by the range the owner chose. A burn cannot return less than the
+    ///      position's worst-case single-token composition, which is a number the depositor picked at
+    ///      open() and can read at any time.
+    ///
+    /// What a user who wants protection on the way out gets instead is `withdrawWithMinimums`: a floor
+    /// THEY supply, in the same call. A caller-supplied minimum can never be used to block anyone else,
+    /// which is the entire difference between it and a protocol gate.
     function withdraw(uint256 id, uint128 liquidityToRemove) public onlyPositionOwner(id) {
+        _withdraw(id, liquidityToRemove, 0, 0);
+    }
+
+    /// @notice Withdraw with a floor on what comes back. Reverts if either leg lands below its minimum.
+    /// @dev The exit's slippage bound, and the ONLY acceptable shape for one: `amount0Min`/`amount1Min`
+    ///      come from the caller, so the only person who can ever cause this revert is the person calling
+    ///      it. Pass (0, 0) — or call `withdraw` — to exit unconditionally, which is what a user who
+    ///      simply wants out at any price should do and what `withdrawAll` does.
+    /// @dev NOT an overload of `withdraw` on purpose: a second `withdraw(...)` makes
+    ///      `MolePositions.withdraw.selector` ambiguous and breaks every integration that encodes the exit
+    ///      by selector. The exit is the one function whose ABI must never move.
+    function withdrawWithMinimums(uint256 id, uint128 liquidityToRemove, uint256 amount0Min, uint256 amount1Min)
+        external
+        onlyPositionOwner(id)
+    {
+        _withdraw(id, liquidityToRemove, amount0Min, amount1Min);
+    }
+
+    function _withdraw(uint256 id, uint128 liquidityToRemove, uint256 amount0Min, uint256 amount1Min) private {
         Position storage p = _positions[id];
         if (liquidityToRemove == 0) revert ZeroLiquidity();
         if (liquidityToRemove > p.liquidity) revert InsufficientLiquidity();
 
         p.liquidity -= liquidityToRemove;
+        _subPoolLiquidity(p.poolId, liquidityToRemove);
 
-        bytes memory res = poolManager.unlock(
+        bytes memory res = _guardedUnlock(
             abi.encode(
                 Action.Withdraw, id, p.owner, -int256(uint256(liquidityToRemove)), int24(0), int24(0), uint256(0), uint256(0)
             )
         );
         (uint256 amount0, uint256 amount1) = abi.decode(res, (uint256, uint256));
+        if (amount0 < amount0Min || amount1 < amount1Min) revert WithdrawBelowMinimum();
 
         emit PositionWithdrawn(id, p.owner, liquidityToRemove, amount0, amount1);
     }
@@ -808,11 +985,22 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         // no price at all: a rebalance may only move the position's midpoint `maxRecenterTicks` from where
         // it already is, so however far an attacker walks spot or the TWAP, the position follows only at
         // the rate the cadence allows — and the owner can exit at any point in between.
+        // MEASURED ON THE EDGES, NOT THE MIDPOINT, and the difference is a whole attack. A midpoint is an
+        // average, and an average hides a reshape: [-1000, 1000] -> [540, 660] moves the LOWER edge 1,540
+        // ticks while `moved` reads 600, because the range narrows around a barely-shifted centre. That is
+        // how F-07 mechanism C stepped a position completely off spot inside a bound that was satisfied on
+        // paper, ejecting a whole leg. An edge bound subsumes the midpoint bound arithmetically
+        // (|midMove| = |dLo + dHi| / 2 <= max(|dLo|, |dHi|)), so nothing is lost by replacing it, and it
+        // means one call can move the position AND change its width only as far as the cadence allows.
+        //
+        // THE COST, said out loud: the keeper can no longer re-width a position quickly. A 60,000-tick
+        // range narrows to 120 over many rebalances instead of one. That is the intended reading of "how
+        // far ONE rebalance may move a position from where it already is" — the old code just was not
+        // measuring it.
         if (maxRecenterTicks > 0) {
-            int24 oldMid = (p.tickLower + p.tickUpper) / 2;
-            int24 newMid = (newTickLower + newTickUpper) / 2;
-            int24 moved = newMid > oldMid ? newMid - oldMid : oldMid - newMid;
-            if (moved > maxRecenterTicks) revert RecenterTooFar();
+            int24 dLo = newTickLower > p.tickLower ? newTickLower - p.tickLower : p.tickLower - newTickLower;
+            int24 dHi = newTickUpper > p.tickUpper ? newTickUpper - p.tickUpper : p.tickUpper - newTickUpper;
+            if (dLo > maxRecenterTicks || dHi > maxRecenterTicks) revert RecenterTooFar();
         }
 
         // TWAP BOUND. The keeper picks WHERE the position sits; this is the only thing that stops it
@@ -821,7 +1009,23 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         // when the requested window is not covered, so a young or idle pool cannot be rebalanced at all
         // until the oracle has warmed up — that is deliberate: refusing to act beats acting blind.
         if (maxTwapDeviationTicks > 0) {
-            int24 twapTick = IMoleOracle(moleHook).consult(p.poolId, twapWindow);
+            // TWO checks off the same number, and until 2026-08-23 only the first existed.
+            //
+            // The second is the one that matters. `unlockCallback` derives the re-minted liquidity from
+            // `StateLibrary.getSlot0` — SPOT — while everything above bounds the RANGE against the TWAP.
+            // Nothing compared spot to the TWAP, so a keeper could walk spot outside the position's range,
+            // rebalance to a legal, TWAP-compliant, midpoint-unmoved range, and have the burn return one
+            // token only: the re-mint then derives its liquidity from a single leg at a price the keeper
+            // made. Net delta is (0,0) so `RebalanceNotSelfFunding` cannot fire, and both residuals are
+            // zero so `EjectionTooLarge` cannot either. Measured at 62.96% of principal in one call, with
+            // the control (same widening at an honest spot) conserving value exactly — so the loss was the
+            // manipulated price and nothing else.
+            //
+            // Gating spot against the TWAP is safe HERE in a way it is not everywhere: this attack needs
+            // spot FAR from the average, and the average cannot be moved inside the transaction that is
+            // being gated. Compare MoleQueue, where a settler moves spot in the settling transaction and a
+            // spot-anchored check therefore validates against the thing it is trying to catch.
+            int24 twapTick = _requireSpotNearTwap(p.poolId);
             int24 mid = (newTickLower + newTickUpper) / 2;
             int24 deviation = mid > twapTick ? mid - twapTick : twapTick - mid;
             if (deviation > maxTwapDeviationTicks) revert RangeTooFarFromTwap();
@@ -834,7 +1038,7 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
 
         p.lastRebalancedAt = uint64(block.timestamp);
 
-        poolManager.unlock(
+        _guardedUnlock(
             abi.encode(Action.Rebalance, id, p.owner, int256(0), newTickLower, newTickUpper, uint256(0), uint256(0))
         );
 
@@ -845,6 +1049,22 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
+        // THE UNLOCK-INITIATOR SENTINEL. `msg.sender == poolManager` proves who is calling; it does not
+        // prove that WE asked. Without this, the callback executes any payload the PoolManager hands it —
+        // an Action.Withdraw on someone else's id, or an Action.Rebalance to any range — with no keeper
+        // check, no owner check and no bounds, because every one of those lives in the external function
+        // that BUILDS the payload rather than in the branch that runs it.
+        //
+        // Nobody can become the PoolManager today, so this is hardening rather than a live hole, and it is
+        // exactly the shape MoleRouter already carries (`_lockValue() == 0 -> UnexpectedCallback`). The
+        // reason to write it anyway is that the assumption it pins — "we only get here because we called
+        // unlock" — is invisible otherwise, and the cost of it being wrong is the whole book.
+        bytes32 slot = _UNLOCK_SLOT;
+        uint256 armed;
+        assembly ("memory-safe") {
+            armed := tload(slot)
+        }
+        if (armed == 0) revert UnexpectedCallback();
 
         // The zap carries a different payload shape, so it is peeled off before the positional decode
         // below. Reading the discriminator alone first is the only safe way to branch on a union.
@@ -899,93 +1119,121 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
 
         // Rebalance: burn the whole position at the old range and re-mint at the new one.
         //
-        // THE THING THAT MUST BE CONSERVED IS TOKEN AMOUNTS, NOT THE LIQUIDITY NUMBER. The token value
-        // of a fixed L depends on the range width, so re-minting the same L at a narrower range needs
-        // fewer tokens and leaves a surplus — and re-minting at a wider range needs more. An earlier
-        // version of this function kept L constant and parked that surplus in this contract's own
-        // balance, which created one unattributed pot shared by every position: a narrowing rebalance
-        // of a victim funded a widening rebalance of the keeper's own position, and the keeper then
-        // withdrew to itself entirely legitimately, since it really was the stored owner. Measured at
-        // ~86x the attacker's stake against a victim who lost 98.8% of a deposit. So:
+        // THE ARITHMETIC LIVES IN ZapLogic.rebalance, moved there 2026-08-23 for EIP-170 headroom and for
+        // no other reason — read the header on that function for what it conserves and why. A delegatecall
+        // runs in this contract's storage and with this contract's deltas, so custody is unchanged.
         //
-        //   - the new liquidity is DERIVED from the amounts the burn actually returned, at the new
-        //     range and the current price, rounded down by construction;
-        //   - accrued fees are included in those amounts, so they compound into the owner's own
-        //     position rather than being swept anywhere;
-        //   - the leftover dust goes to the OWNER, never to this contract;
-        //   - this contract neither holds nor spends an inventory, so no shared pot can exist.
-        //
-        // A rebalance is now delta-neutral by construction and moves no value between positions.
+        // WHAT DELIBERATELY DID NOT MOVE: every check that reads vault state. The library returns the
+        // liquidity the re-mint derived; the band and the aggregate ceiling are applied to it HERE, before
+        // it is written, because a library that reads no storage cannot enforce a rule that lives in it.
         uint128 liq = p.liquidity;
-        (BalanceDelta removed, BalanceDelta feesAccrued) =
-            _modify(key, p.tickLower, p.tickUpper, -int256(uint256(liq)), id);
-
-        // THE PROTOCOL'S CUT, taken here and nowhere else on this path, from the fee component only. What
-        // remains compounds into the owner's own new position exactly as it did before — the fee changes
-        // how much compounds, never who it belongs to.
-        (uint128 cut0, uint128 cut1) = _takePerformanceFee(key, feesAccrued, id);
-
-        // Everything the burn returned MINUS our cut: principal plus the fees the owner keeps. Both legs
-        // are non-negative here, and the subtraction cannot underflow because `removed` is principal plus
-        // fees while the cut is a fraction of fees alone — but it is bounded rather than asserted, since
-        // an underflow here would revert a rebalance rather than mis-price one, and a keeper that cannot
-        // rebalance is a far better failure than a keeper that silently takes principal.
-        uint256 gross0 = removed.amount0() > 0 ? uint256(uint128(removed.amount0())) : 0;
-        uint256 gross1 = removed.amount1() > 0 ? uint256(uint128(removed.amount1())) : 0;
-        uint256 have0 = gross0 > cut0 ? gross0 - cut0 : 0;
-        uint256 have1 = gross1 > cut1 ? gross1 - cut1 : 0;
-
-        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, p.poolId);
-        uint128 newLiquidity = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtPriceX96,
-            TickMath.getSqrtPriceAtTick(newLower),
-            TickMath.getSqrtPriceAtTick(newUpper),
-            have0,
-            have1
+        (uint128 newLiquidity, uint256 residual0, uint256 residual1) = ZapLogic.rebalance(
+            poolManager,
+            ZapLogic.RebalanceParams({
+                key: key,
+                oldLower: p.tickLower,
+                oldUpper: p.tickUpper,
+                newLower: newLower,
+                newUpper: newUpper,
+                liquidity: liq,
+                id: id,
+                // owner READ FROM STORAGE, never from the payload. The one payout target rule.
+                owner: p.owner,
+                performanceFeeBps: performanceFeeBps,
+                feeRecipient: feeRecipient,
+                maxEjectionBps: maxEjectionBps
+            })
         );
-        if (newLiquidity == 0) revert ZeroLiquidity();
+
+        // THE SIZE BAND, RE-CHECKED ON WHAT THE RE-MINT ACTUALLY DERIVED. `open` and `zapOpen` both
+        // enforce this band; the rebalance branch enforced nothing but "not zero", so the band was a
+        // deposit-time-only rule that any keeper call could step straight over. What conserves across a
+        // rebalance is TOKEN AMOUNTS, not the liquidity number — that is the whole point of the 2026-08-01
+        // fix — so the same tokens at a narrower range buy far more L: a same-midpoint narrowing from
+        // width 60,000 to width 120 multiplies the stored liquidity by ~130-159x, with the midpoint
+        // unmoved and every price bound satisfied trivially. That re-opens exactly the condition
+        // `maxPositionLiquidity` exists to prevent. Both ends are checked, because the floor is the dust
+        // rule and a widening rebalance can walk a position under it just as easily.
+        //
+        // FAILS CLOSED, and an operator should know what that means: turning the band on later can leave
+        // an existing position outside it and therefore un-rebalanceable. It cannot leave one un-EXITABLE
+        // — `withdraw` reads none of this.
+        if (minPositionLiquidity != 0 && newLiquidity < minPositionLiquidity) revert PositionTooSmall();
+        if (maxPositionLiquidity != 0 && newLiquidity > maxPositionLiquidity) revert PositionTooLarge();
+
+        // The aggregate follows the same burn-then-mint shape as the pool itself, so a narrowing that
+        // multiplies L is measured against the whole-vault ceiling and not just this position's.
+        _subPoolLiquidity(p.poolId, liq);
+        _addPoolLiquidity(p.poolId, newLiquidity);
 
         p.tickLower = newLower;
         p.tickUpper = newUpper;
         p.liquidity = newLiquidity;
 
-        (BalanceDelta added,) = _modify(key, newLower, newUpper, int256(uint256(newLiquidity)), id);
-        // The cut has already been minted out of our delta, so it is subtracted here too. Leaving it in
-        // would pay the owner the protocol's share as residual AND mint it to the recipient — the same
-        // wei counted twice, which the unlock would then refuse to balance.
-        BalanceDelta net = removed + added - toBalanceDelta(int128(cut0), int128(cut1));
-
-        // getLiquidityForAmounts rounds down, so the mint can never cost more than the burn returned.
-        // If it somehow does, that is a broken invariant and we refuse rather than dip into anything.
-        if (net.amount0() < 0 || net.amount1() < 0) revert RebalanceNotSelfFunding();
-
-        // THE RESIDUAL BELONGS TO THE OWNER. Calling it "dust" here was wrong: when the new range wants a
-        // token ratio the old range does not hold, this can be most of a leg. It still goes to the owner
-        // and this contract still keeps nothing — that is the custody invariant — but it is emitted so the
-        // size is observable off-chain rather than silent, and bounded when the deployment asks for it.
-        uint256 residual0 = net.amount0() > 0 ? uint256(uint128(net.amount0())) : 0;
-        uint256 residual1 = net.amount1() > 0 ? uint256(uint128(net.amount1())) : 0;
-
-        if (maxEjectionBps < 10_000) {
-            if (residual0 * 10_000 > have0 * uint256(maxEjectionBps)) revert EjectionTooLarge();
-            if (residual1 * 10_000 > have1 * uint256(maxEjectionBps)) revert EjectionTooLarge();
-        }
-
-        _collectTo(key, net, p.owner);
         emit RebalanceResidualPaid(id, p.owner, residual0, residual1);
         return "";
     }
 
 
-    /// @dev Return any ETH the deposit did not consume. A concentrated-liquidity mint takes the amount
-    ///      the MATH decides, never the amount the caller happened to send, so an exact-value rule would
-    ///      make every native deposit a guessing game. Sending too much is normal and is refunded here.
+    /// @dev The transient slot that says "this contract opened the current unlock". Copied from
+    ///      MoleRouter's `_LOCK_SLOT`; a `constant`, so it occupies no storage and cannot collide with the
+    ///      appended state above.
+    bytes32 private constant _UNLOCK_SLOT = keccak256("molepositions.unlock");
+
+    /// @dev Every `poolManager.unlock` in this contract goes through here, so the sentinel cannot be armed
+    ///      on one path and forgotten on another. Cleared on the way out; a revert unwinds the whole
+    ///      transaction, so there is no path that leaves it set.
+    function _guardedUnlock(bytes memory data) private returns (bytes memory res) {
+        bytes32 slot = _UNLOCK_SLOT;
+        assembly ("memory-safe") {
+            tstore(slot, 1)
+        }
+        res = poolManager.unlock(data);
+        assembly ("memory-safe") {
+            tstore(slot, 0)
+        }
+    }
+
+    /// @dev Called at the top of every payable entry point. Two jobs.
     ///
-    ///      Sweeping the whole balance is correct rather than sloppy: this contract holds no ETH between
-    ///      transactions by construction — that is INV-1 — so anything sitting here at the end of a
-    ///      deposit is this caller's change.
-    function _refundNative() private {
-        uint256 left = address(this).balance;
+    ///      REFUSE STRAY VALUE. On a pool with no native leg there is nothing here that can spend ETH, so
+    ///      value attached to such a call is a mistake — and one that used to be answered by handing the
+    ///      caller back the CONTRACT'S ENTIRE BALANCE rather than their own. MoleRouter has always refused
+    ///      it (`else if (msg.value != 0) revert BadValue()`), which is how we know the omission here was
+    ///      an inconsistency and not a considered choice.
+    ///
+    ///      SNAPSHOT WHAT IS NOT OURS. Returns the balance MINUS `msg.value`, i.e. everything that was
+    ///      already sitting here when this call started. `_refundNative` refunds down to this line and no
+    ///      further. The old code swept `address(this).balance` on the strength of "this contract holds no
+    ///      ETH between transactions by construction" — true for voluntary sends (there is no `receive()`)
+    ///      and NOT true against forced ETH, which is a thing anyone can do to any address. The gap paid
+    ///      out: force-feed the vault, then call `open` on an ERC-20 pool with msg.value = 0 and collect
+    ///      the lot. Worse on a native-currency0 pool, where `_settleFrom` would fund a real position from
+    ///      that stray balance — `_settleFrom` even documents a `msg.value` check that did not exist.
+    function _nativeEntry(Currency c0) private view returns (uint256 outside) {
+        if (Currency.unwrap(c0) != address(0) && msg.value != 0) revert UnexpectedNativeValue();
+        unchecked {
+            // Cannot underflow: `msg.value` has already been credited to this balance.
+            outside = address(this).balance - msg.value;
+        }
+    }
+
+    /// @dev Return the part of `msg.value` the deposit did not consume. A concentrated-liquidity mint
+    ///      takes the amount the MATH decides, never the amount the caller happened to send, so an
+    ///      exact-value rule would make every native deposit a guessing game. Sending too much is normal.
+    ///
+    ///      `outside` comes from `_nativeEntry`. Refunding `balance - outside` rather than `balance` is
+    ///      what makes this the caller's own change instead of a sweep, and the `balance < outside` branch
+    ///      is the other half of the same fact: settling more native currency than was sent means the
+    ///      deposit was funded out of ETH that is not this caller's, which is the documented precondition
+    ///      `_settleFrom` asserts and nothing enforced. It fails closed rather than paying out.
+    function _refundNative(uint256 outside) private {
+        uint256 bal = address(this).balance;
+        if (bal < outside) revert NativeValueOverspent();
+        uint256 left;
+        unchecked {
+            left = bal - outside;
+        }
         if (left == 0) return;
         (bool ok,) = msg.sender.call{value: left}("");
         if (!ok) revert NativeRefundFailed();
@@ -1114,9 +1362,17 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
     function _settleFrom(Currency currency, uint256 amount, address payer) private {
         if (Currency.unwrap(currency) == address(0)) {
             // NATIVE. There is nothing to sync and nothing to transfer — the value rides along with the
-            // call. It comes from `msg.value`, which `open`/`zapOpen` checked was sufficient before the
-            // unlock, so `payer` is not consulted here: native ETH cannot be pulled from an allowance and
-            // pretending otherwise would be the only dishonest line in this function.
+            // call. It comes from `msg.value`, so `payer` is not consulted here: native ETH cannot be
+            // pulled from an allowance and pretending otherwise would be the only dishonest line in this
+            // function.
+            //
+            // THIS USED TO CLAIM `open`/`zapOpen` HAD ALREADY CHECKED msg.value WAS SUFFICIENT. Neither
+            // contained a msg.value comparison of any kind — the claim was load-bearing and false, and
+            // what actually stopped an over-settle was that the contract normally holds no ETH, which is
+            // an accident rather than a check. The enforcement is now real and lives on the way OUT, in
+            // `_refundNative`: spending past what this caller sent leaves the balance below the entry
+            // snapshot and reverts `NativeValueOverspent`. Written there rather than here because the
+            // required amount is not known until the mint math has run.
             poolManager.settle{value: amount}();
             return;
         }
@@ -1132,6 +1388,57 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         (bool ok, bytes memory ret) =
             token.call(abi.encodeWithSelector(IERC20Minimal.transferFrom.selector, from, to, amount));
         if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
+    }
+
+    /// @dev THE ARRAKIS GATE. On 2026-08-23 the Arrakis V1 G-UNI vault was drained because `mint()` and
+    ///      `burn()` valued the vault's position off instantaneous `slot0` while the TWAP check guarded
+    ///      only the manager's `rebalance()`. This contract had the identical asymmetry: `rebalance` read
+    ///      the oracle, and `open`/`zapOpen` — both of which mint against `getSlot0` — read nothing.
+    ///
+    ///      WHY A PROTOCOL-LEVEL GATE WHEN THE CALLER ALREADY HAS SLIPPAGE BOUNDS. `open` has
+    ///      amount0Max/amount1Max and `zapOpen` has amountOutMin/minLiquidity, and both genuinely bound
+    ///      what THAT caller pays. The hole is that every frontend computes those numbers FROM SPOT, so a
+    ///      walked spot is inherited by the bound that was supposed to catch it and the check compares a
+    ///      manipulated number against itself. That is the same shape as the `minLiquidity`-on-a-one-sided
+    ///      range defect ZapLogic documents. A bound is only protection when its anchor is something the
+    ///      caller did not read from the attacker.
+    ///
+    ///      FAILS CLOSED, including on a cold oracle: `consult` reverts when the ring cannot cover the
+    ///      window, so a pool younger than `twapWindow` (30 minutes, shipped) refuses deposits until it
+    ///      warms up. That cost is real and is accepted for the same reason `rebalance` accepts it —
+    ///      refusing to act beats acting blind — and it is a DEPOSIT that is refused, which strands
+    ///      nobody. `withdraw` deliberately does not call this; see the note there.
+    ///
+    /// @return twapTick the average, returned so `rebalance` can reuse it instead of walking the ring
+    ///         twice. Zero when the bound is switched off, which is the only case where callers ignore it.
+    function _requireSpotNearTwap(PoolId pid) private view returns (int24 twapTick) {
+        int24 band = maxTwapDeviationTicks;
+        if (band == 0) return 0;
+        twapTick = IMoleOracle(moleHook).consult(pid, twapWindow);
+        (, int24 spotTick,,) = StateLibrary.getSlot0(poolManager, pid);
+        int24 d = spotTick > twapTick ? spotTick - twapTick : twapTick - spotTick;
+        if (d > band) revert SpotTooFarFromTwap();
+    }
+
+    /// @dev The aggregate dominance cap. Increment on every mint, check against `maxPoolLiquidity`.
+    function _addPoolLiquidity(PoolId pid, uint128 amount) private {
+        uint128 total = poolLiquidity[pid] + amount;
+        uint128 cap = maxPoolLiquidity;
+        if (cap != 0 && total > cap) revert PoolTooLarge();
+        poolLiquidity[pid] = total;
+    }
+
+    /// @dev Decrement on every burn, SATURATING AT ZERO. The saturation is not defensive politeness: this
+    ///      counter is introduced by an upgrade over vaults that already hold positions, so it starts below
+    ///      the truth by exactly the pre-existing book, and a checked subtraction would revert — inside
+    ///      `withdraw`, the one path that must never be blockable. Under-counting makes the CAP loose,
+    ///      which is a bounded and visible failure; an underflow would make the EXIT unreachable, which is
+    ///      not. `seedPoolLiquidity` is how the operator removes the under-count.
+    function _subPoolLiquidity(PoolId pid, uint128 amount) private {
+        uint128 cur = poolLiquidity[pid];
+        unchecked {
+            poolLiquidity[pid] = amount >= cur ? 0 : cur - amount;
+        }
     }
 
     function _validateRange(PoolKey memory key, int24 lower, int24 upper) private view {

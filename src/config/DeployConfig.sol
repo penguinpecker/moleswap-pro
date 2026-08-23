@@ -80,7 +80,38 @@ library DeployConfig {
     uint32 internal constant DEFAULT_TWAP_WINDOW = 1800; // 30 min
     uint64 internal constant DEFAULT_MIN_DWELL_L1_BLOCKS = 300; // ~1 hour of ETHEREUM time
     uint16 internal constant DEFAULT_MAX_REBALANCES_PER_L1_BLOCK = 10;
-    uint16 internal constant DEFAULT_MAX_EJECTION_BPS = 10_000; // 10_000 = disabled
+    /// @notice 7_500 = a rebalance may hand back at most three quarters of either leg. NOT 10_000.
+    ///
+    /// @dev THIS SHIPPED AT 10_000 — DISABLED — AND IS LIVE AT 10_000 ON BOTH CHAINS. The 2026-08-23 audit
+    ///      (F-07 mechanism C) turned that from a conservative default into a load-bearing one: one legal
+    ///      keeper step could move a range's EDGE far enough that spot ended up outside it, at which point
+    ///      `getLiquidityForAmounts` takes a single-sided branch and an entire leg is ejected to the owner.
+    ///      `maxEjectionBps` is named in the finding as the bound that exists for exactly that, and it was
+    ///      switched off. A bound that ships off is not a bound; it is a comment.
+    ///
+    ///      WHY 7_500 AND NOT SOMETHING TIGHTER. The residual a legal recentre produces is a function of
+    ///      how far the range moves relative to its own half-width, and it is not small: with the shipped
+    ///      600-tick recenter cap, recentring a 1,200-tick range by the full 600 ejects 100% of a leg, by
+    ///      300 ejects 66%, by 120 ejects 33%; on a 6,000-tick range the same full 600-tick step ejects
+    ///      16%, and on a 60,000-tick range 1.7%. So the cap binds hardest exactly where the step is large
+    ///      relative to the position, which is the case worth refusing, and is nearly silent on wide
+    ///      ranges. 7_500 makes the total single-step ejection that mechanism C produces impossible while
+    ///      still permitting a two-thirds recentre of a minimum-width range. Solving
+    ///      (1 - e^-(w-d)) / (1 - e^-(w+d)) = 0.25 puts the binding point at d ≈ 0.6w — a recentre of more
+    ///      than 60% of the half-width — which is a keeper decision worth a second look, not a routine one.
+    ///
+    ///      IT IS A STEP LIMIT, NOT A BUDGET. Five legal 5_000-bps steps were measured stranding 88.6% of
+    ///      a leg, because half of a half compounds; `maxRebalancesPerL1Block` and the cadence are what
+    ///      bound the compounding. Anyone reading "7_500 = at most three quarters of the position" without
+    ///      that sentence is wrong.
+    ///
+    ///      IT FAILS CLOSED. Refusing a rebalance leaves the position where it is and the owner can always
+    ///      `withdrawAll`. Refusing to act is the cheap failure here; acting is not.
+    ///
+    ///      THE LIVE VAULTS CANNOT BE FIXED BY CHANGING THIS. `maxEjectionBps` is initializer-only, so
+    ///      Robinhood Chain 4663 and Arc 5042 stay at 10_000 until someone calls
+    ///      `MolePositions.setEjectionCap`, which exists for this and is documented there.
+    uint16 internal constant DEFAULT_MAX_EJECTION_BPS = 7_500;
     int24 internal constant DEFAULT_MAX_RECENTER_TICKS = 600;
     /// @dev 10%. Surveyed 2026-08-05 against protocol docs: Charm 2-5%, Beefy CLM 9.5%, ICHI 10%,
     ///      Steer 15%, Gamma 14-20%. 10% is the median and the only rate that can be called standard
@@ -142,6 +173,11 @@ library DeployConfig {
         require(p.maxRangeWidth >= p.minRangeWidth, "cfg: max range width below min");
         require(p.maxTwapDeviationTicks >= 0, "cfg: negative twap deviation");
         require(p.maxEjectionBps <= 10_000, "cfg: ejection cap above 100%");
+        // Zero is a pause by arithmetic: a rebalance almost always leaves SOME residual, so a cap of zero
+        // refuses the keeper permanently. Pausing the keeper is a legitimate thing to want and there is a
+        // deliberate way to say it (revoke, or expire the key); arriving at it because a uint16 env var
+        // truncated to 0 is not. Rejected here rather than discovered on the first rebalance attempt.
+        require(p.maxEjectionBps > 0, "cfg: ejection cap of zero refuses every rebalance");
         require(p.maxRecenterTicks >= 0, "cfg: negative recenter cap");
         // Upper bounds too: a "bound" set absurdly high is not a bound. A recenter cap wider than the max
         // range width lets one rebalance move a position further than its own width, and a TWAP band wider
@@ -177,7 +213,13 @@ library DeployConfig {
         // maxRecenterTicks is in this list deliberately. It is the only bound that survives a dishonest
         // oracle, so shipping with it at zero re-opens the path where a compromised keeper plus one
         // ordinary address took 100% of a position's principal. Disabling it must be said out loud.
+        //
+        // maxEjectionBps is in this list as of 2026-08-23, and note that its OFF value is 10_000, not 0 —
+        // which is why it was missing. Every other bound here reads "0 means disabled", so a list built by
+        // testing `> 0` silently gave a pass to the one bound whose disabled value is 10_000. It shipped
+        // disabled on both live chains for exactly that reason: nothing ever asked. It is the bound F-07
+        // mechanism C names, so shipping without it is a choice, and choices go through MOLE_ACK_UNGUARDED.
         return p.minDwellL1Blocks > 0 && p.maxRebalancesPerL1Block > 0 && p.maxTwapDeviationTicks > 0
-            && p.maxRecenterTicks > 0;
+            && p.maxRecenterTicks > 0 && p.maxEjectionBps < 10_000;
     }
 }

@@ -143,6 +143,12 @@ contract AttackKeeperBoundsGriefingTest is Test, Deployers {
             ModifyLiquidityParams({tickLower: -60_000, tickUpper: 60_000, liquidityDelta: 5_000e18, salt: 0}),
             ZERO_BYTES
         );
+        // AGE THE POOL PAST THE LONGEST WINDOW ANY TEST IN THIS FILE DEPLOYS (OBS_INTERVAL * 256). Deposits
+        // now gate SPOT against the oracle, and `consult` fails closed on a pool younger than the window,
+        // so a brand-new pool takes nothing — the deliberate cold start. Ageing writes NO observation (the
+        // ring only advances on a swap), so the saturation attacks below start from exactly the same ring
+        // state they always did; all that changes is that the seed observation is old enough to be read.
+        _advance(15_361, 1_280);
     }
 
     function _swapOn(PoolKey memory k, bool zeroForOne, uint256 amount) internal {
@@ -558,9 +564,14 @@ contract AttackKeeperBoundsGriefingTest is Test, Deployers {
         assertEq(stuck1, 0, "vault retained currency1 after hostile-state exits");
     }
 
-    /// @notice A reverting oracle must not reach the exit. The pool here is far younger than the window, so
-    ///         `consult` reverts and every rebalance fails closed — the designed behaviour. Withdrawals are
-    ///         on a code path that never consults anything, and this pins that.
+    /// @notice A reverting oracle must not reach the exit. `consult` reverts, every rebalance fails closed
+    ///         — the designed behaviour — and withdrawals are on a code path that never consults anything.
+    /// @dev THE HOSTILE STATE IS NOW REACHED THE OTHER WAY ROUND. This used to lean on the pool being far
+    ///      younger than the window, which is no longer a state a position can be opened in: deposits gate
+    ///      spot against the oracle, so a cold oracle refuses the deposit as well as the rebalance. Opening
+    ///      first and then taking the oracle away tests the same thing and tests it better — it separates
+    ///      "the oracle is cold" from "the pool is new", and only the first of those is what the exit must
+    ///      survive.
     function test_exitsWorkWhileTheOracleItselfReverts() public {
         (MoleHook h, PoolKey memory k) = _hookWorld(22, true, OBS_INTERVAL);
         MolePositions m =
@@ -571,6 +582,13 @@ contract AttackKeeperBoundsGriefingTest is Test, Deployers {
         _approve(bob, address(m));
         uint256 idA = _open(m, k, alice, 1e18);
         uint256 idB = _open(m, k, bob, 1e18);
+
+        // The oracle goes dark, with its own error, for every caller and every window.
+        vm.mockCallRevert(
+            address(h),
+            abi.encodeWithSelector(MoleHook.consult.selector),
+            abi.encodeWithSelector(MoleHook.InsufficientObservations.selector)
+        );
 
         _advance(61, 5);
         vm.expectRevert(MoleHook.InsufficientObservations.selector);
