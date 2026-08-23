@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { Menu, X } from "lucide-react";
 import { FaXTwitter } from "react-icons/fa6";
 import { ConnectWalletButton } from "@/components/ConnectWalletButton";
+import { ChainSwitcher } from "@/components/ChainSwitcher";
 
 /** The drawn Burrow mole glyph — the brand mark, no image assets. */
 export const MoleGlyph = ({ size = 18 }: { size?: number }) => (
@@ -89,6 +90,8 @@ export const NavBar = () => {
         </nav>
 
         <div id="walletSlot">
+          {/* Network first, then wallet: you pick where you are before you pick who you are. */}
+          <ChainSwitcher />
           <ConnectWalletButton />
         </div>
 

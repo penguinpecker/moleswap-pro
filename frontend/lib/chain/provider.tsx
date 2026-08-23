@@ -18,8 +18,45 @@ import {
 } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { wagmiConfig, robinhoodChain } from "./wagmi-config";
+import {
+  SUPPORTED_CHAINS,
+  chainMetaFor,
+  isSupportedChain,
+  contractsFor,
+  RH_CHAIN,
+  type ChainMeta,
+} from "./chains";
 
 const RH_CHAIN_ID = robinhoodChain.id;
+
+/**
+ * Which chain a fresh connection should target. The switcher writes this so that picking Arc while
+ * disconnected actually means something: the next connect lands on Arc rather than snapping back to
+ * Robinhood. Read at call time rather than held in state, so every `useWallet()` instance agrees
+ * without threading a context through the tree.
+ */
+export const PREFERRED_CHAIN_KEY = "moleswap.preferredChainId";
+
+export function readPreferredChainId(): number {
+  if (typeof window === "undefined") return RH_CHAIN_ID;
+  try {
+    const raw = window.localStorage.getItem(PREFERRED_CHAIN_KEY);
+    const id = raw ? Number(raw) : NaN;
+    return isSupportedChain(id) ? id : RH_CHAIN_ID;
+  } catch {
+    // Private mode / blocked storage — the default is always a safe answer.
+    return RH_CHAIN_ID;
+  }
+}
+
+export function writePreferredChainId(id: number): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PREFERRED_CHAIN_KEY, String(id));
+  } catch {
+    /* nothing to do — the preference is a convenience, not state we depend on */
+  }
+}
 
 /* ─── Compatibility shims ──────────────────────────────────────────────────
  * A few files historically imported WalletUI / useWalletContext / useChainClient straight from
@@ -66,6 +103,15 @@ export function useWallet() {
   const address = (acct as string | undefined) ?? null;
   const onRH = chainId === RH_CHAIN_ID;
 
+  // The chain the wallet is actually on, when we support it. Undefined means the wallet is somewhere
+  // we have no deployment for, which the switcher renders as an explicit "unsupported network" state
+  // rather than silently pretending to be on Robinhood.
+  const activeChain: ChainMeta | undefined = chainMetaFor(chainId);
+  const onSupportedChain = isSupportedChain(chainId);
+  // Addresses for the CURRENT chain. Anything chain-aware must read these rather than the flat
+  // Robinhood-only registry in contracts.ts, or it will aim an approval at the wrong network.
+  const contracts = contractsFor(chainId);
+
   // Truthy while connected so the swap screens' `if (!chainClient)` gates pass. It also carries
   // the chain readiness so executeSwap can decide whether to prompt a network switch.
   const chainClient = isConnected ? { chainId, onRH, ready: true } : null;
@@ -74,7 +120,7 @@ export function useWallet() {
     try {
       const injected = connectors.find((c) => c.type === "injected") ?? connectors[0];
       if (!injected) return;
-      await connectAsync({ connector: injected, chainId: RH_CHAIN_ID });
+      await connectAsync({ connector: injected, chainId: readPreferredChainId() });
     } catch {
       /* user rejected / no wallet — surfaced by the button UI */
     }
@@ -84,7 +130,7 @@ export function useWallet() {
   const connectWith = React.useCallback(
     async (connector: (typeof connectors)[number]) => {
       try {
-        await connectAsync({ connector, chainId: RH_CHAIN_ID });
+        await connectAsync({ connector, chainId: readPreferredChainId() });
       } catch {
         /* user rejected / wallet unavailable */
       }
@@ -121,6 +167,15 @@ export function useWallet() {
     originChain: address ? `eip155:${RH_CHAIN_ID}` : null,
     onRH,
     switchToRH: () => switchChainAsync({ chainId: RH_CHAIN_ID }).catch(() => undefined),
+
+    // ── multi-chain surface (Robinhood + Arc) ──
+    chainId,
+    activeChain,
+    onSupportedChain,
+    contracts,
+    supportedChains: SUPPORTED_CHAINS,
+    /** Ask the wallet to move to `id`. Resolves either way; the caller re-reads `activeChain`. */
+    switchTo: (id: number) => switchChainAsync({ chainId: id }).catch(() => undefined),
     connect,
     connectWith,
     wallets,
