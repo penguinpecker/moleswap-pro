@@ -20,6 +20,7 @@
 import http from "node:http";
 import { createClient } from "@supabase/supabase-js";
 import { checkOracleLiveness, oracleHealthView, LIVE_POOL_ID as ORACLE_LIVE_POOL_ID, ORACLE_STALE_SECONDS } from "./oracleHealth.mjs";
+import { classifyV4Pool, isTickRoutable, MOLE_HOOK } from "./v4Class.mjs";
 
 /* ---------------------------------------------------------------------------------------------- config */
 const RPC = process.env.RH_RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
@@ -66,15 +67,13 @@ const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 const POOL_MANAGER = (process.env.POOL_MANAGER || "0x8366a39CC670B4001A1121B8F6A443A643e40951").toLowerCase();
 // keccak("Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)")
 const V4_INITIALIZE_TOPIC = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438";
-const NATIVE_ADDR = "0x0000000000000000000000000000000000000000";
-// MoleSwap's own hook — pools carrying it are operator-registered as venue mole_v4 and are
-// deliberately invisible to the generic v4 scan (see discoverV4).
-const MOLE_HOOK = "0xb2c9a0af48df8858f3765385e733cd8776a138c4";
-// A hook whose address carries either return-delta bit can move tokens the tick math never sees, so
-// such a pool cannot be honestly priced from ticks. Indexed but marked inactive: discoverable and
-// auditable, never routed, until the quote layer can price it by simulation.
-const HOOK_BEFORE_SWAP_RETURNS_DELTA = 0x08;
-const HOOK_AFTER_SWAP_RETURNS_DELTA = 0x04;
+// MoleSwap's own hook (MOLE_HOOK, from v4Class.mjs so the classifier and this skip name ONE address) —
+// pools carrying it are operator-registered as venue mole_v4 and are deliberately invisible to the
+// generic v4 scan (see discoverV4).
+// How a discovered v4 pool may be quoted — 'ticks' (tick math, active=true), 'simulate' (return-delta
+// hook, priced by on-chain simulation in the frontend, active=false but loaded on demand by pair) or
+// 'native' (a native leg the router cannot settle, active=false and unroutable). The rule lives in
+// ./v4Class.mjs so the frontend's mirror (lib/aggregator/hookClass.ts) can be tested against it.
 
 const FACTORIES = [
   { f: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa", venue: "uniswap_v3" },
@@ -320,11 +319,10 @@ async function discoverV4(from, to) {
       // active=false over the operator rows, and silently unrouted the DEX's own pools. The upsert RPC
       // now refuses to overwrite mole_v4 rows as well — this skip keeps the writer honest regardless.
       if (hooks === MOLE_HOOK) continue;
-      const hookLow = Number(BigInt(hooks) & 0x3fffn);
-      const takesDelta = (hookLow & HOOK_BEFORE_SWAP_RETURNS_DELTA) !== 0 || (hookLow & HOOK_AFTER_SWAP_RETURNS_DELTA) !== 0;
-      // MoleRouter settles v4 currencies as ERC-20s; a native currency (address(0)) cannot be paid by
-      // it, so a native pool would only ever produce routes that revert. Indexed inactive.
-      const nativeLeg = currency0 === NATIVE_ADDR || currency1 === NATIVE_ADDR;
+      // Classify the pool: 'ticks' (tick-math routable → active), 'simulate' (return-delta hook, priced
+      // by on-chain simulation in the frontend → active=false but loaded on demand), or 'native' (native
+      // leg the router cannot settle → active=false, unroutable). See classifyV4Pool.
+      const quoteMode = classifyV4Pool(currency0, currency1, hooks);
       pools.push({
         id: l.topics[1], // the PoolId IS the identity; there is no address
         venue: "uniswap_v4",
@@ -334,7 +332,8 @@ async function discoverV4(from, to) {
         tick_spacing: tickSpacing,
         hooks,
         address: "",
-        routable: !nativeLeg && !takesDelta,
+        quoteMode,
+        routable: isTickRoutable(quoteMode),
       });
     }
   }
@@ -468,7 +467,10 @@ async function refresh() {
         const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: v4Rows.slice(i, i + 200) });
         if (error) throw new Error(`upsert_pools(v4): ${error.message}`);
       }
-      console.log(`v4: +${v4.length} pools (${v4Rows.filter((r) => r.active).length} routable)`);
+      const simulateCount = v4.filter((p) => p.quoteMode === "simulate").length;
+      console.log(
+        `v4: +${v4.length} pools (${v4Rows.filter((r) => r.active).length} routable, ${simulateCount} simulate-eligible)`,
+      );
       const tokenSet = new Set();
       for (const p of pools) { tokenSet.add(p.token0); tokenSet.add(p.token1); }
       newTokenCount = await registerNewTokens([...tokenSet]);

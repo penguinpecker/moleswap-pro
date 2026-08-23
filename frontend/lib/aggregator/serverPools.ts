@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import type { PoolRow } from "./client";
+import { isSimulateEligible } from "./hookClass";
 import { USDG } from "../mole/chain";
 
 /**
@@ -130,6 +131,128 @@ export async function fetchPoolRowsByPair(
 }
 
 /**
+ * The SIMULATE-eligible rows for this pair: return-delta-hook v4 pools on ERC-20 currencies.
+ *
+ * These are indexed `active=false` — they are NOT tick-math routable and stay out of the routing set (and
+ * out of the routable-count the strained database already struggles with) — but they ARE quotable by
+ * on-chain simulation (hookedQuote.ts), so the quote layer needs them. This narrow, pair-scoped query
+ * pulls the handful of inactive v4 rows for the pair and keeps only the ones the hook classification says
+ * are simulate-eligible (delta hook, non-native); native-leg inactive rows are dropped here since the
+ * router cannot settle them.
+ *
+ * ONE page is enough on purpose: a single pair having more than PAGE return-delta pools is pathological,
+ * and the quote layer caps how many it will actually simulate anyway.
+ */
+export async function fetchSimulateV4RowsByPair(
+  sb: PoolRegistryClient,
+  pair: PoolPair,
+): Promise<PoolRow[]> {
+  const tokens = poolPairTokens(pair);
+  const { data, error } = await sb
+    .from("mp_pools")
+    .select("*")
+    .eq("venue", "uniswap_v4")
+    .eq("active", false)
+    .in("token0", tokens)
+    .in("token1", tokens)
+    .range(0, PAGE - 1);
+  if (error) {
+    throw new Error(
+      `mp_pools simulate query failed for ${pair.tokenIn} -> ${pair.tokenOut}: ${error.message || String(error)}`,
+    );
+  }
+  return ((data as PoolRow[]) ?? []).filter((r) => isSimulateEligible(r));
+}
+
+/**
+ * How long the merge will wait for the simulate-eligible rows before shipping the quote WITHOUT them.
+ *
+ * The simulate rows are pure optionality (return-delta-hook pools, a small slice of volume). The query for
+ * them scans the ~335k INACTIVE uniswap_v4 rows, and on the currently IO-strained database that measured
+ * ~2.8s cold — slower than the active-rows query itself (~1s cold). Blocking every quote on the slower of
+ * the two would regress latency for the 99% of pairs that have no hooked route, so the simulate read is
+ * capped: if it does not land inside this budget, the quote ships with the tick-math venues only (a hooked
+ * pair simply won't quote its hooked route on that cold load, then does once the 30s cache warms). The
+ * `mp_pools_simulate_pair` partial index (supabase/migrations) removes the scan and brings this well under
+ * the cap; the cap is the safety net, not the plan.
+ */
+const SIMULATE_ROWS_TIMEOUT_MS = 1_000;
+
+/**
+ * Simulate-eligible rows, remembered per pair. Measured on the IO-strained database: the inactive-rows
+ * query took ~2.6s cold against the ~1s budget above, so without this a hooked pair would quote its hooked
+ * route only when the database happened to answer in time. A LATE answer now still lands here, so the
+ * request after it (not 30 seconds of them) includes the rows; and a fresh entry is served without touching
+ * the database at all. Pool EXISTENCE changes slowly (a new hooked pool shows up within the TTL), which is
+ * why a minute is fine — pool STATE is never cached here, it is read live at quote time.
+ */
+const SIMULATE_ROWS_TTL_MS = 60_000;
+const _simulateRowsCache = new Map<string, { rows: PoolRow[]; at: number }>();
+const _simulateInflight = new Map<string, Promise<PoolRow[]>>();
+
+/** Test seam: forget every cached simulate-rows answer. */
+export function _clearSimulateRowsCache(): void {
+  _simulateRowsCache.clear();
+  _simulateInflight.clear();
+}
+
+/**
+ * The complete routable set for a pair: the ACTIVE (tick-math) rows PLUS the simulate-eligible ones,
+ * fetched in parallel. The active read throws on a database error (its short-list-is-a-lie contract is
+ * load-bearing); the simulate read is best-effort AND time-boxed (see SIMULATE_ROWS_TIMEOUT_MS) so a slow
+ * database can never make it dominate quote latency — but its answer, early or late, is cached for the
+ * pair (SIMULATE_ROWS_TTL_MS) so the slow database is asked once a minute, not once a request. Both loaders
+ * (this file and lib/chain/amm.ts) go through here, so the two cannot drift on how they assemble the pair.
+ */
+export async function fetchPairRowsWithSimulate(
+  sb: PoolRegistryClient,
+  pair: PoolPair,
+  timeoutMs: number = SIMULATE_ROWS_TIMEOUT_MS,
+  nowMs: number = Date.now(),
+): Promise<PoolRow[]> {
+  const key = pairKey(pair);
+  const cached = _simulateRowsCache.get(key);
+  let simulate: Promise<PoolRow[]>;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (cached && nowMs - cached.at <= SIMULATE_ROWS_TTL_MS) {
+    simulate = Promise.resolve(cached.rows);
+  } else {
+    // One query per pair at a time; a late answer populates the cache for whoever asks next.
+    let inflight = _simulateInflight.get(key);
+    if (!inflight) {
+      inflight = fetchSimulateV4RowsByPair(sb, pair)
+        .then((rows) => {
+          // Aged from the request that asked, on the caller's clock (conservative: a late answer is
+          // already a little old when it lands).
+          _simulateRowsCache.set(key, { rows, at: nowMs });
+          return rows;
+        })
+        .catch((err) => {
+          console.warn(
+            `[aggregator] simulate-eligible v4 rows could not be read for ${pair.tokenIn} -> ${pair.tokenOut}; hooked pools will not quote this time:`,
+            err instanceof Error ? `${err.name}: ${err.message}` : err,
+          );
+          return (cached?.rows ?? []) as PoolRow[]; // a stale answer beats none
+        })
+        .finally(() => {
+          _simulateInflight.delete(key);
+        });
+      _simulateInflight.set(key, inflight);
+    }
+    const simulateBudget = new Promise<PoolRow[]>((resolve) => {
+      timer = setTimeout(() => resolve(cached?.rows ?? []), timeoutMs); // past budget: stale rows if any
+    });
+    simulate = Promise.race([inflight, simulateBudget]);
+  }
+  try {
+    const [active, simulateRows] = await Promise.all([fetchPoolRowsByPair(sb, pair), simulate]);
+    return simulateRows.length ? [...active, ...simulateRows] : active;
+  } finally {
+    clearTimeout(timer); // also on the active-query throw path, so the budget timer never leaks
+  }
+}
+
+/**
  * The whole-table load, kept working for callers that do not yet name a pair.
  *
  * IT IS TRUNCATED AND IT SAYS SO. There is no honest way to load ~94k rows inside a request — deep
@@ -217,7 +340,7 @@ export async function loadPoolRowsServer(nowMs: number, pair?: PoolPair): Promis
   const sb = createClient(url, anonKey, { auth: { persistSession: false } });
   try {
     if (pair && key) {
-      const rows = await fetchPoolRowsByPair(sb, pair);
+      const rows = await fetchPairRowsWithSimulate(sb, pair);
       _pairCache.set(key, { at: nowMs, rows, complete: true });
       return rows;
     }
