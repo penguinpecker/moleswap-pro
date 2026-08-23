@@ -61,11 +61,13 @@ export const MOLE_ADDRESSES = {
   /** MoleFeeCollector — redeems the protocol's ERC-6909 fee claims into real tokens. */
   moleFeeCollector: "0x4771865614D194Aa8b7aAB9d91e857686c37E584" as Address,
   /**
-   * MoleRouter — the aggregator's on-chain executor (immutable, no admin). Redeployed 2026-08-10 with the
-   * fee-dial split: it reads the aggregator fee (bps) from MoleFeeDial 0x242263f3Ea6165a70B463d8b65F8DdFdd66762EA
-   * at swap time, clamped to 1%, fee to an immutable recipient, failing to 0% — so the fee is a tunable
-   * number while the approval target stays immutable. Users grant it a standing ERC-20 approval; it speaks
-   * only two verbs (v3 pool swap, v4 PoolManager swap) and holds nothing between transactions.
+   * MoleRouter — the aggregator's on-chain executor. A UUPS PROXY since 2026-08-17 (not immutable: its
+   * upgradeAdmin can replace every line, which is why the provenance card labels it UPGRADEABLE from the
+   * chain rather than from this comment). It reads the aggregator fee (bps) from MoleFeeDial
+   * 0x242263f3Ea6165a70B463d8b65F8DdFdd66762EA at swap time, clamped to 1% in the current implementation,
+   * failing to 0% — so the fee is a tunable number without a re-approval. Users grant it a standing ERC-20
+   * approval; it speaks only two verbs (v3 pool swap, v4 PoolManager swap) and holds nothing between
+   * transactions.
    */
   moleRouter: "0xBd9B841d690E31B61aa3858EB145EA8BBe71122c" as Address,
   /** MoleFeeDial — the aggregator fee as a single mutable, capped (1%) number read by the router. */

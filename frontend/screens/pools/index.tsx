@@ -19,6 +19,10 @@ import {
 import { ethers } from "ethers";
 import { createClient } from "@/lib/supabase/client";
 import { MoleEngine } from "./MoleEngine";
+import { ProvenanceCard } from "./ProvenanceCard";
+// Which engine can serve a pool is decided from its hook ADDRESS (== MoleHook or not), read from the
+// key — never from the registry label. Provide / Queue are offered only on MoleHook-served pools.
+import { poolServiceTag, engineActionsAllowed, SERVICE_TAG_LABEL, type PoolServiceTag } from "@/lib/mole/hookBitmap";
 // One-sided deposit option in the add-liquidity modal: range/width math comes from the shared
 // singleSided module (the same one lib/chain/amm.addLiquidityOneSided signs with) — never re-derived.
 import { LIVE_POOL_KEY } from "@/lib/mole/chain";
@@ -153,6 +157,12 @@ interface PoolDisplay {
   fees24h: number;
   category?: string;
   active: boolean;
+  /** The key's hook address as registered (null if the row has none). */
+  hooks: string | null;
+  /** The key's tickSpacing (null if the row has none). */
+  tickSpacing: number | null;
+  /** molehook | foreign-v4 | v3 — from the hook address, never from the venue label. */
+  serviceTag: PoolServiceTag;
 }
 
 const POOL_ABI = [
@@ -296,6 +306,11 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
       vol24h,
       fees24h,
       active: !!p.hasLiquidity,
+      hooks: typeof p.hooks === "string" ? p.hooks : null,
+      tickSpacing: Number.isFinite(Number(p.tickSpacing)) && p.tickSpacing !== null && p.tickSpacing !== undefined ? Number(p.tickSpacing) : null,
+      // A v4 row (PoolId identity) is MoleHook-served only if its hook IS MoleHook; an unknown hook on a
+      // PoolId-identified row is foreign v4, fail-closed — it never earns Provide / Queue by default.
+      serviceTag: poolServiceTag({ venue: "mole_v4", hooks: typeof p.hooks === "string" ? p.hooks : null }),
     } as PoolDisplay;
   });
 }
@@ -665,6 +680,11 @@ const PoolsContent = () => {
                       <div className="tag">
                         <Badge chain="Robinhood Chain" />
                         <span className="fee">{feeLabel(p.fee)}</span>
+                        {/* MoleHook-served vs foreign, from the key's hook address (a row with no hook on
+                            record is not guessed to be ours). */}
+                        <span className="badge2" data-service-tag={p.serviceTag}>
+                          {p.hooks ? SERVICE_TAG_LABEL[p.serviceTag] : "Hook unknown"}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -677,10 +697,15 @@ const PoolsContent = () => {
                   ) : (
                     <div className="num col-apy" style={{ color: "var(--ink-3)" }}>—</div>
                   )}
-                  {/* Let the link go to the vault without also opening the detail view. */}
-                  <Link href="/vault" className="liq-btn" onClick={(e) => e.stopPropagation()}>
-                    + Liquidity
-                  </Link>
+                  {/* Provide is the vault, and the vault only admits MoleHook pools — offer it nowhere else.
+                      Let the link go to the vault without also opening the detail view. */}
+                  {engineActionsAllowed(p.serviceTag) ? (
+                    <Link href="/vault" className="liq-btn" onClick={(e) => e.stopPropagation()}>
+                      + Liquidity
+                    </Link>
+                  ) : (
+                    <span />
+                  )}
                 </div>
               ))
             )}
@@ -1482,7 +1507,27 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
           <span className="badge2">bridged from {pool.token0.sourceChain}</span>
         )}
         <span className="badge2">Fee {feeLabel(pool.fee)}</span>
+        <span className="badge2" data-service-tag={pool.serviceTag}>
+          {pool.hooks ? SERVICE_TAG_LABEL[pool.serviceTag] : "Hook unknown"}
+        </span>
       </div>
+
+      {/* Provenance — rendered from chain for a MoleHook-served pool: the hook bitmap proof, PoolId,
+          currencies + decimals, tickSpacing, the live lpFee, and each parameter's honest mutability. */}
+      {engineActionsAllowed(pool.serviceTag) && pool.hooks && pool.tickSpacing !== null && (
+        <div style={{ marginBottom: 14 }}>
+          <ProvenanceCard
+            poolKey={{
+              currency0: pool.token0.address as `0x${string}`,
+              currency1: pool.token1.address as `0x${string}`,
+              fee: pool.fee,
+              tickSpacing: pool.tickSpacing,
+              hooks: pool.hooks as `0x${string}`,
+            }}
+            defaultOpen
+          />
+        </div>
+      )}
 
       {/* Stats row */}
       <div className="p-grid p-3">
@@ -1570,14 +1615,22 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
               </div>
             ) : actionTab === null ? (
               <>
-                <div className="act-row">
-                  <button className="act-btn add" onClick={() => router.push("/vault")}>
-                    + Add liquidity
-                  </button>
-                  <button className="act-btn rem" onClick={() => router.push("/vault")}>
-                    − Remove liquidity
-                  </button>
-                </div>
+                {/* Provide (the vault) is bound to MoleHook pools — the vault's admission pin refuses any
+                    other hook, so the buttons are offered only where the call can succeed. */}
+                {engineActionsAllowed(pool.serviceTag) ? (
+                  <div className="act-row">
+                    <button className="act-btn add" onClick={() => router.push("/vault")}>
+                      + Add liquidity
+                    </button>
+                    <button className="act-btn rem" onClick={() => router.push("/vault")}>
+                      − Remove liquidity
+                    </button>
+                  </div>
+                ) : (
+                  <p className="d" style={{ marginTop: 0 }} data-testid="not-served">
+                    Not a MoleHook pool — the vault and the queue cannot serve it.
+                  </p>
+                )}
                 {/* Direct one-token deposit (MolePositions.open with a beyond-spot range) — the
                     single-sided OPTION this feature adds. Only offered on the live whitelisted
                     pool; everything else stays vault-managed exactly as before. */}
@@ -1592,9 +1645,11 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                     </button>
                   </div>
                 )}
-                <p className="d" style={{ marginTop: 12 }}>
-                  WETH/USDG liquidity is auto-managed by the MoleSwap ALM vault — deposit or exit there.
-                </p>
+                {engineActionsAllowed(pool.serviceTag) && (
+                  <p className="d" style={{ marginTop: 12 }}>
+                    WETH/USDG liquidity is auto-managed by the MoleSwap ALM vault — deposit or exit there.
+                  </p>
+                )}
               </>
             ) : (
               /* Add-liquidity form — reached via the live pool's "One-token add" button. The

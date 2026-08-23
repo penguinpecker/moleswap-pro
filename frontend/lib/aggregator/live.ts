@@ -19,6 +19,7 @@ import { discoverForPair } from "./discover";
 import { MOLE_ADDRESSES, PANCAKE_V3, ROBINHOOD_RPC_URL } from "../mole/chain";
 import type { V4PoolKey } from "../mole/poolId";
 import { getAggFeeBps, cachedAggFeeBps } from "../mole/aggFee";
+import { v4VenueLabel } from "../mole/hookBitmap";
 // The aggregate3 machinery lives in ./multicall — one implementation, shared with the cold quote path.
 import { MULTICALL3, encAddress, encInt16, encodeAggregate3, decodeAggregate3, rpcCall, type RawCall } from "./multicall";
 
@@ -29,7 +30,7 @@ const lc = (a: string) => a.toLowerCase();
 /* ----------------------------------------------------------------------------- UI-facing quote */
 
 export interface LiveRouteHop {
-  venue: string; // "PancakeSwap V3" | "Uniswap V3" | "MoleSwap v4"
+  venue: string; // "PancakeSwap V3" | "Uniswap V3" | "MoleSwap v4" (MoleHook pools only) | "Uniswap v4" (foreign v4)
   feePct: string; // "0.05%"
   tokenIn: string;
   tokenOut: string;
@@ -319,9 +320,11 @@ export class LivePairSession {
 
     const routes: LiveRoute[] = q.split.parts.map((part) => ({
       hops: part.hops.map((h) => ({
+        // A v4 hop is MoleSwap's only if its key's hook IS MoleHook; every other v4 pool (foreign hook or
+        // hookless) is a Uniswap v4 venue the router can trade but the engine cannot serve.
         venue:
           h.pool.venue === "UniswapV4"
-            ? "MoleSwap v4"
+            ? v4VenueLabel(h.pool.poolKey?.hooks)
             : this.venueByAddr.get(lc(h.pool.address)) ?? "PancakeSwap V3",
         feePct: `${(h.pool.fee / 10_000).toFixed(h.pool.fee % 10_000 === 0 ? 0 : 2)}%`,
         tokenIn: h.tokenIn,

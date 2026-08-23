@@ -36,6 +36,11 @@ export interface LivePool {
   token1: TokenInfo;
   /** v4 PoolId — the pool's real identity. `pool.address` is empty for these. */
   poolId: string;
+  /** The pool key's hook, as registered. Which engine can serve the pool is decided from THIS address
+   *  (== MoleHook or not), never from the `venue` label the row was filed under. null if the row has none. */
+  hooks: string | null;
+  /** The pool key's tickSpacing — immutable, part of the PoolId. null if the row has none. */
+  tickSpacing: number | null;
   tick: number;
   sqrtPriceX96: bigint;
   liquidity: bigint;
@@ -247,6 +252,8 @@ export async function loadLivePools(
 
       return {
         pool, token0, token1, poolId, tick, sqrtPriceX96,
+        hooks: row.hooks ? String(row.hooks) : null,
+        tickSpacing: row.tick_spacing === null || row.tick_spacing === undefined ? null : Number(row.tick_spacing),
         liquidity: BigInt(liquidity),
         reserve0, reserve1,
         tvlUsd: 0, // filled in below, once the ETH price is known
