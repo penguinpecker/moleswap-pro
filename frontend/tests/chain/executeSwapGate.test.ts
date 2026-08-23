@@ -113,7 +113,14 @@ async function loadAmm() {
   vi.doMock("@/lib/aggregator/client", () => ({ quoteSwap: (...a: any[]) => quoteSwap(...a) }));
   vi.doMock("@/lib/aggregator/serverPools", async (orig) => {
     const real = (await orig()) as any;
-    return { ...real, fetchPoolRowsByPair: async () => [{ id: "p", venue: "pancake_v3", active: true }] };
+    // Both registry readers are stubbed: loadPoolRows() reaches for the pair query first
+    // (fetchPairRowsWithSimulate, which also pulls the simulate-eligible hooked rows) and falls back to
+    // fetchPoolRowsByPair. This suite is about the pre-flight gate in front of signing, not the registry.
+    return {
+      ...real,
+      fetchPoolRowsByPair: async () => [{ id: "p", venue: "pancake_v3", active: true }],
+      fetchPairRowsWithSimulate: async () => [{ id: "p", venue: "pancake_v3", active: true }],
+    };
   });
   vi.doMock("@/lib/supabase/client", () => ({ createClient: () => ({ from: () => ({}) }) }));
   vi.doMock("@/lib/mole/aggFee", () => ({ getAggFeeBps: async () => 69 }));

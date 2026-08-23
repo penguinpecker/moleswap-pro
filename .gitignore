@@ -63,3 +63,14 @@ services/keeper/node_modules
 # local-only audit artefact
 dead-code-audit-*.json
 web3-repair-*.json
+
+# LOCAL-ONLY SECURITY WORKSPACE — unfixed findings + their working proofs of concept.
+# These describe exploitable paths against contracts that are LIVE on mainnet; publishing them in a public
+# repo before the fix ships hands an attacker the PoC. Same reason learnings/records/HANDOFF stay local.
+# Un-ignore a file only in the same change that fixes what it proves.
+HARDENING-FINDINGS.md
+QUEUE-FAILCLOSED-FINDINGS.md
+PATCH-PROPOSAL-exit-path.md
+test/attack/AttackQueueFailClosed.t.sol
+test/attack/AttackHardening_unlockAuth.t.sol
+test/attack/AttackHardening_settleTriple.t.sol
