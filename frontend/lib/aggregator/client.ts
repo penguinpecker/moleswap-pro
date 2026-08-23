@@ -13,6 +13,7 @@ import { fetchV3StatesMulticall } from "./multicall";
 import { fetchV4MolePool, fetchV4Pool, fetchV4PoolByKey } from "./venues/v4Reader";
 import { discoverForPair } from "./discover";
 import { encodePlan, type EncodedPlan } from "./router";
+import { bestHookedSimulateQuote } from "./hookedQuote";
 import { LIVE_POOL_ID, MOLE_ADDRESSES } from "../mole/chain";
 
 const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
@@ -20,7 +21,7 @@ const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 /** A pool row as stored in Supabase `mp_pools`. */
 export interface PoolRow {
   id: string;
-  venue: "pancake_v3" | "uniswap_v3" | "mole_v4";
+  venue: "pancake_v3" | "uniswap_v3" | "mole_v4" | "uniswap_v4";
   token0: string;
   token1: string;
   fee: number;
@@ -277,54 +278,95 @@ export async function quoteSwap(pools: PoolRow[], req: SwapQuoteRequest): Promis
   const now = req.nowSeconds ?? BigInt(Math.floor(Date.now() / 1000));
   const ttl = req.ttlSeconds ?? 60n; // ~60s deadline; on a 0.1s-block chain 300s let stale intent fill
 
+  // ── Simulate-based fallback for return-delta-hook pools tick math cannot price. ────────────────────
+  // Best-effort and single-hop: it prices a hooked pool by asking the canonical V4 Quoter to run the real
+  // swap, screens the hook and its skim, and sets minOut from the SIMULATED output (never above it). It is
+  // STARTED BEFORE the tick-state read and awaited after it, so its one eth_call overlaps the multicalls
+  // instead of adding to them — and for a pair with no hooked pool it resolves at once with no network.
+  // A failure here degrades to the tick quote; it never breaks it.
+  const hookedPromise: Promise<SwapQuote | null> = bestHookedSimulateQuote(pools, {
+    tokenIn: req.tokenIn,
+    tokenOut: req.tokenOut,
+    amountIn: req.amountIn,
+    recipient: req.recipient,
+    slippageBps: req.slippageBps,
+    feeBps: req.feeBps ?? 0,
+    weth: req.weth,
+    nowSeconds: now,
+    ttlSeconds: ttl,
+  })
+    .then((cand) => cand?.swapQuote ?? null)
+    .catch((err) => {
+      console.warn(
+        `[aggregator] quoteSwap: hooked-pool simulation failed for ${req.tokenIn} -> ${req.tokenOut}; quoting on the tick-math venues only:`,
+        err instanceof Error ? `${err.name}: ${err.message}` : err,
+      );
+      return null;
+    });
+
   const states = await fetchRelevantPoolStates(pools, req.tokenIn, req.tokenOut, req.weth);
-  if (states.length === 0) {
-    // Genuinely nothing to quote against. Still worth a line: it is also what an RPC outage looks like,
-    // because every read inside fetchRelevantPoolStates is best-effort.
+
+  // ── Tick-math quote: the fast, network-free path that prices every non-hooked venue. ──────────────
+  // `NoRouteError` leaves this null (the pair may still have a hooked route below); any OTHER throw is a
+  // real defect in our routing/tick math and is surfaced as QuoteFailedError, exactly as before.
+  let tickQuote: SwapQuote | null = null;
+  if (states.length > 0) {
+    try {
+      const quote = getQuote(states, {
+        tokenIn: req.tokenIn,
+        tokenOut: req.tokenOut,
+        amountIn: req.amountIn,
+        recipient: req.recipient,
+        nowSeconds: now,
+        ttlSeconds: ttl,
+        slippageBps: req.slippageBps,
+        feeBps: req.feeBps ?? 0,
+        weth: req.weth,
+      });
+      const { arg, value } = encodePlan(quote.plan);
+      tickQuote = { quote, encoded: arg, value };
+    } catch (err) {
+      if (!(err instanceof NoRouteError)) {
+        console.error(
+          "[aggregator] quoteSwap: the quoter threw — this is a QUOTER FAILURE, not 'no liquidity'",
+          {
+            tokenIn: req.tokenIn,
+            tokenOut: req.tokenOut,
+            amountIn: req.amountIn.toString(),
+            slippageBps: req.slippageBps,
+            feeBps: req.feeBps ?? 0,
+            poolStates: states.length,
+            error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+            stack: err instanceof Error ? err.stack : undefined,
+          },
+        );
+        throw new QuoteFailedError(err);
+      }
+      // NoRouteError → tickQuote stays null; fall through to the hooked-pool fallback.
+    }
+  }
+
+  // The hooked candidate (started above) — already null for any pair without a return-delta-hook pool.
+  const hookedQuote: SwapQuote | null = await hookedPromise;
+
+  // Pick the better output. Both `amountOut` figures are what the recipient receives (the fee is taken on
+  // the input in both), so they compare directly.
+  const best =
+    tickQuote && hookedQuote
+      ? hookedQuote.quote.amountOut > tickQuote.quote.amountOut
+        ? hookedQuote
+        : tickQuote
+      : tickQuote ?? hookedQuote;
+
+  if (!best) {
+    // Nothing to quote against on either path. Also what an RPC outage looks like, since every read inside
+    // fetchRelevantPoolStates / the simulator is best-effort — so it is a warning, not a silent null.
     console.warn(
-      `[aggregator] quoteSwap: no pool state for ${req.tokenIn} -> ${req.tokenOut} (registry rows: ${pools.length}) — reporting no route`,
+      `[aggregator] quoteSwap: no route for ${req.tokenIn} -> ${req.tokenOut} (registry rows: ${pools.length}, tick states: ${states.length}) — reporting no route`,
     );
     return null;
   }
-
-  let quote: Quote;
-  try {
-    quote = getQuote(states, {
-      tokenIn: req.tokenIn,
-      tokenOut: req.tokenOut,
-      amountIn: req.amountIn,
-      recipient: req.recipient,
-      nowSeconds: now,
-      ttlSeconds: ttl,
-      slippageBps: req.slippageBps,
-      feeBps: req.feeBps ?? 0,
-      weth: req.weth,
-    });
-  } catch (err) {
-    // The ONE honest no-route case: pools were read and priced, no path clears. Callers keep showing
-    // "no liquidity route" for this, exactly as before.
-    if (err instanceof NoRouteError) return null;
-    // Everything else is a defect on our side, not an empty market. Log it with the actual error (and
-    // enough context to reproduce), then rethrow it as a distinct type so no caller can mistake it for
-    // an illiquid pair.
-    console.error(
-      "[aggregator] quoteSwap: the quoter threw — this is a QUOTER FAILURE, not 'no liquidity'",
-      {
-        tokenIn: req.tokenIn,
-        tokenOut: req.tokenOut,
-        amountIn: req.amountIn.toString(),
-        slippageBps: req.slippageBps,
-        feeBps: req.feeBps ?? 0,
-        poolStates: states.length,
-        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
-      },
-    );
-    throw new QuoteFailedError(err);
-  }
-
-  const { arg, value } = encodePlan(quote.plan);
-  return { quote, encoded: arg, value };
+  return best;
 }
 
 export { NATIVE };

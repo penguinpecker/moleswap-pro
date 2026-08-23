@@ -43,7 +43,7 @@ import { createClient } from "@/lib/supabase/client";
 // The registry query itself lives beside the API routes' loader so the browser and server copies cannot
 // drift apart again — the last fix landed on the server twin only, which is what left this file broken.
 import {
-  fetchPoolRowsByPair,
+  fetchPairRowsWithSimulate,
   fetchPoolRowsWindow,
   poolPairTokens,
   type PoolPair,
@@ -126,6 +126,8 @@ export interface SwapQuote {
   pool: PoolInfo;
   priceImpact: number;
   gasEstimate: string;
+  /** Per-route "via A → B" lines; a hooked route carries a "[hooked]" tag. Optional/additive. */
+  routeDescriptions?: string[];
 }
 
 export interface TxOptions {
@@ -217,7 +219,7 @@ export async function loadPoolRows(pair?: PoolPair): Promise<PoolRow[]> {
     const sb = createClient();
     if (pair && key) {
       try {
-        const rows = await fetchPoolRowsByPair(sb, pair);
+        const rows = await fetchPairRowsWithSimulate(sb, pair);
         _pairRowsCache.set(key, { at: now, rows, complete: true });
         return rows;
       } catch (pairErr) {
@@ -331,6 +333,9 @@ export async function getSwapQuote(params: {
       pool,
       priceImpact: 0,
       gasEstimate: "150000",
+      // The route breakdown, carrying the "[hooked]" (or "[hooked·proxy]") tag when the winning route is a
+      // return-delta-hook pool priced by simulation. Surfaced so a consumer can show which venue filled.
+      routeDescriptions: q.quote.routeDescriptions,
     };
   } catch (err) {
     console.error("[MoleSwap] getSwapQuote error:", err);

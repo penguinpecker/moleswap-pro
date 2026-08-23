@@ -21,10 +21,33 @@ import type { V4PoolKey } from "../mole/poolId";
 import { getAggFeeBps, cachedAggFeeBps } from "../mole/aggFee";
 // The aggregate3 machinery lives in ./multicall — one implementation, shared with the cold quote path.
 import { MULTICALL3, encAddress, encInt16, encodeAggregate3, decodeAggregate3, rpcCall, type RawCall } from "./multicall";
+// Return-delta-hook pools: simulated per tick for the last requested amount, assembled purely in quote().
+import {
+  assembleHookedQuote,
+  bestHookedSim,
+  hookedCandidateRows,
+  netInputAfterFee,
+  resolveRouteTokens,
+  simulateHookedPools,
+  type HookedPoolSim,
+} from "./hookedQuote";
+import type { SwapQuote } from "./client";
 
 const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
 const lc = (a: string) => a.toLowerCase();
+
+/**
+ * A hooked simulation older than this is not shown. The session re-simulates every refresh tick (~1s), so
+ * a stale one means refreshes have been failing; the card must then fall back to the tick-math quote (or
+ * "no route") rather than keep displaying a number the chain no longer stands behind. Execution re-quotes
+ * fresh regardless (amm.executeSwap → quoteSwap), so this only governs what is displayed.
+ */
+export const HOOKED_SIM_MAX_AGE_MS = 10_000;
+
+/** Route-breakdown label for a return-delta-hook hop. The tag is the hook screen's ("hooked" or
+ *  "hooked·proxy"), so an upgradeable hook is visibly marked in the breakdown. */
+const hookedVenueLabel = (tag: string) => `Uniswap v4 [${tag}]`;
 
 /* ----------------------------------------------------------------------------- UI-facing quote */
 
@@ -96,6 +119,14 @@ export class LivePairSession {
   readonly weth: string;
   private readonly rpc: string;
 
+  // ── Return-delta-hook pools for this pair (hookedQuote.ts). The tick-math snapshot cannot price them,
+  // so `quote()` — which must stay synchronous and pure — reads a simulation the last `refresh()` tick
+  // ran (ONE batched round trip: quoter + slot0/liquidity reference + cached hook screen per candidate)
+  // for the amount `quote()` was last asked about. ──
+  private hookedRows: PoolRow[] = [];
+  private lastAmountIn: bigint | null = null;
+  private hookedSims: HookedPoolSim[] = [];
+
   constructor(tokenIn: string, tokenOut: string, weth: string) {
     this.tokenIn = tokenIn;
     this.tokenOut = tokenOut;
@@ -112,11 +143,20 @@ export class LivePairSession {
     return this.states;
   }
 
+  /** The return-delta-hook pools this session will simulate (direct pair only, capped). */
+  get hookedPoolCount(): number {
+    return this.hookedRows.length;
+  }
+
   /** Full load: registry + on-chain discovery + complete state fetch. Call once per pair. */
   async init(rows: PoolRow[]): Promise<void> {
     // Venue labels: registry rows first, then discovery (cached 60s inside discoverForPair, so this
     // is not a second network round trip after fetchRelevantPoolStates already ran it).
     for (const r of rows) if (r.address) this.venueByAddr.set(lc(r.address), VENUE_LABELS[r.venue] ?? "V3 pool");
+    // The hooked candidates for this pair. Pure filter — for most pairs this is an empty list and the
+    // hooked path then costs nothing on any tick.
+    const { routeIn, routeOut } = resolveRouteTokens(this.tokenIn, this.tokenOut, this.weth);
+    this.hookedRows = hookedCandidateRows(rows, routeIn, routeOut);
     try {
       const discovered = await discoverForPair(this.tokenIn, this.tokenOut, this.weth);
       for (const r of discovered) if (r.address) this.venueByAddr.set(lc(r.address), VENUE_LABELS[r.venue] ?? "V3 pool");
@@ -164,11 +204,16 @@ export class LivePairSession {
    * add or remove a venue. init() is the only thing that decides which pools are in play.
    */
   async refresh(): Promise<void> {
-    if (this.refreshing || this.states.length === 0) return;
+    // A pair whose ONLY venue is a hooked pool has no tick states and still needs its per-tick simulation.
+    if (this.refreshing || (this.states.length === 0 && this.hookedRows.length === 0)) return;
     this.refreshing = true;
     // Keep the fee current without blocking the tick — getAggFeeBps caches 30s, so this is a no-op read
     // most ticks and one cheap eth_call every 30s.
     void getAggFeeBps(Date.now()).then((b) => { this.feeBps = b; }).catch(() => {});
+    // Hooked pools: ONE batched round trip (quoter + reference + cached screen per candidate) for the last
+    // requested amount, in parallel with the tick-state refresh below. Awaited at the end of the tick so a
+    // slow batch neither blocks the tick-math refresh nor outlives it.
+    const hookedTick = this.hookedRows.length > 0 ? this.refreshHookedSims().catch(() => {}) : Promise.resolve();
     try {
       const v3 = this.states.filter((s) => s.venue !== "UniswapV4");
       const v4Stale = this.states.filter((s) => s.venue === "UniswapV4");
@@ -270,7 +315,57 @@ export class LivePairSession {
       this.states = next;
       if (Date.now() - this.gasPriceAge > 30_000) await this.refreshGasPrice();
     } finally {
+      await hookedTick;
       this.refreshing = false;
+    }
+  }
+
+  /** Simulate every hooked candidate for the amount quote() was last asked about (skipped until then) —
+   *  one batched round trip. The result REPLACES the previous sims, empty included: a batch that failed or
+   *  whose quoter reverted clears the hooked candidate, and the card falls back to the tick quote (or "no
+   *  route") rather than keep showing a number the chain did not just confirm. `quote()` additionally
+   *  drops anything older than HOOKED_SIM_MAX_AGE_MS in case refreshes stop arriving at all. */
+  private async refreshHookedSims(): Promise<void> {
+    const amountIn = this.lastAmountIn;
+    if (amountIn === null || amountIn <= 0n || this.hookedRows.length === 0) return;
+    const { routeIn, routeOut } = resolveRouteTokens(this.tokenIn, this.tokenOut, this.weth);
+    const { netAmountIn } = netInputAfterFee(amountIn, this.feeBps);
+    if (netAmountIn <= 0n) return;
+    const sims = await simulateHookedPools(this.hookedRows, { routeIn, routeOut, netAmountIn, rpcUrl: this.rpc });
+    this.hookedSims = sims;
+  }
+
+  /**
+   * The freshest usable hooked simulation for THIS request, assembled into a SwapQuote — or null. A
+   * simulation is usable only if it is not stale and points the session's way; whether it priced exactly
+   * THIS net input (amount and fee) is decided by `assembleHookedQuote` itself, which refuses any mismatch
+   * — one guard, not two copies of it. The assembly is pure (recipient/deadline/slippage applied now), and
+   * its minOut ≤ simulated invariant holds.
+   */
+  private hookedQuoteFor(
+    params: { amountIn: bigint; recipient: string; slippageBps: number },
+    nowMs: number,
+  ): { swapQuote: SwapQuote; sim: HookedPoolSim } | null {
+    if (this.hookedSims.length === 0) return null;
+    const { routeIn } = resolveRouteTokens(this.tokenIn, this.tokenOut, this.weth);
+    const usable = this.hookedSims.filter(
+      (s) => nowMs - s.at <= HOOKED_SIM_MAX_AGE_MS && lc(s.zeroForOne ? s.row.token0 : s.row.token1) === lc(routeIn),
+    );
+    const best = bestHookedSim(usable);
+    if (!best) return null;
+    try {
+      const swapQuote = assembleHookedQuote(best, {
+        tokenIn: this.tokenIn,
+        tokenOut: this.tokenOut,
+        grossAmountIn: params.amountIn,
+        feeBps: this.feeBps,
+        recipient: params.recipient,
+        deadline: BigInt(Math.floor(nowMs / 1000)) + 60n,
+        slippageBps: params.slippageBps,
+      });
+      return { swapQuote, sim: best };
+    } catch {
+      return null;
     }
   }
 
@@ -282,38 +377,63 @@ export class LivePairSession {
     decimalsIn: number;
     decimalsOut: number;
   }): LiveQuote | null {
-    if (params.amountIn <= 0n || this.states.length === 0) return null;
-    let q: Quote;
-    try {
-      q = getQuote(this.states, {
-        tokenIn: this.tokenIn,
-        tokenOut: this.tokenOut,
-        amountIn: params.amountIn,
-        recipient: params.recipient,
-        nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
-        ttlSeconds: 60n,
-        slippageBps: params.slippageBps,
-        feeBps: this.feeBps,
-        weth: this.weth,
-      });
-    } catch {
-      return null;
+    if (params.amountIn <= 0n) return null;
+    // Remember the amount so the next refresh tick simulates the hooked pools for it.
+    this.lastAmountIn = params.amountIn;
+    if (this.states.length === 0 && this.hookedSims.length === 0) return null;
+    const nowMs = Date.now();
+
+    // Tick-math quote over the cached snapshot; null when no path clears (the pair may still have a hooked
+    // route below). Any throw here is treated as "no tick route" for the live card, as before.
+    let tickQ: Quote | null = null;
+    if (this.states.length > 0) {
+      try {
+        tickQ = getQuote(this.states, {
+          tokenIn: this.tokenIn,
+          tokenOut: this.tokenOut,
+          amountIn: params.amountIn,
+          recipient: params.recipient,
+          nowSeconds: BigInt(Math.floor(nowMs / 1000)),
+          ttlSeconds: 60n,
+          slippageBps: params.slippageBps,
+          feeBps: this.feeBps,
+          weth: this.weth,
+        });
+      } catch {
+        tickQ = null;
+      }
     }
+
+    // Hooked candidate from the last tick's simulation (null when none / stale / different amount). The
+    // better OUTPUT wins; both amountOut figures are what the recipient receives (fee on the input).
+    const hooked = this.hookedQuoteFor(params, nowMs);
+    const hookedWins = hooked !== null && (tickQ === null || hooked.swapQuote.quote.amountOut > tickQ.amountOut);
+    const q: Quote | null = hookedWins ? hooked!.swapQuote.quote : tickQ;
+    if (!q) return null;
 
     let encoded: EncodedPlan;
     let value: bigint;
-    try {
-      ({ arg: encoded, value } = encodePlan(q.plan));
-    } catch {
-      return null;
+    if (hookedWins) {
+      ({ encoded, value } = hooked!.swapQuote);
+    } else {
+      try {
+        ({ arg: encoded, value } = encodePlan(q.plan));
+      } catch {
+        return null;
+      }
     }
 
+    // A hooked hop is labelled by its hook screen's tag so the route breakdown says "[hooked]" (or
+    // "[hooked·proxy]" for an upgradeable hook) where a tick-math v4 hop would name the venue.
+    const hookedTag = hookedWins ? hooked!.sim.hookRisk.tag : null;
     const routes: LiveRoute[] = q.split.parts.map((part) => ({
       hops: part.hops.map((h) => ({
         venue:
-          h.pool.venue === "UniswapV4"
-            ? "MoleSwap v4"
-            : this.venueByAddr.get(lc(h.pool.address)) ?? "PancakeSwap V3",
+          hookedTag !== null
+            ? hookedVenueLabel(hookedTag)
+            : h.pool.venue === "UniswapV4"
+              ? "MoleSwap v4"
+              : this.venueByAddr.get(lc(h.pool.address)) ?? "PancakeSwap V3",
         feePct: `${(h.pool.fee / 10_000).toFixed(h.pool.fee % 10_000 === 0 ? 0 : 2)}%`,
         tokenIn: h.tokenIn,
         tokenOut: h.tokenOut,
@@ -334,8 +454,14 @@ export class LivePairSession {
     const execRate = execRaw * decimalsAdj;
 
     let gasUnits = GAS_BASE;
-    for (const part of q.split.parts) {
-      for (const h of part.hops) gasUnits += h.pool.venue === "UniswapV4" ? GAS_PER_V4_HOP : GAS_PER_V3_HOP;
+    if (hookedWins) {
+      // The quoter's own estimate for the hooked swap — a launchpad hook measured ~964k, nowhere near the
+      // flat per-hop constant — plus the router's overhead.
+      gasUnits += hooked!.sim.gasEstimate;
+    } else {
+      for (const part of q.split.parts) {
+        for (const h of part.hops) gasUnits += h.pool.venue === "UniswapV4" ? GAS_PER_V4_HOP : GAS_PER_V3_HOP;
+      }
     }
     const gasEth = this.gasPriceWei !== null ? Number(gasUnits * this.gasPriceWei) / 1e18 : null;
 
@@ -357,7 +483,7 @@ export class LivePairSession {
       encoded,
       value,
       updatedAt: Date.now(),
-      poolsQuoted: this.states.length,
+      poolsQuoted: this.states.length + this.hookedRows.length,
     };
   }
 

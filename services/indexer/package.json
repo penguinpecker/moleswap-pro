@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Incremental indexer for MoleSwap on Robinhood Chain — keeps mp_pools + the mp_tokens verified/liquidity list fresh every REFRESH_SECONDS.",
   "scripts": {
-    "start": "node src/index.mjs"
+    "start": "node src/index.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0"

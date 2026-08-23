@@ -347,12 +347,17 @@ describe("the browser quote path asks for the traded pair", () => {
     const { getSwapQuote } = await import("@/lib/chain/amm");
     await getSwapQuote({ tokenIn: TOK_A, tokenOut: TOK_B, amountIn: "1000000000000000000" });
 
-    expect(filters).toHaveLength(1);
-    // A whole-table select would leave these undefined — that is the exact bug being locked out.
-    expect(filters[0]!.token0).toBeDefined();
-    expect(filters[0]!.token1).toBeDefined();
-    expect(filters[0]!.token0).toContain(TOK_A);
-    expect(filters[0]!.token1).toContain(TOK_B);
+    // Two pair-scoped reads now: the active (tick-math) rows AND the simulate-eligible return-delta-hook
+    // rows. What is being locked out is a WHOLE-TABLE select, so the invariant is that EVERY query the
+    // loader issues carries the pair's token0/token1 filters — not the exact count.
+    expect(filters.length).toBeGreaterThanOrEqual(1);
+    for (const f of filters) {
+      // A whole-table select would leave these undefined — that is the exact bug being locked out.
+      expect(f.token0).toBeDefined();
+      expect(f.token1).toBeDefined();
+      expect(f.token0).toContain(TOK_A);
+      expect(f.token1).toContain(TOK_B);
+    }
   });
 });
 

@@ -19,10 +19,12 @@ import { robinhoodChain, LIVE_POOL_KEY, MOLE_ADDRESSES, DYNAMIC_FEE_FLAG, ROBINH
 import { poolIdOf, type V4PoolKey } from "@/lib/mole/poolId";
 import { wordsToFetch, DEFAULT_WORD_RADIUS } from "../indexer";
 
-const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b" as Address;
+/** Uniswap v4 StateView periphery on Robinhood Chain — exported so the hooked-pool batch (hookedQuote.ts)
+ *  can read slot0/liquidity through the SAME contract and ABI this reader uses. */
+export const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b" as Address;
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;
 
-const stateViewAbi = [
+export const stateViewAbi = [
   { type: "function", name: "getSlot0", stateMutability: "view", inputs: [{ name: "poolId", type: "bytes32" }], outputs: [{ type: "uint160" }, { type: "int24" }, { type: "uint24" }, { type: "uint24" }] },
   { type: "function", name: "getLiquidity", stateMutability: "view", inputs: [{ name: "poolId", type: "bytes32" }], outputs: [{ type: "uint128" }] },
   { type: "function", name: "getTickBitmap", stateMutability: "view", inputs: [{ name: "poolId", type: "bytes32" }, { name: "wordPos", type: "int16" }], outputs: [{ type: "uint256" }] },
@@ -242,6 +244,60 @@ export async function fetchV4Pool(poolKey: V4PoolKey): Promise<PoolState | null>
     return { ...state, poolKey: { ...(state.poolKey as any), fee: DYNAMIC_FEE_FLAG } };
   } catch {
     // Unquotable (hook charging a fee, RPC hiccup, etc.) → exclude rather than mis-quote.
+    return null;
+  }
+}
+
+/**
+ * Read a return-delta-hook v4 pool as a TICK-MATH REFERENCE — the number the pool WOULD return if its
+ * hook took no delta. This is NOT a quote and must never be executed against: for a return-delta hook the
+ * real output differs (the hook moves tokens the tick math never sees), which is exactly why the executable
+ * quote comes from the on-chain simulator (v4Simulate.ts). Its ONLY use is the skim screen — comparing
+ * this tick-math figure against the simulated one tells us how much value the hook is currently extracting,
+ * so a hook skimming more than a bounded fraction can be excluded.
+ *
+ * It deliberately does NOT call `v4PoolState`/`assertQuotableHook` (which throw on a delta hook by design);
+ * it builds the state directly and tags it UniswapV4 so `quoteExactInput` can price it. Returns null when
+ * the pool is uninitialised or unreadable.
+ */
+export async function fetchV4TickReference(poolKey: V4PoolKey): Promise<PoolState | null> {
+  try {
+    const c = client();
+    const poolId = poolIdOf(poolKey) as `0x${string}`;
+    const tickSpacing = poolKey.tickSpacing;
+
+    const [slot0, liquidity] = await Promise.all([
+      c.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getSlot0", args: [poolId] }) as Promise<readonly [bigint, number, number, number]>,
+      c.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getLiquidity", args: [poolId] }) as Promise<bigint>,
+    ]);
+
+    const sqrtPriceX96 = slot0[0];
+    const tick = Number(slot0[1]);
+    const lpFee = Number(slot0[3]);
+    if (sqrtPriceX96 === 0n) return null;
+
+    // Same LP+protocol fee composition the real reader uses (see fetchV4PoolByKey), so the reference
+    // charges the same swap fee the chain does — only the hook delta is (unavoidably) absent from it.
+    const protoRaw = Number(slot0[2]);
+    const protocolFee = Math.max(protoRaw & 0xfff, (protoRaw >> 12) & 0xfff);
+    const effectiveFee = Math.round(1e6 - ((1e6 - protocolFee) * (1e6 - lpFee)) / 1e6);
+
+    const ticks: TickData[] = await readTickWindow(c, poolId, tickSpacing, tick, DEFAULT_WORD_RADIUS);
+
+    return {
+      address: `v4ref:${poolKey.currency0}:${poolKey.currency1}:${poolKey.fee}:${tickSpacing}:${poolKey.hooks}`,
+      token0: poolKey.currency0,
+      token1: poolKey.currency1,
+      fee: effectiveFee,
+      tickSpacing,
+      sqrtPriceX96,
+      tick,
+      liquidity,
+      ticks,
+      venue: "UniswapV4",
+      poolKey: { ...poolKey, fee: effectiveFee },
+    };
+  } catch {
     return null;
   }
 }
