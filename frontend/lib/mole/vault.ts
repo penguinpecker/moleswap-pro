@@ -9,10 +9,21 @@
  *   - zapOpen(z, deadline)       → single-token deposit into a bounded range around spot
  *
  * IMPORTANT: the vault REJECTS full-range positions — it enforces minRangeWidth/maxRangeWidth (live:
- * 120 / 60000 ticks), so a deposit must sit in a bounded range centred on the current tick. And the
- * ZapParams slippage bound is `amountOutMin` on the swap leg (records.txt:1354 — `minLiquidity` alone is
- * NOT protection on a one-sided zap). Both are derived from the live pool below; every write is also
- * `simulateContract`-checked against the vault before it is sent.
+ * 120 / 60000 ticks), so a deposit must sit in a bounded range. And the ZapParams slippage bound is
+ * `amountOutMin` on the swap leg (records.txt:1354 — `minLiquidity` alone is NOT protection on a
+ * one-sided zap). Every write is also `simulateContract`-checked against the vault before it is sent.
+ *
+ * WHERE THE DEPOSIT'S NUMBERS COME FROM, and why it is not slot0 any more. `zapOpen` has no price gate
+ * of its own — `_validateRange` checks width and spacing, nothing else — so `amountOutMin` and
+ * `minLiquidity` ARE the deposit's entire protection, and both are supplied by this file. They used to
+ * be computed from `slot0`: the expected output of the swap at the pool's instantaneous price, less
+ * slippage, with `minLiquidity` hard-coded to 1. That bound was anchored to the one number an attacker
+ * can move for free, and then enforced against a swap executing at that same number — it compared the
+ * bad price against itself and passed. Skew the pool, hold it a block, and any user who loads this page
+ * inside the window signs a bound the manipulation clears by construction; on Arc the deepest pool on
+ * the chain is ~$74k, so holding the skew is cheap. Both numbers now come from the MoleHook TWAP via
+ * lib/mole/priceAnchor + lib/mole/zapPlan, and a pool whose spot has walked past the vault's OWN
+ * `maxTwapDeviationTicks` is refused outright rather than quietly deposited into.
  */
 import {
   createPublicClient,
@@ -31,6 +42,8 @@ import {
   USDG,
   ROBINHOOD_RPC_URL,
 } from "./chain";
+import { STATE_VIEW, assertAnchorUsable, readPriceAnchor, stateViewAbi, viemAnchorReads } from "./priceAnchor";
+import { DEFAULT_SLIPPAGE_BPS, RANGE_HALF_WIDTH, buildZapPlan } from "./zapPlan";
 
 const VAULT = MOLE_ADDRESSES.molePositions;
 const TICK_SPACING = 60;
@@ -41,15 +54,9 @@ const TICK_SPACING = 60;
 const FULL_LOWER = -887272;
 const FULL_UPPER = 887272;
 // The vault refuses full-range; positions must sit in [minRangeWidth, maxRangeWidth] (live 120/60000).
-// Half-width of the deposit range in ticks (full width 30000 → comfortably inside the bounds).
-const RANGE_HALF_WIDTH = 15_000;
-const DEFAULT_SLIPPAGE_BPS = 100; // on the zap's swap leg
+// RANGE_HALF_WIDTH / DEFAULT_SLIPPAGE_BPS live in ./zapPlan with the arithmetic that uses them, and
+// STATE_VIEW / stateViewAbi in ./priceAnchor with the rule about what spot may and may not be used for.
 const RH_HEX = "0x1237";
-
-const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b" as Address;
-const stateViewAbi = [
-  { type: "function", name: "getSlot0", stateMutability: "view", inputs: [{ type: "bytes32" }], outputs: [{ type: "uint160" }, { type: "int24" }, { type: "uint24" }, { type: "uint24" }] },
-] as const;
 
 export const VAULT_TOKENS = [WETH, USDG] as const;
 
@@ -156,44 +163,49 @@ function poolKeyArg() {
 }
 
 /**
- * Build the zapOpen argument for a single-token deposit of `amountIn` of `token`, reading the live pool
- * so the range is centred on spot within the vault's width bounds and `amountOutMin` bounds the swap.
+ * Build the zapOpen argument for a single-token deposit of `amountIn` of `token`.
+ *
+ * Reads the TWAP (the anchor), spot (only to judge it), and the vault's own deviation band, then hands
+ * all three to the pure builder in ./zapPlan. THROWS on a pool whose spot has walked outside that band:
+ * see the header — a bound is not the answer when the price the swap executes at is the price we
+ * distrust, and the caller turns the throw into a message rather than a transaction.
  */
-async function buildZap(pub: ReturnType<typeof almPublicClient>, token: Address, amountIn: bigint, slippageBps = DEFAULT_SLIPPAGE_BPS) {
+export async function buildZap(
+  pub: ReturnType<typeof almPublicClient>,
+  token: Address,
+  amountIn: bigint,
+  slippageBps = DEFAULT_SLIPPAGE_BPS,
+) {
   const isToken0 = token.toLowerCase() === (WETH.address as string).toLowerCase(); // WETH=currency0, USDG=currency1
-  const slot0 = (await pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getSlot0", args: [LIVE_POOL_ID as `0x${string}`] })) as readonly [bigint, number, number, number];
-  const sqrtPriceX96 = slot0[0];
-  const tick = Number(slot0[1]);
-
-  // Range centred on the current tick, snapped to spacing, width inside [minRangeWidth, maxRangeWidth].
-  const center = Math.round(tick / TICK_SPACING) * TICK_SPACING;
-  const half = Math.round(RANGE_HALF_WIDTH / TICK_SPACING) * TICK_SPACING;
-  const tickLower = center - half;
-  const tickUpper = center + half;
-
-  // amountOutMin — the REAL slippage bound. Swap `swapAmount` of the input token at spot, less slippage.
-  // price = (sqrtP/2^96)^2 = currency1_raw per currency0_raw (USDG_raw per WETH_raw).
-  const swapAmount = amountIn / 2n;
-  const Q192 = 1n << 192n;
-  const priceX192 = sqrtPriceX96 * sqrtPriceX96; // USDG_raw per WETH_raw, scaled by 2^192
-  const expectedOut = isToken0
-    ? (swapAmount * priceX192) / Q192 // WETH -> USDG
-    : (swapAmount * Q192) / priceX192; // USDG -> WETH
-  const amountOutMin = (expectedOut * BigInt(10000 - slippageBps)) / 10000n;
+  const anchor = await readPriceAnchor(viemAnchorReads(pub, LIVE_POOL_ID));
+  const plan = buildZapPlan({
+    anchor,
+    zeroForOne: isToken0,
+    amountIn,
+    tickSpacing: TICK_SPACING,
+    slippageBps,
+    rangeHalfWidthTicks: RANGE_HALF_WIDTH,
+  });
 
   return {
     key: poolKeyArg(),
-    tickLower,
-    tickUpper,
-    zeroForOne: isToken0,
-    amountIn,
-    swapAmount,
-    minLiquidity: 1n, // must be non-zero; amountOutMin above is the real protection
-    amountOutMin,
+    tickLower: plan.tickLower,
+    tickUpper: plan.tickUpper,
+    zeroForOne: plan.zeroForOne,
+    amountIn: plan.amountIn,
+    swapAmount: plan.swapAmount,
+    minLiquidity: plan.minLiquidity,
+    amountOutMin: plan.amountOutMin,
   };
 }
 
-/** Live pool state for the strategy chart: current tick + sqrtPrice, read from the v4 StateView. */
+/**
+ * Live pool state for the strategy chart: current tick + sqrtPrice, read from the v4 StateView.
+ *
+ * DISPLAY ONLY, and that is the whole reason this read is still allowed to be spot. A chart is meant to
+ * show where the market IS, including when someone has just walked it. Nothing derived from this number
+ * may become a transaction bound — the bounds come from `buildZap`, which anchors on the TWAP.
+ */
 export async function getPoolState(): Promise<{ tick: number; sqrtPriceX96: bigint } | null> {
   try {
     const pub = almPublicClient();
@@ -236,6 +248,11 @@ export async function almDepositNative(amountIn: bigint, onStep?: (s: string) =>
     if (!account) return { success: false, error: "Wallet not connected" };
     if (amountIn <= 0n) return { success: false, error: "Enter an amount" };
 
+    // THE REFUSAL COMES BEFORE THE IRREVERSIBLE STEP. Wrapping is a one-way trip for a user who only
+    // holds ETH, so a pool that is going to be refused must be refused here — not after they are left
+    // holding WETH they never asked for. Same read the deposit itself will do a moment later.
+    await readPriceAnchor(viemAnchorReads(pub, LIVE_POOL_ID)).then((a) => assertAnchorUsable(a));
+
     onStep?.("Wrapping ETH → WETH…");
     const wrapHash = await wallet.writeContract({
       address: WETH.address as Address, abi: wethAbi, functionName: "deposit", value: amountIn, account, chain: robinhoodChain,
@@ -265,7 +282,13 @@ export async function almDeposit(token: Address, amountIn: bigint): Promise<Depo
     if (!account) return { success: false, error: "Wallet not connected" };
     if (amountIn <= 0n) return { success: false, error: "Enter an amount" };
 
-    // 1) allowance → vault
+    // 1) the bounds, FIRST. buildZap reads the TWAP, judges spot against the vault's own band and
+    //    throws on a pool that looks manipulated. Doing it before the approval means a refused deposit
+    //    leaves nothing behind — no standing allowance granted for a transaction we then declined to
+    //    build. The range and both bounds are anchored to the TWAP; see the file header.
+    const z = await buildZap(pub, token, amountIn);
+
+    // 2) allowance → vault
     const allowance = (await pub.readContract({
       address: token,
       abi: erc20Abi,
@@ -284,8 +307,7 @@ export async function almDeposit(token: Address, amountIn: bigint): Promise<Depo
       await pub.waitForTransactionReceipt({ hash: ah });
     }
 
-    // 2) simulate zapOpen (bounded range + amountOutMin from live pool), then send
-    const z = await buildZap(pub, token, amountIn);
+    // 3) simulate zapOpen against the live vault, then send
     const sim = await pub.simulateContract({
       address: VAULT as Address,
       abi: molePositionsAbi,

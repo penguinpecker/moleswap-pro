@@ -72,6 +72,9 @@ import {
   type OneSidedSide,
   type OneSidedPreset,
 } from "@/lib/mole/singleSided";
+// The spot-vs-TWAP rule, shared with the vault deposit card and /api/v1/tx/add-liquidity so all three
+// agree on what "this pool looks manipulated" means.
+import { assertAnchorUsable, readPriceAnchor, viemAnchorReads } from "@/lib/mole/priceAnchor";
 
 /* ─── Re-exports (unchanged import surface) ──────────────────────────────── */
 export {
@@ -825,6 +828,18 @@ export async function addLiquidityOneSided(params: {
     if (amount <= 0n) return { success: false, error: "Enter an amount" };
     const side = params.side;
     const token = (side === "token0" ? LIVE_POOL_KEY.currency0 : LIVE_POOL_KEY.currency1) as `0x${string}`;
+
+    // THE PRICE THIS DEPOSIT IS ALLOWED TO BE PLACED AGAINST. A one-sided range is defined RELATIVE TO
+    // SPOT — v4 funds a range strictly above the current tick from token0 alone, and that is a fact
+    // about spot, not an opinion about value — so this path cannot simply re-anchor on the TWAP the way
+    // the zap's `amountOutMin` does. What it can do is refuse. If someone has walked spot, the range
+    // this builds sits on the wrong side of the real market: when the skew unwinds the deposit is left
+    // deep out of range, or sold through on the way past, and nothing downstream would notice because
+    // every number in the deposit was computed from the walked price. So the pool is judged against
+    // MoleHook's time-averaged tick first, with the vault's own band, and a pool outside it gets a
+    // refusal rather than calldata — and it happens BEFORE the approval below, so a refused deposit
+    // leaves no standing allowance behind.
+    await readPriceAnchor(viemAnchorReads(pub, LIVE_POOL_ID as `0x${string}`)).then((a) => assertAnchorUsable(a));
 
     // Quote-time state: live tick → range strictly beyond spot → liquidity from the single amount.
     const { currentTick } = await loadPoolTickState(LIVE_POOL_ID);

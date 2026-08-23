@@ -251,6 +251,21 @@ describe("/api/v1/tx/add-liquidity one-sided deposits", () => {
     expect(approvals[0].to.toLowerCase()).toBe(USDG.toLowerCase());
   }, 30_000);
 
+  // The gate that decides whether ANY of the above is built runs against the real MoleHook. This is the
+  // live-chain half of tests/api/addLiquidityAnchor.test.ts, which drives the manipulated cases against
+  // stubbed reads: here the only thing asserted is that the oracle answers at all, over the window the
+  // vault names, and that the route reports spot's real distance from it.
+  it("the live route prices against MoleHook's TWAP and reports how far spot has walked from it", async () => {
+    const r = await addLiq({ ...OK_BODY, amount1Desired: "0", preset: "tight" });
+    expect(r.status).toBe(200);
+    const j = await r.json();
+    expect(Number.isInteger(j.data.twapTick)).toBe(true);
+    expect(j.data.twapWindowSeconds).toBe(1800);
+    expect(j.data.maxTwapDeviationTicks).toBe(600);
+    expect(j.data.twapDeviationTicks).toBe(Math.abs(j.data.currentTick - j.data.twapTick));
+    expect(j.data.twapDeviationTicks).toBeLessThanOrEqual(j.data.maxTwapDeviationTicks);
+  }, 30_000);
+
   it("explicit ticks on the WRONG side of spot are refused, not nudged across", async () => {
     // A token0 (above-spot) deposit with a range far BELOW any plausible spot tick: the route must
     // 400 with the side rule spelled out, never "fix" the range into a two-sided pull.

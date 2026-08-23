@@ -68,6 +68,7 @@ export const ROUTER_ERROR_ABI = parseAbi([
   "error PathSumMismatch(uint256 declared, uint256 summed)",
   "error EmptyPath()",
   "error HopChainBroken()",
+  "error HopInputExceeded(uint256 paid, uint256 cap)",
   "error InsufficientOutput(uint256 got, uint256 minOut)",
   "error NotPoolManager()",
   "error UnexpectedCallback()",
@@ -94,6 +95,7 @@ export const HOOK_ERROR_ABI = parseAbi([
   "error PoolNotInitialized()",
   "error InsufficientObservations()",
   "error NotUpgradeAdmin()",
+  "error PoolCreatorRequired()",
 ]);
 
 /** lib/v4-core/src — every custom error the singleton and its libraries can raise (non-test sources). */
@@ -201,6 +203,10 @@ const ROUTER_EXPLAIN: Record<string, Explain> = {
   },
   EmptyPath: { title: "Malformed route", message: () => "The route contains an empty path. This is a quoting defect on our side — refresh the quote; if it persists, report it." },
   HopChainBroken: { title: "Route could not be executed", message: () => "A hop in the route did not connect to the next, or a pool returned less than it should. Refresh the quote and retry; if it persists, report it." },
+  // A per-hop input cap, added with audit finding F-08: the router calls a caller-supplied v3 pool and
+  // the pool's own callback names the amount to be paid. Without a cap a hostile pool could name any
+  // number the router was holding. Seeing this means a pool asked for more than its hop declared.
+  HopInputExceeded: { title: "A pool asked for more than the route allowed", message: () => "One venue in this route tried to take more input than the quote allocated to it, so the swap was refused and nothing moved. Refresh the quote and retry; if it persists on the same route, report it." },
   InsufficientOutput: {
     title: "Price moved past your minimum",
     message: ([got, minOut], ctx) => `Price moved — the route would deliver ${fmtAmt(got, ctx.tokenOut)}, below your minimum of ${fmtAmt(minOut, ctx.tokenOut)}. Increase slippage, try a smaller amount, or refresh and retry.`,
@@ -230,6 +236,7 @@ const HOOK_EXPLAIN: Record<string, Explain> = {
   PoolNotInitialized: { title: "Pool not initialised", message: () => "This pool has no price yet. Pick another route." },
   InsufficientObservations: { title: "Price oracle warming up", message: () => "The pool's price oracle has too little history yet to answer. Try again in a few minutes.", protection: true },
   NotUpgradeAdmin: { title: "Not authorised", message: () => "Only the hook's upgrade admin may do that." },
+  PoolCreatorRequired: { title: "Pool creator cannot be zero", message: () => "The pool creator role cannot be handed to the zero address — that would freeze the liquidity allowlist, not renounce it.", protection: true },
 };
 
 const V4_EXPLAIN: Record<string, Explain> = {

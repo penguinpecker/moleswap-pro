@@ -27,6 +27,15 @@ import {
   type OneSidedPreset,
   type OneSidedSide,
 } from "@/lib/mole/singleSided";
+// The spot-vs-TWAP rule is shared with the browser deposit card, so the two cannot disagree about what
+// "this pool looks manipulated" means. priceAnchor imports neither viem nor ethers nor a client
+// component — only the rule crosses; the wire below stays ethers, as the rest of this route is.
+import {
+  FALLBACK_MAX_TWAP_DEVIATION_TICKS,
+  FALLBACK_TWAP_WINDOW_SECONDS,
+  judgeAnchor,
+  manipulatedMessage,
+} from "@/lib/mole/priceAnchor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,6 +74,17 @@ export const dynamic = "force-dynamic";
  *
  * DECIMALS: every amount echoed back is formatted through lib/mole/format.ts with the decimals pinned
  * in lib/mole/chain.ts (WETH 18, USDG 6). No `|| 18` fallback exists anywhere in this file.
+ *
+ * THE PRICE THIS ROUTE TRUSTS. Every number here used to come from `slot0`. That is the pool's
+ * instantaneous price — the one number an ordering-privileged party moves for free, and on a chain
+ * whose deepest pool is a few tens of thousands of dollars, holding a skew for a block costs almost
+ * nothing. A caller who hit this route inside such a window received calldata that minted their funds
+ * at a price someone else had just chosen, with every bound in the response agreeing with the
+ * manipulation because it had been computed FROM it. The anchor is now MoleHook's time-averaged tick,
+ * which a swap in the same transaction cannot move; spot is still read, but only to be judged against
+ * it, and a pool whose spot has walked past the vault's own `maxTwapDeviationTicks` gets a 409 instead
+ * of calldata. Same rule, same copy, same constants as the browser deposit card — see
+ * lib/mole/priceAnchor.ts.
  */
 
 const VAULT = CONTRACTS.MOLE_POSITIONS;
@@ -82,7 +102,12 @@ const VAULT_ABI = [
   "function maxRangeWidth() view returns (int24)",
   "function minPositionLiquidity() view returns (uint128)",
   "function maxPositionLiquidity() view returns (uint128)",
+  "function maxTwapDeviationTicks() view returns (int24)",
+  "function twapWindow() view returns (uint32)",
 ];
+
+/** MoleHook is the pool's hook AND its first-party TWAP oracle. `consult` is the anchor read. */
+const HOOK_ORACLE_ABI = ["function consult(bytes32 id, uint32 secondsAgo) view returns (int24)"];
 
 const ERC20_APPROVE_ABI = ["function approve(address spender, uint256 amount) returns (bool)"];
 const WETH_DEPOSIT_ABI = ["function deposit() payable"];
@@ -322,13 +347,21 @@ export async function POST(req: NextRequest) {
       return apiError("The live pool is not initialized — no price to size a position against.", 409);
     }
 
-    const [whitelisted, minRangeWidth, maxRangeWidth, minPosLiq, maxPosLiq] = await Promise.all([
-      vault.isWhitelisted(LIVE_POOL_ID).then((v: boolean) => v).catch(() => true),
-      vault.minRangeWidth().then((v: bigint) => Number(v)).catch(() => FALLBACK_MIN_RANGE_WIDTH),
-      vault.maxRangeWidth().then((v: bigint) => Number(v)).catch(() => FALLBACK_MAX_RANGE_WIDTH),
-      vault.minPositionLiquidity().then((v: bigint) => BigInt(v)).catch(() => BigInt(0)),
-      vault.maxPositionLiquidity().then((v: bigint) => BigInt(v)).catch(() => BigInt(0)),
-    ]);
+    const [whitelisted, minRangeWidth, maxRangeWidth, minPosLiq, maxPosLiq, maxDevTicks, twapWindow] =
+      await Promise.all([
+        vault.isWhitelisted(LIVE_POOL_ID).then((v: boolean) => v).catch(() => true),
+        vault.minRangeWidth().then((v: bigint) => Number(v)).catch(() => FALLBACK_MIN_RANGE_WIDTH),
+        vault.maxRangeWidth().then((v: bigint) => Number(v)).catch(() => FALLBACK_MAX_RANGE_WIDTH),
+        vault.minPositionLiquidity().then((v: bigint) => BigInt(v)).catch(() => BigInt(0)),
+        vault.maxPositionLiquidity().then((v: bigint) => BigInt(v)).catch(() => BigInt(0)),
+        // A vault that reports ZERO has its own gate switched off. On this side of the wire zero must
+        // NOT read as "no limit" — a disabled on-chain gate is exactly when the client one has to bind.
+        vault
+          .maxTwapDeviationTicks()
+          .then((v: bigint) => Number(v))
+          .catch(() => FALLBACK_MAX_TWAP_DEVIATION_TICKS),
+        vault.twapWindow().then((v: bigint) => Number(v)).catch(() => FALLBACK_TWAP_WINDOW_SECONDS),
+      ]);
 
     if (!whitelisted) {
       return apiError(
@@ -336,6 +369,41 @@ export async function POST(req: NextRequest) {
         409,
       );
     }
+
+    /* ─────────────────────────── the anchor, and the refusal ─────────────────────────── */
+
+    // EVERY NUMBER BELOW USED TO BE DERIVED FROM slot0 ALONE: the default range was centred on the
+    // instantaneous tick and the declared liquidity was priced at it. slot0 is the one price an
+    // ordering-privileged party sets for free — on a chain where the deepest pool is a few tens of
+    // thousands of dollars, holding a skew for a block is cheap — so a caller who hit this route inside
+    // that window got calldata that minted their funds at a price someone else chose, and every bound in
+    // the response agreed with the manipulation because it was computed from it.
+    //
+    // The anchor is MoleHook's time-averaged tick, which a swap in the same transaction cannot move
+    // (`_write` advances the cumulative by `elapsed * lastTick`, and `elapsed` is zero for a
+    // same-timestamp swap). Spot is still read — as the thing being JUDGED. If the two disagree by more
+    // than the vault's own `maxTwapDeviationTicks`, this route refuses to build anything at all: handing
+    // back correctly-bounded calldata for a pool we distrust just means the caller pays gas to revert.
+    let twapTick: number;
+    try {
+      const hookOracle = new ethers.Contract(LIVE_POOL_KEY.hooks, HOOK_ORACLE_ABI, provider);
+      twapTick = Number(await hookOracle.consult(LIVE_POOL_ID, twapWindow));
+      if (!Number.isInteger(twapTick)) throw new Error(`consult returned ${String(twapTick)}`);
+    } catch (e: any) {
+      // NO FALLBACK TO SPOT. A missing anchor is the one case where reaching for slot0 would rebuild
+      // exactly the defect this block removes.
+      return apiError(
+        `Could not read the pool's time-averaged price from MoleHook (${LIVE_POOL_KEY.hooks}): ` +
+          `${e?.message || "consult reverted"}. There is nothing honest to price a deposit against, so no ` +
+          "calldata was built.",
+        503,
+      );
+    }
+    const anchorVerdict = judgeAnchor(currentTick, twapTick, maxDevTicks);
+    if (anchorVerdict.manipulated) {
+      return apiError(manipulatedMessage(anchorVerdict), 409);
+    }
+    const twapSqrtPriceX96 = getSqrtRatioAtTick(twapTick);
 
     /* ─────────────────────────────── one-sided deposit path ─────────────────────────────── */
 
@@ -350,6 +418,13 @@ export async function POST(req: NextRequest) {
       // The range: from the preset (computed strictly beyond the live tick, snapped, clamped into
       // the vault's width band), or the caller's explicit ticks (snapped, then REQUIRED to be
       // strictly one-sided for this side at the live tick — never silently nudged across spot).
+      //
+      // THIS ONE STAYS SPOT-RELATIVE, and it is the one place in this route where that is correct.
+      // "One-sided" is not a price opinion, it is a v4 fact: a range funded by token0 alone is one that
+      // lies strictly above the CURRENT tick, and placing it relative to the TWAP instead would produce
+      // a range that straddles spot and pulls both tokens — the exact bug the off-side cap of 0 exists
+      // to make impossible. The protection against a walked spot is the deviation gate above, which has
+      // already refused this request if spot and the TWAP disagree.
       let osTickLower: number;
       let osTickUpper: number;
       try {
@@ -549,6 +624,10 @@ export async function POST(req: NextRequest) {
         tickLower: osTickLower,
         tickUpper: osTickUpper,
         currentTick,
+        twapTick,
+        twapWindowSeconds: twapWindow,
+        twapDeviationTicks: anchorVerdict.deviationTicks,
+        maxTwapDeviationTicks: anchorVerdict.maxDeviationTicks,
         rangeWidthTicks: osTickUpper - osTickLower,
         vaultRangeBounds: { minRangeWidth, maxRangeWidth },
         liquidity: osLiquidity.toString(),
@@ -571,7 +650,11 @@ export async function POST(req: NextRequest) {
 
     /* ──────────────────────────────────── the range ──────────────────────────────────── */
 
-    const center = snapToSpacing(currentTick);
+    // CENTRED ON THE TWAP, NOT SPOT. The range decides which side of the market the deposit lands on;
+    // centring it on a walked tick hands that choice to whoever walked it. Spot is within
+    // `maxTwapDeviationTicks` of the TWAP by now (the gate above), so a 30 000-tick range still
+    // straddles the live price comfortably.
+    const center = snapToSpacing(twapTick);
     const halfDefault = Math.round(DEFAULT_RANGE_HALF_WIDTH / TICK_SPACING) * TICK_SPACING;
     const requestedLower = isInt(tickLowerIn) ? tickLowerIn : center - halfDefault;
     const requestedUpper = isInt(tickUpperIn) ? tickUpperIn : center + halfDefault;
@@ -594,7 +677,14 @@ export async function POST(req: NextRequest) {
 
     const sqrtLower = getSqrtRatioAtTick(tickLower);
     const sqrtUpper = getSqrtRatioAtTick(tickUpper);
-    const liquidityAtQuote = getLiquidityForAmounts(sqrtPriceX96, sqrtLower, sqrtUpper, amount0Max, amount1Max);
+    // THE BINDING PRICE, not the convenient one. The mint executes at spot, so the declared liquidity
+    // has to be fundable there; but a spot the caller distrusts must never be able to INFLATE what they
+    // declare. Taking the smaller of the two valuations means the number is fundable at whichever of
+    // spot and the TWAP is worse for the caller, and a walked spot can only ever shrink the position,
+    // never enlarge it. Inside the deviation gate the two are within 6.18% of each other anyway.
+    const liquidityAtSpot = getLiquidityForAmounts(sqrtPriceX96, sqrtLower, sqrtUpper, amount0Max, amount1Max);
+    const liquidityAtTwap = getLiquidityForAmounts(twapSqrtPriceX96, sqrtLower, sqrtUpper, amount0Max, amount1Max);
+    const liquidityAtQuote = liquidityAtSpot < liquidityAtTwap ? liquidityAtSpot : liquidityAtTwap;
     if (liquidityAtQuote <= BigInt(0)) {
       return apiError(
         "The supplied amounts mint zero liquidity over this range — increase amount0Desired / amount1Desired.",
@@ -703,7 +793,8 @@ export async function POST(req: NextRequest) {
         detail:
           `The documented "full range" default is impossible here — the vault enforces a range width in ` +
           `[${minRangeWidth}, ${maxRangeWidth}] ticks. Default used: a ${halfDefault * 2}-tick range centred on the ` +
-          `current tick (${currentTick}).` +
+          `pool's TIME-AVERAGED tick (${twapTick}), not on spot (${currentTick}) — spot is the number an ` +
+          `ordering-privileged party sets for free, so it is judged here, never used to place a range.` +
           (snapped ? " Supplied ticks were snapped to the pool's 60-tick spacing." : ""),
       },
       {
@@ -749,6 +840,12 @@ export async function POST(req: NextRequest) {
       tickLower,
       tickUpper,
       currentTick,
+      // The anchor, echoed: the tick every bound above was derived from, spot's distance from it, and
+      // the band that would have refused the request.
+      twapTick,
+      twapWindowSeconds: twapWindow,
+      twapDeviationTicks: anchorVerdict.deviationTicks,
+      maxTwapDeviationTicks: anchorVerdict.maxDeviationTicks,
       rangeWidthTicks: width,
       vaultRangeBounds: { minRangeWidth, maxRangeWidth },
       liquidity: liquidity.toString(),
