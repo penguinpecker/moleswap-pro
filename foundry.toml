@@ -13,6 +13,8 @@ optimizer = true
 # bytecode and gas; re-measure after touching it.
 optimizer_runs = 44444444
 ffi = false
+# test/SwapPreflightProbe.t.sol pins the probe bytes the frontend ships against the Solidity source.
+fs_permissions = [{ access = "read", path = "./frontend/lib/aggregator/preflightProbe.json" }]
 
 remappings = [
     "forge-std/=lib/forge-std/src/",

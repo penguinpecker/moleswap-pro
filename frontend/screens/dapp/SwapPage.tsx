@@ -6,7 +6,9 @@ import { DappStep } from ".";
 import { getWalletClient } from "@/lib/wallet/walletClient";
 import type { TokenEntry, ChainEntry } from "@/lib/chain/tokenList";
 import { useWallet } from "@/lib/chain/provider";
-import { getSwapQuote } from "@/lib/chain/amm";
+import { prepareSwap, preflightSwap, type PreparedSwap } from "@/lib/chain/amm";
+import type { PreflightVerdict } from "@/lib/aggregator/simulate";
+import { decodeSwapFailure, type DecodeContext } from "@/lib/aggregator/errors";
 import { diagnostics } from "@/lib/diagnostics";
 import { ExchangeHero } from "./ExchangePage";
 
@@ -115,18 +117,69 @@ export const SwapPage = ({
 
   const [swapSteps, setSwapSteps] = useState<Array<{ label: string; status: "pending" | "signing" | "confirmed" | "error" }>>(initialSwapSteps);
 
-  // Keep the review quote LIVE. The card carries a snapshot from the exchange screen; here we re-quote
-  // every REQUOTE_MS and count down to the next refresh, so the number can never go stale under the user
-  // (and executeSwap re-quotes once more at signing time, so what they sign is always fresh).
+  // Keep the review quote LIVE — and pre-flight it. The card carries a snapshot from the exchange screen;
+  // here, every REQUOTE_MS, the EXACT transaction is rebuilt (prepareSwap: quote → plan → calldata), then
+  // simulated AS the connected account on current chain state (preflightSwap: balance diff, decoded reason),
+  // and the same PreparedSwap object is what "Start swapping" hands to executeSwap — so what is simulated
+  // and shown is byte-for-byte what is signed. The sign button stays blocked until a pre-flight is green.
   const REQUOTE_MS = 8000;
   const [liveOut, setLiveOut] = useState<string | null>(null);
   const [secsToRefresh, setSecsToRefresh] = useState(REQUOTE_MS / 1000);
   const requoteBusy = useRef(false);
+  const [prepared, setPrepared] = useState<PreparedSwap | null>(null);
+  const [preflight, setPreflight] = useState<PreflightVerdict | null>(null);
+  // The calldata the current verdict was taken on. A verdict only opens the button for THAT swap: when the
+  // cycle rebuilds the plan, the old verdict stays visible but stops gating until the new one returns.
+  const [preflightFor, setPreflightFor] = useState<string | null>(null);
+  const [preflightBusy, setPreflightBusy] = useState(false);
+  // A quoter/transport failure while preparing — rendered distinctly from a genuine "no route".
+  const [prepareError, setPrepareError] = useState<string | null>(null);
+  const [noRoute, setNoRoute] = useState(false);
+  const [cycleEpoch, setCycleEpoch] = useState(0);
+  // A "simulation mismatch — do not sign" verdict HALTS the automatic cycle: no re-prepare, no re-simulate,
+  // until the user acts (dossier T-37 / S-68 — a mismatch is never retried automatically, because a looping
+  // retry only has to catch the honest provider unreachable once to open the button). The latch clears only
+  // on the explicit Re-check button below or on leaving this screen. `mismatchHalt` is what the cycle reads;
+  // `halted` is the same fact for the render.
+  const mismatchHalt = useRef(false);
+  const [halted, setHalted] = useState(false);
+  const applyVerdict = (v: PreflightVerdict, forCalldata: string | null) => {
+    setPreflight(v);
+    setPreflightFor(forCalldata);
+    if (v.status === "blocked" && v.kind === "mismatch") {
+      mismatchHalt.current = true;
+      setHalted(true);
+    }
+  };
+  const recheckAfterMismatch = () => {
+    mismatchHalt.current = false;
+    setHalted(false);
+    setCycleEpoch((e) => e + 1);
+  };
+
+  const account = walletState.address ?? null;
+  const isHexAddr = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
+  // Custom recipient support: ExchangePage pipes the user's typed destination through
+  // swapData.recipientAddress. `recipient` stays the caller (approvals, balance anchor); `outputRecipient`
+  // is where the swap output lands when set. MoleRouter enforces the same minimum-out either way.
+  const customRecipient =
+    isHexAddr(swapData.recipientAddress) && (!account || swapData.recipientAddress.toLowerCase() !== account.toLowerCase())
+      ? swapData.recipientAddress
+      : null;
+  const decIn = swapData.fromTokenMeta?.decimals ?? 18;
+  const decOut = swapData.toTokenMeta?.decimals ?? 18;
+  const symIn = displaySymbolOf(swapData.fromTokenMeta, swapData.fromToken);
+  const symOut = displaySymbolOf(swapData.toTokenMeta, swapData.toToken);
+  const decodeCtx: DecodeContext = useMemo(
+    () => ({ tokenIn: { symbol: symIn, decimals: decIn }, tokenOut: { symbol: symOut, decimals: decOut } }),
+    [symIn, decIn, symOut, decOut],
+  );
+  const fmtAmount = (v: bigint, decimals: number) =>
+    Number(formatUnits(v, decimals)).toLocaleString(undefined, { maximumFractionDigits: decimals > 6 ? 6 : 4 });
 
   useEffect(() => {
     if (isExecuting || isCompleted) return; // freeze the quote once the swap is in flight
-    const decIn = swapData.fromTokenMeta?.decimals ?? 18;
-    const decOut = swapData.toTokenMeta?.decimals ?? 18;
+    if (mismatchHalt.current) return; // halted after a simulation mismatch: nothing runs until the user re-checks
     let amountInWei: bigint;
     try {
       amountInWei = parseUnits(String(swapData.amount || "0"), decIn);
@@ -136,39 +189,74 @@ export const SwapPage = ({
     if (amountInWei <= BigInt(0) || !swapData.toToken) return;
 
     let cancelled = false;
-    const requote = async () => {
+    let poll: ReturnType<typeof setInterval> | null = null;
+    let tick: ReturnType<typeof setInterval> | null = null;
+    const stopTimers = () => {
+      if (poll) clearInterval(poll);
+      if (tick) clearInterval(tick);
+      poll = null;
+      tick = null;
+    };
+    const cycle = async () => {
       if (requoteBusy.current) return;
       requoteBusy.current = true;
       try {
-        const q = await getSwapQuote({
+        const p = await prepareSwap({
           tokenIn: swapData.fromToken || "",
           tokenOut: swapData.toToken,
           amountIn: amountInWei.toString(),
+          recipient: account ?? "0x000000000000000000000000000000000000dEaD",
+          outputRecipient: customRecipient,
         });
-        if (!cancelled && q?.amountOut) {
-          const human = Number(formatUnits(BigInt(q.amountOut), decOut));
-          setLiveOut(human.toLocaleString(undefined, { maximumFractionDigits: decOut > 6 ? 6 : 4 }));
-          setSecsToRefresh(REQUOTE_MS / 1000);
+        if (cancelled) return;
+        if (!p) {
+          // The honest no-route: pools were read and nothing clears. Distinct from a failure below.
+          setNoRoute(true);
+          setPrepared(null);
+          setPreflight(null);
+          return;
         }
-      } catch {
-        /* keep the last good number */
+        setNoRoute(false);
+        setPrepareError(null);
+        setPrepared(p);
+        setLiveOut(fmtAmount(p.amountOut, decOut));
+        setSecsToRefresh(REQUOTE_MS / 1000);
+        if (!account) return; // the probe runs AS the signer; nothing to simulate until one is connected
+        setPreflightBusy(true);
+        const v = await preflightSwap(p, account, decodeCtx);
+        if (!cancelled) {
+          applyVerdict(v, p.calldata);
+          // A mismatch halts the cycle right here: the interval stops, the countdown stops, and only the
+          // Re-check button (or leaving the screen) starts it again.
+          if (mismatchHalt.current) stopTimers();
+        }
+      } catch (err) {
+        if (cancelled) return;
+        // A thrown error is the quoter or the transport failing — NOT "no liquidity". Say which.
+        setPrepareError(decodeSwapFailure(err).message);
+        setPrepared(null);
+        setPreflight(null);
       } finally {
         requoteBusy.current = false;
+        if (!cancelled) setPreflightBusy(false);
       }
     };
 
-    requote();
-    const poll = setInterval(requote, REQUOTE_MS);
-    const tick = setInterval(() => setSecsToRefresh((s) => (s > 0 ? s - 1 : 0)), 1000);
+    cycle();
+    poll = setInterval(cycle, REQUOTE_MS);
+    tick = setInterval(() => setSecsToRefresh((s) => (s > 0 ? s - 1 : 0)), 1000);
     return () => {
       cancelled = true;
-      clearInterval(poll);
-      clearInterval(tick);
+      stopTimers();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [swapData.fromToken, swapData.toToken, swapData.amount, isExecuting, isCompleted]);
+  }, [swapData.fromToken, swapData.toToken, swapData.amount, isExecuting, isCompleted, account, customRecipient, cycleEpoch]);
 
   const displayOut = liveOut ?? swapData.expectedOut ?? "0";
+  // The sign button opens only on a green pre-flight of the swap that will actually be signed — the verdict
+  // must belong to the CURRENT prepared calldata, not to the plan of a previous cycle.
+  const preflightCurrent = !!prepared && preflightFor === prepared.calldata;
+  const preflightOk = preflightCurrent && preflight?.status === "ok";
 
   // Compute input amount in wei for exact-amount approval when needed
   const amountWei = useMemo(() => {
@@ -220,6 +308,14 @@ export const SwapPage = ({
     if (!walletState.chainClient) {
       setExecutionError("Wallet is still initializing. Please wait a moment and try again.");
       diagnostics.logSessionEvent("Swap blocked - chainClient not ready");
+      return;
+    }
+
+    // Guard 4: the pre-flight of the exact transaction must be green. The button is disabled until it
+    // is, so this is belt-and-braces against a stale click.
+    if (!preflightOk) {
+      setExecutionError("Pre-flight has not passed for this swap yet. Wait for it, or go back and refresh the quote.");
+      diagnostics.logSessionEvent("Swap blocked - pre-flight not green");
       return;
     }
 
@@ -374,29 +470,24 @@ export const SwapPage = ({
       // Reset steps to the derived list (approve only appears for ERC-20 input).
       setSwapSteps(initialSwapSteps);
 
-      // Custom recipient support: ExchangePage pipes the user's typed
-      // destination through swapData.recipientAddress. `recipient` stays the
-      // caller (approvals, balance anchor); `outputRecipient` is where the
-      // swap output lands when set. MoleRouter enforces the same minimum-out
-      // either way and takes no fee.
-      const isHexAddr = (s: unknown): s is string =>
-        typeof s === "string" && /^0x[0-9a-fA-F]{40}$/.test(s);
-      const customRecipient =
-        isHexAddr(swapData.recipientAddress) &&
-        swapData.recipientAddress.toLowerCase() !== currentAddress.toLowerCase()
-          ? swapData.recipientAddress
-          : null;
       if (customRecipient) {
         console.log("[MoleSwap] Custom recipient in use:", customRecipient);
       }
 
+      // Hand over the swap the pre-flight simulated and this card displayed. executeSwap signs it as-is
+      // while it is fresh and re-runs the pre-flight gate right before the signature either way.
       const swapResult = await runSwap({
         chainClient: walletState.chainClient,
         tokenIn: swapData.fromToken,
         tokenOut: swapData.toToken,
-        amountIn: swapData.quote?.amountIn?.toString?.() || amountWei,
+        amountIn: prepared?.amountIn.toString() ?? swapData.quote?.amountIn?.toString?.() ?? amountWei,
         recipient: currentAddress,            // caller
         outputRecipient: customRecipient,     // optional; null → proceeds land at caller
+        prepared: prepared ?? undefined,
+        decodeCtx,
+        // The signing-time re-check's verdict lands on the card too — and a mismatch there latches the same
+        // halt, so the cycle that resumes after the failed attempt does not quietly re-simulate.
+        onPreflight: (v) => applyVerdict(v, prepared?.calldata ?? null),
         onStep: (_stepIdx, label, status) => {
           // amm.ts emits status as a plain string; narrow it to the row union
           // (type-level only — values are the same "signing"/"confirmed"/"error").
@@ -627,12 +718,19 @@ export const SwapPage = ({
               {/* Live-quote freshness + expiry countdown — the number above re-quotes automatically. */}
               {!isExecuting && !isCompleted && (
                 <div className="live-req">
-                  <RefreshCw
-                    className="spin"
-                    size={12}
-                    style={{ animationDuration: "3s" }}
-                  />
-                  <span>LIVE · quote refreshes in {secsToRefresh}s</span>
+                  {halted ? (
+                    // The countdown must not promise a refresh that, by design, is not coming.
+                    <span data-testid="preflight-halted">HALTED · simulation mismatch — not re-checked automatically</span>
+                  ) : (
+                    <>
+                      <RefreshCw
+                        className="spin"
+                        size={12}
+                        style={{ animationDuration: "3s" }}
+                      />
+                      <span>LIVE · quote refreshes in {secsToRefresh}s</span>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -651,6 +749,80 @@ export const SwapPage = ({
                 ? `${swapData.etaSeconds}s`
                 : "-"}
             </span>
+          </div>
+
+          {/* Pre-flight: the exact transaction, simulated as you on current chain state. A pre-flight is
+              not a guarantee — state can move between simulation and inclusion, and the on-chain minimum
+              is the only promise. It gates the button below. */}
+          <div className="pf-box" data-testid="preflight">
+            <div className="pf-head">
+              <span>Pre-flight</span>
+              <span className="pf-sub">
+                {preflight && !preflightCurrent
+                  ? "re-checking the fresh quote… · not a guarantee"
+                  : preflight?.status === "ok"
+                    ? `simulated · ${preflight.providers > 1 ? `${preflight.providers} providers agree` : "second opinion unavailable"} · not a guarantee`
+                    : "simulated on current chain state · not a guarantee"}
+              </span>
+            </div>
+            {preflight?.status === "ok" && !isExecuting && (
+              <div className="p-rows" style={{ marginTop: 4 }}>
+                <div className="p-row">
+                  <span className="k">You send</span>
+                  <span className="v">
+                    −{fmtAmount(preflight.sent, decIn)} {symIn}
+                  </span>
+                </div>
+                <div className="p-row">
+                  <span className="k">You receive (simulated)</span>
+                  <span className="v pos">
+                    +{fmtAmount(preflight.received, decOut)} {symOut}
+                  </span>
+                </div>
+              </div>
+            )}
+            {preflight?.status === "blocked" && (
+              <div className="warn-red" data-testid="preflight-blocked">
+                <b style={{ display: "block", marginBottom: 4 }}>{preflight.reason.title}</b>
+                <span style={{ whiteSpace: "pre-line", overflowWrap: "break-word" }}>{preflight.reason.message}</span>
+                {preflight.reason.raw ? (
+                  <details className="pf-raw">
+                    <summary>Raw error</summary>
+                    <code>{preflight.reason.raw}</code>
+                  </details>
+                ) : null}
+                {preflight.kind === "mismatch" ? (
+                  // The only way back into the cycle is this explicit action (or leaving the screen).
+                  <div style={{ marginTop: 6 }}>
+                    Automatic re-checks are halted.{" "}
+                    <button type="button" className="pf-retry" data-testid="preflight-recheck" onClick={recheckAfterMismatch}>
+                      Re-check now
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
+            {preflight?.status === "unavailable" && (
+              <div className="warn-thin" data-testid="preflight-unavailable">
+                Pre-flight could not run: {preflight.reason.message}{" "}
+                <button type="button" className="pf-retry" onClick={() => setCycleEpoch((e) => e + 1)}>
+                  Retry
+                </button>
+              </div>
+            )}
+            {!preflight && (
+              <div className="pf-note">
+                {prepareError
+                  ? `Could not build the swap — this is not a liquidity problem: ${prepareError}`
+                  : noRoute
+                    ? "No route with live liquidity for this pair."
+                    : !account
+                      ? "Connect a wallet to run the pre-flight."
+                      : preflightBusy || !prepared
+                        ? "Running pre-flight…"
+                        : "Running pre-flight…"}
+              </div>
+            )}
           </div>
 
           {/* Swap execution progress */}
@@ -725,15 +897,21 @@ export const SwapPage = ({
             /* Case 4: Ready to swap */
             <button
               onClick={handleStartSwapping}
-              disabled={isExecuting || !swapData.quote}
+              disabled={isExecuting || !swapData.quote || !preflightOk}
               className="p-btn"
               style={
-                isExecuting || !swapData.quote
+                isExecuting || !swapData.quote || !preflightOk
                   ? { opacity: 0.6, cursor: "not-allowed" }
                   : undefined
               }
             >
-              {isExecuting ? currentStep || "Swapping..." : "Start swapping"}
+              {isExecuting
+                ? currentStep || "Swapping..."
+                : preflight?.status === "blocked"
+                  ? "Blocked by pre-flight"
+                  : preflightOk
+                    ? "Start swapping"
+                    : "Waiting for pre-flight…"}
             </button>
           )}
         </div>

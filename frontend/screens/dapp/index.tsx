@@ -198,6 +198,73 @@ export default function DappPage() {
           border: 1px solid rgba(184, 55, 31, 0.3);
           color: var(--rust);
         }
+        /* Pre-flight panel on the review card: same field/strip tokens as .rv-row / .rv-strip. */
+        .pf-box {
+          margin-top: 12px;
+          padding: 12px 16px;
+          border-radius: var(--r-md);
+          background: rgba(255, 255, 255, 0.55);
+          border: 1px solid rgba(44, 26, 12, 0.08);
+        }
+        .pf-head {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 10px;
+          font-size: 10.5px;
+          font-weight: 800;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          color: var(--p-card-ink-3);
+        }
+        .pf-head .pf-sub {
+          font-weight: 700;
+          letter-spacing: 0.02em;
+          text-transform: none;
+          color: var(--p-card-ink-3);
+        }
+        .pf-note {
+          margin-top: 8px;
+          font-size: 12.5px;
+          color: var(--p-card-ink-3);
+        }
+        .pf-raw {
+          margin-top: 6px;
+          font-size: 11px;
+        }
+        .pf-raw summary {
+          cursor: pointer;
+          font-weight: 700;
+        }
+        .pf-raw code {
+          display: block;
+          margin-top: 4px;
+          font-family: var(--font-num);
+          font-size: 10.5px;
+          word-break: break-all;
+          color: var(--p-card-ink-2);
+        }
+        .pf-retry {
+          font: inherit;
+          font-weight: 800;
+          background: none;
+          border: 0;
+          padding: 0;
+          color: var(--clay);
+          cursor: pointer;
+          text-decoration: underline;
+        }
+        .warn-thin {
+          margin-top: 12px;
+          padding: 12px 14px;
+          border-radius: var(--r-md);
+          font-size: 12.5px;
+          font-weight: 600;
+          background: rgba(240, 160, 60, 0.15);
+          border: 1px solid rgba(240, 160, 60, 0.4);
+          color: #8a5a14;
+          text-align: center;
+        }
         .route-h {
           margin: 14px 0 4px;
           font-size: 10.5px;
