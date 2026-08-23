@@ -47,20 +47,24 @@ export const NavBar = () => {
   const [isOpen, setIsOpen] = useState(false);
   const currentPath = usePathname();
 
-  // DEX destinations on the left, game/profile on the right. QUEUE lives only
-  // in the expanded menu — the original app's deliberate asymmetry, preserved.
-  // Vault, DCA and Limit were taken out of the nav on 2026-08-22 (product call);
-  // their routes still exist, they are just no longer offered from the chrome.
+  // THE CHROME OFFERS THE PRODUCT, AND THE PRODUCT IS THREE THINGS: the DEX
+  // aggregator, LP pools, and the lending/borrowing market. Nothing else is linked
+  // from here.
+  //
+  // UNLINKED, NOT DELETED (2026-08-23 product call). Quests, Profile, Leaderboard,
+  // Queue — and earlier Vault, DCA and Limit — still have working routes and are
+  // still reachable by URL; they are simply no longer offered from the navigation.
+  // Deleting them is a separate decision and has not been taken, so nothing here
+  // should be read as those features being gone.
+  //
+  // ONE THING THAT IS DELIBERATELY STILL LINKED: /vault, from the Pools page's
+  // "+ Liquidity" button. That route is the LP product's deposit UI, not the
+  // batch-auction vault, and it is the only way into providing liquidity.
   const LEFT = [
     { href: "/dapp", label: "Swap" },
     { href: "/pools", label: "Pools" },
   ];
-  const RIGHT = [
-    { href: "/quests", label: "Quests" },
-    { href: "/profile", label: "Profile" },
-    { href: "/leaderboard", label: "Leaderboard" },
-  ];
-  const ALL = [...LEFT, ...RIGHT, { href: "/queue", label: "Queue" }];
+  const ALL = [...LEFT];
 
   const current = (path: string) =>
     currentPath === path ? { "aria-current": "page" as const } : {};
@@ -77,12 +81,6 @@ export const NavBar = () => {
 
         <nav className="tabs" aria-label="Primary">
           {LEFT.map((l) => (
-            <Link key={l.href} href={l.href} {...current(l.href)}>
-              {l.label}
-            </Link>
-          ))}
-          <span className="nav-gap" aria-hidden="true" />
-          {RIGHT.map((l) => (
             <Link key={l.href} href={l.href} {...current(l.href)}>
               {l.label}
             </Link>
@@ -161,8 +159,7 @@ export const Footer = () => {
       <div className="foot-in">
         <strong>MoleSwap</strong>
         <span>
-          DEX aggregator &amp; AMM on Robinhood Chain — swap tokens, earn XP,
-          climb the leaderboard.
+          DEX aggregator, LP pools and lending on Robinhood Chain and Arc.
         </span>
         <nav className="foot-links">
           <Link href="/about" style={active("/about")}>
