@@ -15,7 +15,8 @@ import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { fetchV4MolePool } from "@/lib/aggregator/venues/v4Reader";
 import { getQueueSchedule } from "@/lib/mole/queueClient";
 import { secondsUntilCutoff, type QueueSchedule } from "@/lib/mole/queue";
-import { MOLE_ADDRESSES, LIVE_POOL_ID, QUEUE_CONFIG } from "@/lib/mole/chain";
+import { MOLE_ADDRESSES, LIVE_POOL_ID, LIVE_POOL_KEY, QUEUE_CONFIG } from "@/lib/mole/chain";
+import { ProvenanceCard } from "./ProvenanceCard";
 
 const hookAbi = [
   { type: "function", name: "consult", stateMutability: "view", inputs: [{ type: "bytes32" }, { type: "uint32" }], outputs: [{ type: "int24" }] },
@@ -153,6 +154,11 @@ export function MoleEngine() {
           <span className="text-[#5b9bd5]">▲ twap {twap ?? "—"}</span>
           <span>hi tick {pool ? pool.hi : "—"}</span>
         </div>
+      </div>
+
+      {/* provenance (what this pool IS, from chain — the hook bitmap proof, PoolId, live fee, upgrade keys) */}
+      <div className="mb-4">
+        <ProvenanceCard poolKey={LIVE_POOL_KEY} />
       </div>
 
       {/* stats + actions */}

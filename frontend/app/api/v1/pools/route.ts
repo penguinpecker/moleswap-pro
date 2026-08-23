@@ -54,6 +54,9 @@ export async function GET(req: NextRequest) {
         name: p.pool.name,
         fee: p.pool.fee,
         feeTier: "dynamic",
+        // The key's hook and spacing, so a client can tag MoleHook-served vs foreign from the address.
+        hooks: p.hooks,
+        tickSpacing: p.tickSpacing,
         category: p.category,
         token0: {
           address: p.token0.address, symbol: p.token0.symbol,
