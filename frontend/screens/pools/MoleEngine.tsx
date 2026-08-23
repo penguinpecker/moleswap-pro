@@ -10,16 +10,14 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { createPublicClient, http, type Address } from "viem";
-import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { fetchV4MolePool } from "@/lib/aggregator/venues/v4Reader";
 import { getQueueSchedule } from "@/lib/mole/queueClient";
 import { secondsUntilCutoff, type QueueSchedule } from "@/lib/mole/queue";
-import { MOLE_ADDRESSES, LIVE_POOL_ID, QUEUE_CONFIG } from "@/lib/mole/chain";
-
-const hookAbi = [
-  { type: "function", name: "consult", stateMutability: "view", inputs: [{ type: "bytes32" }, { type: "uint32" }], outputs: [{ type: "int24" }] },
-] as const;
+import { QUEUE_CONFIG } from "@/lib/mole/chain";
+// The TWAP comes through the ONE staleness helper, never a bare consult(): a quiet pool and a stalled
+// writer produce the same tick, and only the observation age tells them apart.
+import { useOracleHealth } from "@/lib/mole/useOracleHealth";
+import { OracleStaleBadge } from "../shared/OracleStale";
 
 function mmss(s: number) {
   const x = Math.max(0, s);
@@ -29,10 +27,12 @@ const pct = (v: number) => `${Math.max(0, Math.min(100, v)) * 1}%`;
 
 export function MoleEngine() {
   const [pool, setPool] = useState<{ tick: number; liquidity: bigint; fee: number; lo: number; hi: number } | null>(null);
-  const [twap, setTwap] = useState<number | null>(null);
   const [schedule, setSchedule] = useState<QueueSchedule | null>(null);
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
   const load = useRef(async () => {});
+  // {mid, observedAt, ageSec, stale} for the live pool + the Chainlink cross-check (display only).
+  const { oracle, cross } = useOracleHealth({ crossCheck: true });
+  const twap = oracle?.mid ?? null;
 
   load.current = async () => {
     try {
@@ -55,11 +55,6 @@ export function MoleEngine() {
         });
       }
       if (sch) setSchedule(sch);
-      try {
-        const c = createPublicClient({ chain: robinhoodChain, transport: http() });
-        const t = (await c.readContract({ address: MOLE_ADDRESSES.moleHook as Address, abi: hookAbi, functionName: "consult", args: [LIVE_POOL_ID as `0x${string}`, QUEUE_CONFIG.twapWindow] })) as number;
-        setTwap(Number(t));
-      } catch { /* twap optional */ }
     } catch { /* keep prior */ }
   };
 
@@ -108,7 +103,9 @@ export function MoleEngine() {
             <span className={`h-3 w-3 rounded-full bg-green-400 ${secLeft > 0 ? "animate-ping-slow" : ""}`} />
             BATCH #{epoch}
           </div>
-          <div className="font-display tracking-widest">
+          <div className="font-display flex items-center gap-2 tracking-widest">
+            {/* The batch crosses AT the TWAP — so the clock carries the TWAP's own health. */}
+            {oracle?.stale && <OracleStaleBadge ageSec={oracle.ageSec} />}
             <span className="text-xs text-gray-400">CROSSES IN </span>
             <span className={`text-xl ${secLeft <= 10 ? "text-red-400" : "text-yellow-200"}`}>{mmss(secLeft)}</span>
           </div>
@@ -147,12 +144,23 @@ export function MoleEngine() {
             <div className="h-full w-[2px] bg-[#5b9bd5] opacity-80" />
           </div>
         </div>
-        <div className="font-display mt-2 flex justify-between text-[11px] tracking-wider text-gray-400">
+        <div className="font-display mt-2 flex flex-wrap items-center justify-between gap-x-2 text-[11px] tracking-wider text-gray-400">
           <span>lo tick {pool ? pool.lo : "—"}</span>
           <span className="text-yellow-300">▲ spot {pool ? pool.tick : "—"}</span>
-          <span className="text-[#5b9bd5]">▲ twap {twap ?? "—"}</span>
+          <span className="flex items-center gap-2 text-[#5b9bd5]">
+            ▲ twap {twap ?? "—"}
+            {oracle?.stale && <OracleStaleBadge ageSec={oracle.ageSec} />}
+          </span>
           <span>hi tick {pool ? pool.hi : "—"}</span>
         </div>
+        {/* Independent cross-check (G-1): our TWAP mid as USD/WETH against Chainlink ETH/USD. It detects a
+            WRONG mid where the age detects a STALLED one. Display only — never a trade input. */}
+        {cross && (
+          <div className={`font-display mt-1 text-[11px] tracking-wider ${cross.warn ? "text-red-400" : "text-gray-500"}`}>
+            twap ${cross.ourUsd.toFixed(2)} vs chainlink ${cross.chainlinkUsd.toFixed(2)} · Δ {(cross.deviationBps / 100).toFixed(2)}%
+            {cross.warn ? " ⚠ DEVIATION" : ""}
+          </div>
+        )}
       </div>
 
       {/* stats + actions */}

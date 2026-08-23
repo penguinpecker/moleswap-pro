@@ -15,6 +15,11 @@ import {
   type AlmPosition,
   type VaultBalances,
 } from "@/lib/mole/vault";
+// The band is "TWAP-priced": the re-centre anchors on the hook's TWAP, so the band carries the TWAP's
+// health through the ONE staleness helper and renders the shared stale state, same words as everywhere.
+import { useOracleHealth } from "@/lib/mole/useOracleHealth";
+import type { OracleHealth } from "@/lib/mole/oracle";
+import { OracleStaleBadge } from "../shared/OracleStale";
 
 // Deposit options: native ETH (auto-wrapped to WETH — the pool's WETH leg is wrapped ETH), or USDG.
 const DEPOSIT_TOKENS = [
@@ -59,7 +64,7 @@ function priceFromTick(tick: number): number {
  * holds positions, the band is their real [tickLower, tickUpper]; otherwise it's the ±15k band the next
  * deposit would open around spot. Every number here is read on-chain — no synthetic bars.
  */
-function StrategyBand({ tick, positions }: { tick: number | null; positions: AlmPosition[] }) {
+function StrategyBand({ tick, positions, oracle }: { tick: number | null; positions: AlmPosition[]; oracle: OracleHealth | null }) {
   if (tick === null) {
     return (
       <div className="p-card">
@@ -80,8 +85,11 @@ function StrategyBand({ tick, positions }: { tick: number | null; positions: Alm
     <div className="p-card">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
         <h3>{hasPos ? "Your range" : "Strategy band"}</h3>
-        <span className={`p-pill ${inRange ? "pos" : "neg"}`}>
-          {inRange ? "● IN RANGE — EARNING" : "◆ OUT OF RANGE"}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          {oracle?.stale && <OracleStaleBadge ageSec={oracle.ageSec} />}
+          <span className={`p-pill ${inRange ? "pos" : "neg"}`}>
+            {inRange ? "● IN RANGE — EARNING" : "◆ OUT OF RANGE"}
+          </span>
         </span>
       </div>
       {/* Real range track with the live-price marker */}
@@ -106,6 +114,7 @@ export default function VaultPage() {
   const [positions, setPositions] = useState<AlmPosition[]>([]);
   const [balances, setBalances] = useState<VaultBalances>(ZERO_BAL);
   const [poolTick, setPoolTick] = useState<number | null>(null);
+  const { oracle } = useOracleHealth();
   const [loadingPos, setLoadingPos] = useState(false);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -405,7 +414,7 @@ export default function VaultPage() {
           </div>
 
           <div>
-            <StrategyBand tick={poolTick} positions={positions} />
+            <StrategyBand tick={poolTick} positions={positions} oracle={oracle} />
 
             {/* Positions */}
             <div className="p-card" style={{ marginTop: 14 }}>
