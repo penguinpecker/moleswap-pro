@@ -991,8 +991,23 @@ contract ExitPathQueueTest is Test, Deployers {
         _killOracle();
         _burnAdmin();
 
-        // The bound is the SCHEDULED cutoff plus maxEpochLife — the late press bought nobody any delay.
-        _clock = _epochStart + EPOCH + LIFE - 1;
+        // THE BOUND IS THE SCHEDULED CUTOFF PLUS maxEpochLife PLUS ONE freezeDuration, and the late press
+        // still bought nobody any delay — every term is anchored to the backdated `frozenAt`, so pressing
+        // freeze 1000s late moved none of them.
+        //
+        // The extra freezeDuration is the F-06 fix and it is deliberate. `timeout` used to unlock on the
+        // SAME SECOND as lenient `settle`, so the set of moments at which this escape hatch could run and
+        // settlement could not was EMPTY — which meant any participant who disliked the cross could veto a
+        // settleable batch simply by racing `timeout` first, and the crossed portion, which needs no pool
+        // and was already priced, never happened. Whoever the sequencer ordered first decided, which is
+        // not entitlement. Settlement now gets one freezeDuration of exclusive width before the fallback
+        // opens.
+        //
+        // WHAT MATTERS FOR AN EXIT SUITE is that this lengthens the escrow's hold by a BOUNDED, KNOWN
+        // amount and cannot lengthen it further: `freezeDuration` is written only by `initialize`, has no
+        // setter, and `maxEpochLife > freezeDuration` is enforced at construction. So the worst case is
+        // still a hard deadline, asserted to the second on both sides below.
+        _clock = _epochStart + EPOCH + LIFE + FREEZE - 1;
         vm.warp(_clock);
         vm.prank(stranger);
         vm.expectRevert(MoleQueue.NotTimedOut.selector);

@@ -917,10 +917,32 @@ contract ExitPathStaticTest is SourceReader {
             string.concat(
                 SYNTAX,
                 " Epoch ep epochs e phase Phase Open currentEpoch revert WrongPhase block timestamp epochStartedAt",
-                " epochDuration maxEpochLife NotTimedOut Refunding EpochTimedOut Frozen frozenAt"
+                // `freezeDuration` was added to the frozen-epoch bound by the F-06 fix: `timeout` used to
+                // unlock on the SAME second as lenient `settle`, so the set of moments where the fallback
+                // could run and settle could not was EMPTY, and any participant who disliked the cross
+                // could veto a settleable batch by racing timeout first. Reading it here is admitted to
+                // this allowlist deliberately, and only because it is inert: `freezeDuration` is written
+                // ONLY in `initialize` (MoleQueue.sol:237), has NO setter anywhere, is required non-zero
+                // (:213), and `maxEpochLife > freezeDuration` is enforced at construction (:231). So no
+                // admin can move it, it cannot revert, and the delay it adds to the escape hatch is
+                // bounded by construction — the escrow is reclaimable at
+                // `frozenAt + maxEpochLife + freezeDuration` at the very latest. A MUTABLE duration here
+                // would be a different matter entirely: it could be raised to trap an epoch forever, and
+                // that is exactly what this allowlist exists to catch. If a setter for it ever appears,
+                // this entry must come back out.
+                " epochDuration maxEpochLife freezeDuration NotTimedOut Refunding EpochTimedOut Frozen frozenAt"
             ),
             "timeout"
         );
+        // Pin the inertness the entry above depends on, so the two facts cannot drift apart: a setter for
+        // `freezeDuration` would make the allowlist entry unsafe without touching this test at all.
+        // (`freezeDuration =` would also match the `_freezeDuration == 0` guard, so pin the write form.)
+        assertEq(
+            _count(src, "freezeDuration = _freezeDuration;"),
+            1,
+            "freezeDuration is no longer written exactly once by initialize"
+        );
+        assertEq(_count(src, "setFreezeDuration"), 0, "freezeDuration grew a setter - the timeout allowlist entry above is now unsafe");
         _assertRevertsAre(timeoutBody, "WrongPhase NotTimedOut WrongPhase NotTimedOut", "timeout");
 
         bytes memory phaseBody = _body(src, "function", "_phase");
