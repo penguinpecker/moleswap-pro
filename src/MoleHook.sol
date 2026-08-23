@@ -301,6 +301,48 @@ contract MoleHook is IHooks, Initializable, UUPSUpgradeable {
         liquidityAllowed[who] = allowed;
     }
 
+    event PoolCreatorSet(address indexed from, address indexed to);
+    event FeeRecipientSet(address indexed from, address indexed to);
+
+    error PoolCreatorRequired();
+
+    /// @notice Rotate the pool creator — the key that may bind new pools to this hook and edit the
+    ///         liquidity allowlist.
+    ///
+    /// @dev WHY A SETTER EXISTS AT ALL, given that `poolCreator` is one of the least privileged roles here.
+    ///      Without one, recovering from a compromised pool creator means shipping a new implementation
+    ///      through `upgradeAdmin` — so an incident on a LOW-privilege key would force us to use the
+    ///      HIGHEST-privilege key, which is the wrong direction for a break-glass. It grants no new power:
+    ///      the upgrade key can already set this address to anything by replacing the code behind the
+    ///      proxy. What it buys is that the change is an EVENT rather than a code diff, and that a planned
+    ///      authority handover does not have to be an upgrade. Same argument MolePositions already makes
+    ///      for `setFeeRecipient`.
+    ///
+    ///      ZERO IS REFUSED, unlike `transferUpgradeAdmin` where zero is the deliberate way to make the
+    ///      hook immutable. Renouncing the upgrade key removes a power; renouncing this one FREEZES a
+    ///      power that pools still depend on — on a `restrictedLiquidity` hook the allowlist could never
+    ///      be edited again, so the vault could never be replaced as the pool's LP. That is a brick, not a
+    ///      renunciation, and it must not be reachable by a fat finger.
+    function setPoolCreator(address to) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        if (to == address(0)) revert PoolCreatorRequired();
+        emit PoolCreatorSet(poolCreator, to);
+        poolCreator = to;
+    }
+
+    /// @notice Rotate where the optional protocol swap fee is paid.
+    /// @dev Same reasoning as `setPoolCreator`: no new power, one fewer reason to reach for the upgrade
+    ///      key. The zero check is the initializer's invariant restated rather than a new rule — a live
+    ///      `hookFeePips` with no recipient does not revert, it makes `take` send the fee to address(0),
+    ///      i.e. burns it silently. It reverts with the SAME error the initializer raises for the same
+    ///      condition, so one invariant reports as one error whether it is violated at birth or later.
+    function setFeeRecipient(address to) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        if (hookFeePips != 0 && to == address(0)) revert BadFeeBounds();
+        emit FeeRecipientSet(feeRecipient, to);
+        feeRecipient = to;
+    }
+
     /* ---------------------------------------------------------------- callbacks */
 
     /// @dev Pool admission. Two things are enforced here because neither can be fixed afterwards: the pool
@@ -540,11 +582,114 @@ contract MoleHook is IHooks, Initializable, UUPSUpgradeable {
     /// @dev Reverts rather than returning a half-covered answer: a TWAP whose window is not actually
     ///      covered by observations is the manipulation surface, not the mitigation.
     ///
-    ///      The cumulative at `target` is INTERPOLATED between the two observations that bracket it. The
-    ///      previous version skipped that step and divided by the span to the older observation instead,
+    ///      The cumulative at `target` is INTERPOLATED between the two observations that bracket it. An
+    ///      early version skipped that step and divided by the span to the older observation instead,
     ///      which silently answered a LONGER window than the caller asked for — measured at an 11x
     ///      understatement of a real 5-minute move. A caller that asks for 300 seconds and receives an
     ///      hour of smoothing is not protected by the bound it thinks it set.
+    ///
+    ///      THE LEFT EDGE MUST LAND ON RECORDED HISTORY (fixed 2026-08-23). The same defect survived that
+    ///      repair in a second form, at the OTHER end of the ring. Whenever the window's left edge
+    ///      post-dated the newest stored observation, the backward scan matched that newest entry on its
+    ///      first step — it is, trivially, at or before the target — and with no observation newer than
+    ///      the target to interpolate against, the code substituted `now`/`cumNow` as the right-hand end
+    ///      of the bracket. Work the algebra through and the requested window cancels out entirely:
+    ///
+    ///          cumAtTarget = cum_o + (cumNow - cum_o) * (target - t_o) / (now - t_o)
+    ///          (cumNow - cumAtTarget) / secondsAgo  ==  (cumNow - cum_o) / (now - t_o)
+    ///
+    ///      — the mean tick SINCE THE LAST RING WRITE, identical for every `secondsAgo`, and contaminated
+    ///      by every tick that fell outside the window the caller actually asked for. Measured on the live
+    ///      Arc pool 0x180a…1796 on 2026-08-23, with the last write 2,676 seconds old: consult at 60s,
+    ///      300s, 600s, 900s, 1800s and 2670s ALL returned tick 338426; 2700s — the first window long
+    ///      enough to reach past that write — returned 338427 and 3600s returned 338495. Every consumer
+    ///      asking for thirty minutes of smoothing was handed forty-five minutes of whatever the last swap
+    ///      left behind.
+    ///
+    ///      WHAT THAT WOULD HAVE COST. This is the only time-averaged price in the system and every
+    ///      consumer of it is a GUARD: MolePositions bounds a rebalance by |mid - consult| and MoleQueue
+    ///      refuses to settle a batch whose spot has drifted from consult. Both were comparing spot
+    ///      against a number derived almost entirely from spot, so both read a deviation near zero by
+    ///      construction and admitted whatever they were handed. With the vault as the only LP the pool
+    ///      has regions of zero liquidity where one swap moves spot arbitrarily far for almost nothing
+    ///      (see `restrictedLiquidity`), so the number was cheap to set as well as wrong. That is the
+    ///      Arrakis V1 shape exactly — a manager valuing positions at instantaneous price while believing
+    ///      a TWAP gated it.
+    ///
+    ///      THE FIX, AND WHY THIS SHAPE. Every cumulative this function uses must come from a point the
+    ///      contract actually RECORDED. There are exactly three, and nothing else:
+    ///        - the ring's observations, exact at their own timestamps;
+    ///        - `(lastTimestamp, tickCumulative)`, exact — `_write` advances the cumulative by
+    ///          elapsed*lastTick on EVERY swap, whether or not the ring happens to write;
+    ///        - `cumNow`, exact, because no swap since `lastTimestamp` means the tick has not moved since.
+    ///      The defect was the "nothing else": it invented a right-hand bracket end at `now` when the ring
+    ///      held none, and that invention is what let `secondsAgo` cancel. So there are two ways to answer
+    ///      and one way to refuse, and they must stay separate.
+    ///
+    ///      1. THE QUIET-TAIL PATH — `target >= lastTimestamp`. The window lies wholly after the last swap,
+    ///         so the tick was CONSTANT across all of it and the arithmetic mean is exactly `lastTick`.
+    ///         Nothing is interpolated and nothing is fabricated: the cumulative at `target` is
+    ///         `tickCumulative + (target - lastTimestamp) * lastTick` — a recorded point plus a known tick
+    ///         over a known span.
+    ///
+    ///         THIS IS NOT SPOT WEARING A TWAP'S NAME, and the reason is in `_write`: `lastTimestamp`
+    ///         advances on EVERY swap while the ring advances only every `minObservationInterval`. So the
+    ///         instant an attacker swaps to move the tick, `lastTimestamp` becomes `now`, `target >=
+    ///         lastTimestamp` is false for every positive window, and this path is closed to them — the
+    ///         read falls back to bracketing across the ring, which carries their pre-manipulation history.
+    ///         The path is reachable ONLY when the pool genuinely has not traded inside the window, and
+    ///         then `lastTick` is not a stand-in for the mean, it IS the mean. To make it return a moved
+    ///         tick you must move the price and then HOLD it for the entire window against arbitrage,
+    ///         which is precisely the cost a TWAP exists to impose.
+    ///
+    ///         DO NOT WIDEN THE CONDITION TO `lastObsTimestamp`. It looks like the same test and it is
+    ///         exploitable: between the last ring write and the last swap the tick may have moved several
+    ///         times, so a target in that band has an UNKNOWN cumulative, and answering it with `lastTick`
+    ///         reports a manipulation that lasted seconds as though it had held for the whole window.
+    ///         `test_aSubIntervalPoisonCannotBeReadBackAsTheTwap` exists to catch exactly that edit.
+    ///
+    ///      2. THE BRACKETED PATH — everything else. Interpolate between the two observations that straddle
+    ///         `target`, and never extrapolate off either end of the ring. A target landing EXACTLY on a
+    ///         stored observation is read off its cumulative directly and is exact.
+    ///
+    ///      3. THE REFUSAL — `!found`. A window whose left edge predates the OLDEST entry the ring still
+    ///         holds cannot be answered from anything this contract has, and there is no honest number to
+    ///         return. Every consumer is a guard and a guard that fails closed is correct, so it reverts
+    ///         rather than quietly answering a shorter window than it was asked for. That is what
+    ///         MolePositions' TWAP bound has always claimed and, until today, was not true.
+    ///
+    ///      A NARROW BAND ALSO REFUSES, deliberately rather than by oversight: a target sitting between the
+    ///      newest ring entry and `lastTimestamp` has exact endpoints on both sides but an UNRECORDED tick
+    ///      path between them, so it takes the bracketed path, finds nothing newer than itself in the ring,
+    ///      and reverts. That band is narrower than `minObservationInterval` by construction — a swap that
+    ///      far past the last write would have written — so on the shipped config it is at most 60 seconds
+    ///      of windows, it moves with the clock, and it fails closed. It is cheaply GRIEFABLE, and that is
+    ///      recorded here rather than hidden: a dust swap inside a write gap opens the band for the rest of
+    ///      that gap. The grief is bounded by one observation interval, cannot be extended (the next swap
+    ///      past the interval writes and closes it), and denies rather than mis-prices.
+    ///
+    ///      `secondsAgo == 0` REVERTS, and that is the same statement as the rest: a zero-length window is
+    ///      spot by definition. Callers that want the instantaneous tick must read slot0 from the
+    ///      PoolManager and own that choice visibly, rather than obtaining it from something named
+    ///      `consult`.
+    ///
+    ///      WHAT THIS COSTS IN AVAILABILITY, stated plainly because an earlier draft of this fix got the
+    ///      trade wrong. A QUIET POOL ANSWERS — that is the whole point of the tail path. Refusing every
+    ///      window on a pool that simply has not traded would take rebalancing, queue settlement and the
+    ///      frontend's deposit anchor offline whenever the market is calm, which on a chain this thin is
+    ///      the normal state; an ALM that refuses deposits when the market is quiet is not safe, it is
+    ///      broken, and people route around it. What still refuses is a window reaching past the oldest
+    ///      entry the ring holds (255 write-gaps, ~4h at the shipped 60s interval) and the narrow band
+    ///      above. A young pool answers its birth tick for any window inside its own life and refuses
+    ///      anything older than itself, which is correct in both directions.
+    ///
+    ///      IF YOU ARE READING THIS BECAUSE A TEST STARTED REVERTING WITH `InsufficientObservations`: that
+    ///      is one of the two refusals working, and the harness is what needs changing, not this function.
+    ///      Either the window reaches past the oldest observation the ring still holds — warm it with more
+    ///      WRITES, which means more swaps, not more idling — or its left edge landed in the sub-interval
+    ///      band, which one further swap resolves. Do not collapse the tail path and the bracketed path
+    ///      into a single condition to make a fixture green: they answer from different recorded points,
+    ///      and conflating a recorded point with a convenient one is how the original defect was written.
     function consult(PoolId id, uint32 secondsAgo) external view returns (int24 arithmeticMeanTick) {
         PoolState memory s = poolStates[id];
         if (!s.initialized) revert PoolNotInitialized();
@@ -574,44 +719,73 @@ contract MoleHook is IHooks, Initializable, UUPSUpgradeable {
         uint32 newerTs;
         int56 newerCum;
 
-        uint16 i = s.index;
-        for (uint256 n = 0; n < CARDINALITY; n++) {
-            Observation memory o = observations[id][i];
-            if (!o.initialized) break;
-            if (o.blockTimestamp <= target) {
-                // Bracket found: interpolate the cumulative at `target` between this observation and the
-                // next one forward (or, if `target` is newer than every observation, between it and now).
-                uint32 rightTs = haveNewer ? newerTs : nowTs;
-                int56 rightCum = haveNewer ? newerCum : cumNow;
-                uint32 gap;
-                unchecked {
-                    gap = rightTs - o.blockTimestamp;
-                }
-                if (gap == 0) {
-                    cumAtTarget = o.tickCumulative;
-                } else {
-                    uint32 into;
-                    unchecked {
-                        into = target - o.blockTimestamp;
-                    }
-                    // WIDEN TO int256 FOR THE PRODUCT. The intermediate `deltaCumulative * into` overflows
-                    // int56 long before either operand does: at a tick of ~-196,000 — which is exactly
-                    // where an 18-decimal/6-decimal pair like WETH/USDG sits — a single multi-day gap is
-                    // enough, and the failure surfaces as an opaque arithmetic Panic rather than as this
-                    // contract's own error. int56 is the right width to STORE a cumulative; it is the
-                    // wrong width to multiply one in. The quotient is a time-weighted mean of in-range
-                    // ticks, so narrowing after the division is safe.
-                    int256 numerator = int256(rightCum - o.tickCumulative) * int256(uint256(into));
-                    cumAtTarget = o.tickCumulative + int56(numerator / int256(uint256(gap)));
-                }
-                found = true;
-                break;
+        // PATH 1: THE WINDOW LIES WHOLLY AFTER THE LAST SWAP. Then no swap moved the tick inside it, the
+        // tick was constant at `lastTick` throughout, and the cumulative at `target` follows from a
+        // recorded point — `tickCumulative`, exact at `lastTimestamp` — plus that constant tick over a
+        // known span. The mean this yields is exactly `lastTick`, and it is the true mean rather than a
+        // stand-in for one. `lastTimestamp` advancing on EVERY swap is what makes this safe: an attacker
+        // who moves the tick closes this path with their own transaction. See the header, and do not
+        // widen the condition to `lastObsTimestamp`.
+        if (target >= s.lastTimestamp) {
+            unchecked {
+                cumAtTarget =
+                    s.tickCumulative + int56(int256(uint256(target - s.lastTimestamp))) * int56(s.lastTick);
             }
-            haveNewer = true;
-            newerTs = o.blockTimestamp;
-            newerCum = o.tickCumulative;
-            i = i == 0 ? uint16(CARDINALITY - 1) : i - 1;
+            found = true;
+        } else {
+            // PATH 2: BRACKET IT ACROSS THE RING.
+            uint16 i = s.index;
+            for (uint256 n = 0; n < CARDINALITY; n++) {
+                Observation memory o = observations[id][i];
+                if (!o.initialized) break;
+                if (o.blockTimestamp <= target) {
+                    if (o.blockTimestamp == target) {
+                        // The left edge lands exactly on a stored observation. No interpolation, no second
+                        // point, no approximation — and this is the ONLY case in which the newest observation
+                        // alone is a sufficient answer.
+                        cumAtTarget = o.tickCumulative;
+                    } else {
+                        // NEVER EXTRAPOLATE PAST THE NEWEST OBSERVATION. Reaching here means `target` sits
+                        // between the newest ring entry and `lastTimestamp` — endpoints we hold exactly, but
+                        // with an unrecorded tick path between them, because swaps inside a write gap leave
+                        // no trace of WHEN they moved the price. The old code filled that hole with
+                        // `now`/`cumNow` and the requested window cancelled out of the algebra entirely; see
+                        // the header. This band is narrower than one observation interval and one more swap
+                        // closes it, so refusing costs little and inventing the missing point costs the
+                        // whole guarantee.
+                        if (!haveNewer) revert InsufficientObservations();
+
+                        // Both edges of the bracket are real observations now, and ring timestamps strictly
+                        // increase (a write requires minObservationInterval >= 1 second to have elapsed), so
+                        // `gap` is at least 2 here — o.blockTimestamp < target < newerTs. There is no
+                        // divide-by-zero branch to keep, and keeping one would be a branch no test could reach.
+                        uint32 gap;
+                        uint32 into;
+                        unchecked {
+                            gap = newerTs - o.blockTimestamp;
+                            into = target - o.blockTimestamp;
+                        }
+                        // WIDEN TO int256 FOR THE PRODUCT. The intermediate `deltaCumulative * into` overflows
+                        // int56 long before either operand does: at a tick of ~-196,000 — which is exactly
+                        // where an 18-decimal/6-decimal pair like WETH/USDG sits — a single multi-day gap is
+                        // enough, and the failure surfaces as an opaque arithmetic Panic rather than as this
+                        // contract's own error. int56 is the right width to STORE a cumulative; it is the
+                        // wrong width to multiply one in. The quotient is a time-weighted mean of in-range
+                        // ticks, so narrowing after the division is safe.
+                        int256 numerator = int256(newerCum - o.tickCumulative) * int256(uint256(into));
+                        cumAtTarget = o.tickCumulative + int56(numerator / int256(uint256(gap)));
+                    }
+                    found = true;
+                    break;
+                }
+                haveNewer = true;
+                newerTs = o.blockTimestamp;
+                newerCum = o.tickCumulative;
+                i = i == 0 ? uint16(CARDINALITY - 1) : i - 1;
+            }
         }
+        // PATH 3: THE REFUSAL. The window reaches back past the oldest entry the ring still holds, so
+        // there is nothing recorded to anchor its left edge on. Fail closed.
         if (!found) revert InsufficientObservations();
 
         // Divided by the REQUESTED window, because cumAtTarget is now exact at `target`.

@@ -711,6 +711,365 @@ contract MoleHookTest is Test, Deployers {
         assertEq(MockERC20(Currency.unwrap(currency1)).balanceOf(address(mole)), 0, "mole retained currency1");
     }
 
+    /* ------------------------------------------- consult() answers THE WINDOW IT WAS ASKED FOR */
+
+    // THE DEFECT THESE PIN (found and fixed 2026-08-23). `consult` silently ignored `secondsAgo` whenever
+    // the window's left edge post-dated the newest ring entry: the backward scan matched that entry on its
+    // first step, substituted `now`/`cumNow` for the missing right-hand end of the bracket, and the
+    // requested window then cancelled out of the algebra completely. EVERY window returned one number —
+    // the mean tick since the last ring WRITE — contaminated by ticks strictly outside the window asked
+    // for.
+    //
+    // Measured live on Arc 5042 (hook 0xfFDC…78c4, pool 0x180a…1796) on 2026-08-23, newest write 2,676
+    // seconds old: consult at 60s, 300s, 600s, 900s, 1800s and 2670s all returned tick 338426. 2700s — the
+    // first window long enough to reach past that write — returned 338427, and 3600s returned 338495. An
+    // hour later, with the gap at 6,744s, consult(60), consult(1800) and consult(4000) had all collapsed
+    // onto 338434 together. The vault's TWAP bound was asking for thirty minutes and being handed however
+    // long it had been since a swap happened to land on the interval.
+    //
+    // The repair is NOT "refuse whenever the ring is cold". It is: only ever answer from a cumulative the
+    // contract RECORDED. A window lying wholly after the last swap is answered exactly (the tick did not
+    // move inside it); a window straddling ring history is bracketed; a window reaching past the oldest
+    // entry is refused. The tests below pin all three, and the safety of the first one — which rests
+    // entirely on `lastTimestamp` advancing on every swap while the ring advances only every interval —
+    // gets two adversarial tests of its own.
+
+    /// @notice THE HONEST QUIET CASE. A pool nobody has traded has not moved, so the arithmetic mean over
+    ///         any window inside that quiet stretch is EXACTLY the last tick — not an approximation of it,
+    ///         and not spot standing in for a number we could not compute. Every window must return that,
+    ///         and the windows must agree with each other because the tick really was constant, which is a
+    ///         different fact from the defect's "they agree because `secondsAgo` was ignored".
+    function test_aQuietPoolAnswersEveryWindowWithItsUnmovedTick() public {
+        for (uint256 i = 0; i < 4; i++) {
+            _advance(61);
+            _swap(true, 1e15);
+        }
+        (,, uint32 lastObsTs, int24 lastTick,,) = hook.poolStates(hookId);
+        assertEq(lastObsTs, uint32(_clock), "premise: the last swap did not write an observation");
+
+        // Stop swapping. Nothing but a swap can advance the ring, so the gap grows on its own — the
+        // ordinary state of a pool nobody is trading, and the exact state the live Arc pool was in.
+        _advance(3000);
+
+        assertEq(hook.consult(hookId, 60), lastTick, "a one-minute window on an untraded pool is its tick");
+        assertEq(hook.consult(hookId, 1800), lastTick, "the consumers' 30-minute window is that same tick");
+        assertEq(hook.consult(hookId, 2999), lastTick, "a window just short of the gap is that same tick");
+        // The exact-hit boundary: the left edge lands on the stored observation itself.
+        assertEq(hook.consult(hookId, 3000), lastTick, "the exact-hit boundary was not answered exactly");
+        // And one second further back is bracketed across two real observations, which is a different
+        // code path and must still answer.
+        assertGt(hook.consult(hookId, 3001), TickMath.MIN_TICK, "the first bracketed window did not answer");
+    }
+
+    /// @notice AN ATTACKER'S OWN SWAP CLOSES THE QUIET-TAIL PATH. This is the property the whole design
+    ///         rests on: `_write` advances `lastTimestamp` on EVERY swap while the ring advances only
+    ///         every `minObservationInterval`, so the instant the tick is moved, `target >= lastTimestamp`
+    ///         stops holding and the read is forced back onto real bracketing across prior history.
+    function test_anAttackerSwapDefeatsTheQuietTailPath() public {
+        // A long, quiet, honest history at the birth tick, with the ring written across it.
+        for (uint256 i = 0; i < 6; i++) {
+            _advance(400);
+            _swap(true, 1e15);
+        }
+        _advance(2000); // quiet: the tail path is open and answering
+        (,,, int24 calmTick,,) = hook.poolStates(hookId);
+        assertEq(hook.consult(hookId, 1800), calmTick, "premise: the quiet pool was not on the tail path");
+
+        // The attack: move the tick hard, then read immediately — the best case for the attacker.
+        _swapOn(hookKey, false, 3_000e18);
+        (, int24 movedTick,,) = StateLibrary.getSlot0(manager, hookId);
+        assertGt(movedTick - calmTick, 2_000, "premise: the attack did not move the tick far enough");
+
+        int24 twap = hook.consult(hookId, 1800);
+        assertTrue(twap != movedTick, "consult returned the manipulated tick outright");
+        // And it is not merely different — it is still anchored on the calm history. The move happened in
+        // the read's own block, so it is worth zero seconds of a 1800-second window.
+        assertEq(twap, calmTick, "the manipulated tick leaked into the mean at all");
+
+        // The attacker's own transaction is what shut the door: `lastTimestamp` is now `now`, so the
+        // window can no longer lie wholly after the last swap.
+        (, uint32 lastTs,,,,) = hook.poolStates(hookId);
+        assertEq(lastTs, uint32(_clock), "premise: the attack did not advance lastTimestamp");
+    }
+
+    /// @notice THE SUB-INTERVAL POISON, which is the case the tail condition must be written against. A
+    ///         swap inside a write gap moves the tick without leaving a ring entry, so between the newest
+    ///         entry and `lastTimestamp` the tick path is genuinely unknown. Answering that band with
+    ///         `lastTick` would report a manipulation that lasted seconds as though it had held for the
+    ///         whole window — which is exactly what widening the tail condition from `lastTimestamp` to
+    ///         `lastObsTimestamp` would do. The realistic consumer window must be unmovable, and the band
+    ///         itself must refuse rather than answer.
+    function test_aSubIntervalPoisonCannotBeReadBackAsTheTwap() public {
+        // Enough honest history that a 1800s window is genuinely bracketed by the ring.
+        for (uint256 i = 0; i < 8; i++) {
+            _advance(400);
+            _swap(true, 1e15);
+        }
+        (,, uint32 writeTs, int24 calmTick,,) = hook.poolStates(hookId);
+        assertEq(writeTs, uint32(_clock), "premise: the last swap did not write");
+
+        // The poison, 30 seconds into the gap — too soon for the ring to record it.
+        _advance(30);
+        _swapOn(hookKey, false, 3_000e18);
+        (, int24 poisonTick,,) = StateLibrary.getSlot0(manager, hookId);
+        assertGt(poisonTick - calmTick, 2_000, "premise: the poison did not move the tick");
+        (,, uint32 stillWriteTs, int24 lastTick,,) = hook.poolStates(hookId);
+        assertEq(stillWriteTs, writeTs, "premise: the poison wrote an observation and is therefore visible");
+        assertEq(lastTick, poisonTick, "premise: lastTick did not take the poison");
+
+        // (a) THE CONSUMER WINDOW. 1800s is what MolePositions and MoleQueue actually pass. Ten seconds
+        //     later the poison is worth 10 seconds of 1800, and the answer must show that — it must stay
+        //     on the calm history rather than snapping to the moved tick.
+        _advance(10);
+        int24 twap = hook.consult(hookId, 1800);
+        assertTrue(twap != poisonTick, "the 30-minute TWAP returned the manipulated tick");
+        int24 leak = twap > calmTick ? twap - calmTick : calmTick - twap;
+        assertLt(leak, 600, "the sub-interval poison moved the TWAP by the whole deviation budget");
+
+        // (a2) THE INCLUSIVE BOUNDARY. A window measured from `lastTimestamp` itself lies wholly after the
+        //     last swap, so it is answered from the recorded cumulative and IS the poisoned tick — which is
+        //     honest: over those ten seconds the tick really was that. It is answered rather than refused,
+        //     and that inclusivity is the `>=` in the tail condition. Note what makes it harmless: nobody
+        //     asks this oracle for a ten-second TWAP, and the window the consumers DO pass is pinned above.
+        (, uint32 lastSwapTs,,,,) = hook.poolStates(hookId);
+        assertEq(hook.consult(hookId, uint32(_clock) - lastSwapTs), poisonTick, "the tail boundary is not inclusive");
+
+        // (b) THE BAND ITSELF. A window whose left edge lands between the newest ring entry and the last
+        //     swap has exact endpoints but an unrecorded tick path between them. It must REFUSE. Widening
+        //     the tail condition to `lastObsTimestamp` would answer it with `lastTick` — the poison, at
+        //     full strength, for a window it occupied only half of.
+        uint32 shortWindow = uint32(_clock) - (writeTs + 20); // left edge 20s into the write gap
+        vm.expectRevert(MoleHook.InsufficientObservations.selector);
+        hook.consult(hookId, shortWindow);
+    }
+
+    /// @notice The positive control: over a warm ring where the price genuinely moved, two different
+    ///         windows must return two genuinely different means. If `secondsAgo` ever stops reaching the
+    ///         arithmetic again, these two collapse onto one value and this test says so.
+    function test_differentWindowsOverTheSameHistoryGiveDifferentMeans() public {
+        // Eight paced moves, all one way, each landing its own observation.
+        for (uint256 i = 0; i < 8; i++) {
+            _advance(61);
+            _swap(true, 200e18);
+        }
+
+        // Both windows land BETWEEN observations on purpose, so each one is answered by interpolating
+        // inside a real write gap. A window that lands exactly on an observation reads a stored cumulative
+        // and would leave the interpolation arithmetic — where the original 11x-understatement defect
+        // lived — completely unexercised.
+        int24 shortMean = hook.consult(hookId, 100);
+        int24 longMean = hook.consult(hookId, 400);
+
+        assertLt(longMean, 0, "premise: the price did not move");
+        assertLt(shortMean, longMean, "the short window did not track the move more closely than the long one");
+        assertGt(longMean - shortMean, 100, "the two windows collapsed onto one number");
+    }
+
+    /// @notice A YOUNG POOL IS CORRECT IN BOTH DIRECTIONS. Inside its own life it answers its birth tick,
+    ///         because a pool that has never traded has never moved. Older than its own life it REFUSES:
+    ///         there is no recorded point to anchor the left edge on, and inventing history is the one
+    ///         thing this function must never do.
+    function test_aYoungPoolAnswersInsideItsLifeAndRefusesOlderThanItself() public {
+        MoleHook h = _deployHook(91, LP_FEE, 60, false, 0);
+        PoolKey memory k = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            tickSpacing: 15,
+            hooks: IHooks(address(h))
+        });
+        manager.initialize(k, SQRT_PRICE_1_1); // born at tick 0
+        modifyLiquidityRouter.modifyLiquidity(
+            k,
+            ModifyLiquidityParams({tickLower: -60_000, tickUpper: 60_000, liquidityDelta: 5_000e18, salt: 0}),
+            ZERO_BYTES
+        );
+
+        _advance(300); // born, then left alone: the ring holds exactly its seed
+        assertEq(h.consult(k.toId(), 120), int24(0), "a window inside an untraded pool's life is its birth tick");
+        assertEq(h.consult(k.toId(), 300), int24(0), "the exact-hit boundary at the seed was not answered");
+
+        vm.expectRevert(MoleHook.InsufficientObservations.selector);
+        h.consult(k.toId(), 400); // older than the pool itself: nothing to anchor on
+
+        // A swap gives the ring a second entry, and the bracketed path takes over.
+        _swapOn(k, true, 1e15);
+        int24 mean = h.consult(k.toId(), 120);
+        assertLt(mean, TickMath.MAX_TICK, "a warmed ring stopped answering a window it covers");
+        assertGt(mean, TickMath.MIN_TICK, "a warmed ring stopped answering a window it covers");
+    }
+
+    /// @notice THE POISONING CASE THE OLD CODE ACTUALLY LOST, measured. An excursion held entirely inside
+    ///         one write gap is invisible to the ring, and the old code smeared it across every window
+    ///         alike — so a spike that had been over for forty minutes still moved a 30-minute "TWAP" by
+    ///         more than the vault's ENTIRE deviation budget (600 ticks). The window it poisoned did not
+    ///         even contain it.
+    ///
+    /// @dev The test computes, from the hook's own public state, the exact number the old code returned,
+    ///      asserts it is that far from the truth, and then asserts the current code returns the truth
+    ///      EXACTLY — the excursion contributes zero, because it ended before the window began.
+    function test_anExcursionInsideOneWriteGapCannotPoisonALongWindow() public {
+        // A 10-minute write interval — a legitimate configuration (the ring's ceiling is 255 gaps, so this
+        // is a ~42h oracle) and the one that makes the arithmetic legible.
+        MoleHook h = _deployHook(92, LP_FEE, 600, false, 0);
+        PoolKey memory k = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            tickSpacing: 10,
+            hooks: IHooks(address(h))
+        });
+        manager.initialize(k, SQRT_PRICE_1_1);
+        modifyLiquidityRouter.modifyLiquidity(
+            k,
+            ModifyLiquidityParams({tickLower: -60_000, tickUpper: 60_000, liquidityDelta: 5_000e18, salt: 0}),
+            ZERO_BYTES
+        );
+        PoolId id = k.toId();
+
+        // 1. A write lands. This is the newest thing the ring will ever know about.
+        _advance(601);
+        _swapOn(k, true, 1e15);
+        (,, uint32 pinnedObsTs,,,) = h.poolStates(id);
+        assertEq(pinnedObsTs, uint32(_clock), "premise: the ring did not write");
+
+        // 2. The excursion, opened and closed INSIDE the gap so no observation can record it.
+        _advance(1);
+        _swapOn(k, false, 4_000e18);
+        (, int24 spikeTick,,) = StateLibrary.getSlot0(manager, id);
+        assertGt(spikeTick, 3_000, "premise: the excursion was too small to matter");
+        _advance(589);
+        _swapOn(k, true, 4_000e18);
+        (,, uint32 stillPinned,,,) = h.poolStates(id);
+        assertEq(stillPinned, pinnedObsTs, "premise: the excursion wrote an observation and became visible");
+
+        // 3. The pool goes quiet, long enough that the whole 30-minute window sits AFTER the excursion
+        //    ended. The honest 30-minute mean is therefore the settled tick, with no spike in it at all.
+        _advance(2_500);
+        (,, uint32 obsTs, int24 settledTick, int56 cum, bool init) = h.poolStates(id);
+        assertTrue(init, "premise: pool state vanished");
+        (, int56 obsCum,) = h.observations(id, 0); // index unchanged: obs[0] is still the newest
+
+        // What the old code returned for EVERY window, recomputed here from public state: the mean tick
+        // since the last write, spike and all.
+        uint32 gap = uint32(_clock) - obsTs;
+        int24 poisoned = int24((cum - obsCum) / int56(int256(uint256(gap))));
+        int24 contamination = poisoned > settledTick ? poisoned - settledTick : settledTick - poisoned;
+        assertGt(
+            contamination,
+            600,
+            "premise: the excursion did not move the stale answer past the vault's whole deviation budget"
+        );
+
+        // What this code returns: the truth, exactly. The window began 1,290 seconds after the excursion
+        // ended, so the excursion is worth exactly nothing in it.
+        assertEq(h.consult(id, 1800), settledTick, "the excursion leaked into a window it does not touch");
+
+        // And a window long enough to actually CONTAIN the excursion prices it as a fraction of itself,
+        // rather than refusing or swallowing it whole.
+        int24 honest = h.consult(id, gap + 100);
+        assertTrue(honest != settledTick, "a window containing the excursion ignored it");
+        assertLt(honest, poisoned, "the containing window did not dilute the excursion");
+    }
+
+    /// @notice `consult` IS NOT A SPOT ORACLE, and the zero-length window is where that gets said out loud.
+    ///         A caller that wants the instantaneous tick must read slot0 and own that choice visibly.
+    function test_consultRefusesAZeroLengthWindow() public {
+        _advance(61);
+        _swap(true, 1e15);
+        vm.expectRevert(MoleHook.InsufficientObservations.selector);
+        hook.consult(hookId, 0);
+    }
+
+    /* --------------------------------------------------- rotating the two un-rotatable roles */
+
+    /// @notice `poolCreator` and `feeRecipient` had no setter, so rotating either — after a leak, or as a
+    ///         planned handover — meant shipping a new implementation through `upgradeAdmin`. An incident
+    ///         on the LOWEST-privilege key forced the use of the HIGHEST-privilege one. These setters grant
+    ///         no new power (the upgrade key could already rewrite both) and turn a code deployment into an
+    ///         event.
+    function test_upgradeAdminCanRotatePoolCreatorAndTheRotationIsReal() public {
+        address newCreator = makeAddr("newPoolCreator");
+        assertEq(hook.poolCreator(), address(this), "premise: this test does not hold the creator role");
+
+        vm.expectEmit(true, true, false, false, address(hook));
+        emit MoleHook.PoolCreatorSet(address(this), newCreator);
+        hook.setPoolCreator(newCreator); // this contract is the upgrade admin on the test hooks
+        assertEq(hook.poolCreator(), newCreator, "rotation did not take");
+
+        // The role MOVED rather than being shared: the old holder loses the power...
+        vm.expectRevert(MoleHook.NotPoolCreator.selector);
+        hook.setLiquidityAllowed(outsider, true);
+        // ...and the new one has it.
+        vm.prank(newCreator);
+        hook.setLiquidityAllowed(outsider, true);
+        assertTrue(hook.liquidityAllowed(outsider), "the rotated creator could not use the role");
+    }
+
+    function test_onlyUpgradeAdminMayRotateEitherRole() public {
+        vm.startPrank(outsider);
+        vm.expectRevert(MoleHook.NotUpgradeAdmin.selector);
+        hook.setPoolCreator(outsider);
+        vm.expectRevert(MoleHook.NotUpgradeAdmin.selector);
+        hook.setFeeRecipient(outsider);
+        vm.stopPrank();
+
+        // Not even the pool creator — the role being rotated cannot rotate itself.
+        MoleHook h = _deployHook(93, LP_FEE, 60, false, 0);
+        h.setPoolCreator(makeAddr("creator93"));
+        vm.prank(makeAddr("creator93"));
+        vm.expectRevert(MoleHook.NotUpgradeAdmin.selector);
+        h.setPoolCreator(outsider);
+    }
+
+    /// @notice Zero is refused for `poolCreator`. Renouncing the UPGRADE key removes a power; renouncing
+    ///         this one freezes a power that pools still depend on — on a restricted-liquidity hook the LP
+    ///         allowlist could never be edited again. That is a brick, not a renunciation.
+    function test_poolCreatorCannotBeRenouncedToZero() public {
+        vm.expectRevert(MoleHook.PoolCreatorRequired.selector);
+        hook.setPoolCreator(address(0));
+        assertEq(hook.poolCreator(), address(this), "the refused rotation still moved the role");
+    }
+
+    /// @notice The fee recipient may be cleared only when there is no fee to strand. With a live
+    ///         `hookFeePips`, `take` to address(0) does not revert — it burns the fee silently — so the
+    ///         setter restates the initializer's invariant, and with the same error.
+    function test_feeRecipientCannotBeClearedWhileAFeeIsLive() public {
+        MoleHook paid = _deployHook(94, LP_FEE, 60, false, 5_000); // 0.5%
+        vm.expectRevert(MoleHook.BadFeeBounds.selector);
+        paid.setFeeRecipient(address(0));
+        assertEq(paid.feeRecipient(), treasury, "the refused rotation still cleared the recipient");
+
+        // A live rotation works, and the fee follows it to the new address rather than the old one.
+        address newTreasury = makeAddr("newTreasury");
+        vm.expectEmit(true, true, false, false, address(paid));
+        emit MoleHook.FeeRecipientSet(treasury, newTreasury);
+        paid.setFeeRecipient(newTreasury);
+
+        PoolKey memory k = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            tickSpacing: 25,
+            hooks: IHooks(address(paid))
+        });
+        manager.initialize(k, SQRT_PRICE_1_1);
+        modifyLiquidityRouter.modifyLiquidity(
+            k,
+            ModifyLiquidityParams({tickLower: -60_000, tickUpper: 60_000, liquidityDelta: 5_000e18, salt: 0}),
+            ZERO_BYTES
+        );
+        uint256 oldBefore = MockERC20(Currency.unwrap(currency1)).balanceOf(treasury);
+        _swapOn(k, true, 10e18);
+        assertGt(MockERC20(Currency.unwrap(currency1)).balanceOf(newTreasury), 0, "the rotated recipient was not paid");
+        assertEq(MockERC20(Currency.unwrap(currency1)).balanceOf(treasury), oldBefore, "the old recipient was still paid");
+
+        // With no fee live, clearing IS allowed — the invariant is "a live fee must have somewhere to go",
+        // not "this address may never be zero".
+        hook.setFeeRecipient(address(0));
+        assertEq(hook.feeRecipient(), address(0), "clearing was refused on a hook that charges nothing");
+    }
+
     /* ------------------------------------------------------------------------- helpers */
 
     function _swap(bool zeroForOne, int256 amount) internal {
