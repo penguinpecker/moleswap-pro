@@ -13,10 +13,16 @@ optimizer = true
 # bytecode and gas; re-measure after touching it.
 optimizer_runs = 44444444
 ffi = false
-# READ-ONLY access to src/ for test/ExitPathStatic.t.sol, which reads the contract SOURCE and asserts the
-# exit call graph carries no pause modifier, no recipient parameter and no keeper/oracle/admin read. The
-# static half of the "no key, pause or upgrade can block an exit" claim lives there; nothing writes.
-fs_permissions = [{ access = "read", path = "./src" }]
+# READ-ONLY file access for two test suites, nothing writes:
+#  - ./src                                           test/ExitPathStatic.t.sol reads the contract SOURCE and asserts the
+#                                                    exit call graph carries no pause modifier, no recipient parameter and
+#                                                    no keeper/oracle/admin read (the static half of the exit claim);
+#  - ./frontend/lib/aggregator/preflightProbe.json   test/SwapPreflightProbe.t.sol pins the probe bytes the frontend ships
+#                                                    against the Solidity source.
+fs_permissions = [
+  { access = "read", path = "./src" },
+  { access = "read", path = "./frontend/lib/aggregator/preflightProbe.json" },
+]
 
 remappings = [
     "forge-std/=lib/forge-std/src/",

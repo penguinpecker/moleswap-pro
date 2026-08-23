@@ -9,8 +9,8 @@
  * bursting the RPC — the exact failure that once 429'd the endpoint and broke ETH→USDG entirely.
  */
 
-import { fetchRelevantPoolStates, type PoolRow } from "./client";
-import { getQuote, NATIVE, type Quote } from "./quote";
+import { fetchRelevantPoolStates, QuoteFailedError, type PoolRow } from "./client";
+import { getQuote, NATIVE, NoRouteError, type Quote } from "./quote";
 import { encodePlan, type EncodedPlan } from "./router";
 import type { PoolState, TickData } from "./venues/v3Pool";
 import { decodeSlot0, decodeUint, decodePopulatedTicks, INDEXER_SELECTORS, DEFAULT_WORD_RADIUS, wordsToFetch } from "./indexer";
@@ -274,7 +274,15 @@ export class LivePairSession {
     }
   }
 
-  /** Pure quote off the cached snapshot — safe to call per keystroke and per refresh tick. */
+  /**
+   * Pure quote off the cached snapshot — safe to call per keystroke and per refresh tick.
+   *
+   * Returns `null` ONLY for the honest no-route answer (no input, no pool in the set, or the router found no
+   * path that clears — `NoRouteError`). Anything else thrown by the quoter or the plan encoder is a defect on
+   * our side and is rethrown as {@link QuoteFailedError}, exactly as `quoteSwap` does: this method used to map
+   * every exception to `null`, so a live quoter crash and an illiquid pair were byte-for-byte identical to the
+   * card, which rendered both as "No route with live liquidity for this pair" (learnings.txt 2026-08-14 #2).
+   */
   quote(params: {
     amountIn: bigint;
     recipient: string;
@@ -296,16 +304,17 @@ export class LivePairSession {
         feeBps: this.feeBps,
         weth: this.weth,
       });
-    } catch {
-      return null;
+    } catch (err) {
+      if (err instanceof NoRouteError) return null;
+      throw new QuoteFailedError(err);
     }
 
     let encoded: EncodedPlan;
     let value: bigint;
     try {
       ({ arg: encoded, value } = encodePlan(q.plan));
-    } catch {
-      return null;
+    } catch (err) {
+      throw new QuoteFailedError(err);
     }
 
     const routes: LiveRoute[] = q.split.parts.map((part) => ({

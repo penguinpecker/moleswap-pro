@@ -22,6 +22,7 @@ import Settings from "../settings";
 import { useSwapSettings } from "@/hooks/use-swap-settings";
 import { diagnostics } from "@/lib/diagnostics";
 import { MoleMascot } from "../shared";
+import { noQuoteCopy } from "./quoteCopy";
 
 // Minimal ERC-20 metadata surface for importing an arbitrary token by address.
 const ERC20_META_ABI = [
@@ -256,6 +257,9 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   // fresh pool state every second (Jupiter-style). Null = no route / no input.
   const [quote, setQuote] = useState<LiveQuote | null>(null);
   const [quoteRefreshing, setQuoteRefreshing] = useState(false);
+  // The quote engine FAILED (a thrown QuoteFailedError / a pool-state load that blew up) — distinct from
+  // `quote === null`, which is the honest "no route". The two used to render identically.
+  const [quoteFailure, setQuoteFailure] = useState<string | null>(null);
   const sessionRef = useRef<LivePairSession | null>(null);
   const [sessionEpoch, setSessionEpoch] = useState(0);
   const [quoteUpdatedAt, setQuoteUpdatedAt] = useState<number | null>(null);
@@ -700,6 +704,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     let cancelled = false;
     sessionRef.current = null;
     setQuote(null);
+    setQuoteFailure(null);
     setQuoteRefreshing(true);
     (async () => {
       try {
@@ -724,6 +729,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         setSessionEpoch((e) => e + 1);
       } catch (e) {
         console.error("[MoleSwap] pair session init failed:", e);
+        // Say what happened: a registry/RPC failure here is not "no liquidity for this pair".
+        if (!cancelled) setQuoteFailure(`pool state could not be loaded (${e instanceof Error ? e.message : String(e)})`);
       } finally {
         if (!cancelled) setQuoteRefreshing(false);
       }
@@ -743,16 +750,27 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         setQuote(null);
         return;
       }
-      const q = s.quote({
-        amountIn: BigInt(amountWei || "0"),
-        recipient:
-          recipientAddress ||
-          walletAddress ||
-          "0x000000000000000000000000000000000000dEaD",
-        slippageBps,
-        decimalsIn: fromTokenMeta?.decimals ?? 18,
-        decimalsOut: toTokenMeta?.decimals ?? 18,
-      });
+      let q: LiveQuote | null;
+      try {
+        q = s.quote({
+          amountIn: BigInt(amountWei || "0"),
+          recipient:
+            recipientAddress ||
+            walletAddress ||
+            "0x000000000000000000000000000000000000dEaD",
+          slippageBps,
+          decimalsIn: fromTokenMeta?.decimals ?? 18,
+          decimalsOut: toTokenMeta?.decimals ?? 18,
+        });
+      } catch (err) {
+        // The session throws QuoteFailedError for a quoter/plan-encoder crash and returns null only for a
+        // genuine no-route. Render the crash as a crash, never as "no liquidity".
+        console.error("[MoleSwap] live quote failed (quoter defect, not an empty market):", err);
+        setQuote(null);
+        setQuoteFailure(err instanceof Error ? err.message : String(err));
+        return;
+      }
+      setQuoteFailure(null);
       setQuote(q);
       if (q) setQuoteUpdatedAt(q.updatedAt);
     },
@@ -1973,12 +1991,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                     <h3>Receive</h3>
                     <div style={{ marginTop: 12 }}>
                       {!quote ? (
-                        <div className="noq">
-                          {quoteRefreshing
-                            ? "Scanning every live pool for the best route…"
-                            : canQuote
-                              ? "No route with live liquidity for this pair."
-                              : "Select tokens and enter an amount to get a live quote."}
+                        <div className="noq" data-testid="no-quote">
+                          {noQuoteCopy({ quoteRefreshing, quoteFailure, canQuote })}
                         </div>
                       ) : (
                         <>

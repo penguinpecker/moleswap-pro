@@ -16,13 +16,16 @@ import {
   createWalletClient,
   createPublicClient,
   custom,
+  encodeFunctionData,
   http,
+  type Hex,
 } from "viem";
 import {
   CONTRACTS,
   TOKENS,
   POOLS,
   RH_RPC_URL,
+  RH_PUBLIC_RPC_URL,
   RH_CHAIN_ID,
   ERC20_ABI,
   POOL_ABI,
@@ -35,9 +38,11 @@ import {
   type PoolInfo,
 } from "./contracts";
 import { robinhoodChain } from "./wagmi-config";
-import { moleRouterAbi, erc20Abi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
+import { moleRouterAbi, erc20Abi, NATIVE_SENTINEL, type EncodedPlan } from "@/lib/aggregator/router";
 import { quoteSwap } from "@/lib/aggregator/client";
 import type { PoolRow } from "@/lib/aggregator/client";
+import { runSwapPreflight, type PreflightVerdict } from "@/lib/aggregator/simulate";
+import { decodeSwapFailure, type DecodeContext } from "@/lib/aggregator/errors";
 import { getAggFeeBps } from "@/lib/mole/aggFee";
 import { createClient } from "@/lib/supabase/client";
 // The registry query itself lives beside the API routes' loader so the browser and server copies cannot
@@ -157,14 +162,14 @@ export function extractTxHash(result: any): string {
 }
 
 
-export function getContractErrorMessage(err: any): string {
+/**
+ * One sentence for anything the swap path throws. The revert bytes (router / v4 / hook / ERC-20 selectors) are
+ * decoded by lib/aggregator/errors.ts; wallet rejections, gas shortfalls and transport failures are classified
+ * from the message. Pass the token context so amounts come out in token units.
+ */
+export function getContractErrorMessage(err: any, ctx?: DecodeContext): string {
   if (!err) return "Transaction failed";
-  const msg = err?.shortMessage || err?.message || String(err);
-  if (/user rejected|rejected the request|denied/i.test(msg)) return "Transaction rejected in wallet";
-  if (/insufficient funds/i.test(msg)) return "Insufficient balance for this swap";
-  if (/InsufficientOutput/i.test(msg)) return "Price moved — increase slippage and retry";
-  if (/DeadlinePassed/i.test(msg)) return "Quote expired — refresh and retry";
-  return msg.slice(0, 160);
+  return decodeSwapFailure(err, ctx).message;
 }
 
 export function getProvider(): ethers.JsonRpcProvider {
@@ -446,6 +451,136 @@ export async function approveToken(
   }
 }
 
+/* ─── PREPARE + PRE-FLIGHT ─────────────────────────────────────────────── */
+
+/**
+ * A swap fully built and ready to sign: the exact `MoleRouter.swap` calldata, the ETH to attach, and the numbers
+ * the user was shown for it. The confirm screen prepares one of these, pre-flights it, renders the balance diff,
+ * and hands the SAME object to `executeSwap` — so what was simulated and displayed is byte-for-byte what is
+ * signed. `calldata` is encoded once here and sent as-is; nothing re-encodes it downstream.
+ */
+export interface PreparedSwap {
+  /** Aggregator form: the NATIVE sentinel or the ERC-20 address. */
+  tokenIn: string;
+  tokenOut: string;
+  amountIn: bigint;
+  recipient: `0x${string}`;
+  encoded: EncodedPlan;
+  /** `encodeFunctionData(moleRouterAbi.swap, [encoded])` — the bytes the wallet signs. */
+  calldata: Hex;
+  value: bigint;
+  amountOut: bigint;
+  minAmountOut: bigint;
+  feeBps: number;
+  feeAmount: bigint;
+  slippageBps: number;
+  deadline: bigint;
+  routeDescriptions: string[];
+  preparedAt: number;
+}
+
+/** Below this many seconds of remaining deadline a prepared swap is rebuilt rather than signed. */
+const PREPARED_MIN_TTL_S = 20n;
+
+/**
+ * Price a swap and build the exact transaction for it. Returns `null` ONLY for a genuine no-route; a quoter
+ * defect is thrown (as `QuoteFailedError` from the aggregator) so it can never be mistaken for an empty market.
+ */
+export async function prepareSwap(params: {
+  tokenIn: string;
+  tokenOut: string;
+  /** Wei string. */
+  amountIn: string;
+  /** The caller — approvals and the default destination. */
+  recipient: string;
+  /** Optional custom destination for the output. */
+  outputRecipient?: string | null;
+  /** Tolerated shortfall in bps. Omitted → the user's Max Slippage. */
+  slippageBps?: number;
+}): Promise<PreparedSwap | null> {
+  const amountIn = BigInt(params.amountIn || "0");
+  if (amountIn <= 0n) return null;
+  const aggIn = toAggInput(params.tokenIn);
+  const aggOut = toAggInput(params.tokenOut);
+  const recipient = (
+    params.outputRecipient && /^0x[0-9a-fA-F]{40}$/.test(params.outputRecipient) ? params.outputRecipient : params.recipient
+  ) as `0x${string}`;
+  // Pair-scoped, same as the display quote — the route that executes must be built from the same registry
+  // rows the price was shown from, not a different arbitrary slice of the table.
+  const rows = await loadPoolRows({ tokenIn: params.tokenIn, tokenOut: params.tokenOut, weth: WETH });
+  const feeBps = await getAggFeeBps(Date.now());
+  const slippageBps = resolveSlippageBps(params.slippageBps);
+  const q = await quoteSwap(rows, {
+    tokenIn: aggIn,
+    tokenOut: aggOut,
+    amountIn,
+    recipient,
+    slippageBps,
+    feeBps,
+    weth: WETH,
+  });
+  if (!q) return null;
+  const calldata = encodeFunctionData({ abi: moleRouterAbi, functionName: "swap", args: [q.encoded as any] });
+  return {
+    tokenIn: aggIn,
+    tokenOut: aggOut,
+    amountIn,
+    recipient,
+    encoded: q.encoded,
+    calldata,
+    value: q.value,
+    amountOut: q.quote.netAmountOut,
+    minAmountOut: q.quote.minAmountOut,
+    feeBps: q.quote.feeBps,
+    feeAmount: q.quote.feeAmount,
+    slippageBps,
+    deadline: q.encoded.deadline,
+    routeDescriptions: q.quote.routeDescriptions,
+    preparedAt: Date.now(),
+  };
+}
+
+/** The RPCs the pre-flight consults: the configured endpoint first, the public one as the second opinion. */
+export function preflightRpcUrls(): string[] {
+  return [...new Set([RH_RPC_URL, RH_PUBLIC_RPC_URL].filter(Boolean))];
+}
+
+/** Token symbol/decimals for the decoder's messages; native resolves to ETH, unknown tokens to raw units. */
+function decodeContextFor(prepared: PreparedSwap): DecodeContext {
+  const meta = (addr: string) => {
+    if (addr.toLowerCase() === NATIVE_SENTINEL.toLowerCase()) return { symbol: "ETH", decimals: 18 };
+    const t = getTokenByAddress(addr);
+    return t ? { symbol: t.symbol, decimals: t.decimals } : undefined;
+  };
+  return { tokenIn: meta(prepared.tokenIn), tokenOut: meta(prepared.tokenOut) };
+}
+
+/**
+ * Simulate a prepared swap AS `account` on current chain state and judge the balance diff against what the
+ * user was shown. A pre-flight, never a guarantee — see lib/aggregator/simulate.ts.
+ */
+export async function preflightSwap(
+  prepared: PreparedSwap,
+  account: string,
+  ctx?: DecodeContext,
+): Promise<PreflightVerdict> {
+  return runSwapPreflight({
+    rpcUrls: preflightRpcUrls(),
+    router: CONTRACTS.MOLE_ROUTER as `0x${string}`,
+    account: account as `0x${string}`,
+    calldata: prepared.calldata,
+    value: prepared.value,
+    tokenIn: prepared.tokenIn,
+    tokenOut: prepared.tokenOut,
+    recipient: prepared.recipient,
+    amountIn: prepared.amountIn,
+    quotedOut: prepared.amountOut,
+    minAmountOut: prepared.minAmountOut,
+    slippageBps: prepared.slippageBps,
+    ctx: ctx ?? decodeContextFor(prepared),
+  });
+}
+
 /* ─── EXECUTE ───────────────────────────────────────────────────────────── */
 export async function executeSwap(params: {
   chainClient?: any;
@@ -460,7 +595,13 @@ export async function executeSwap(params: {
   fee?: number;
   originChain?: string | null;
   onStep?: (stepIdx: number, label: string, status: string) => void;
-}): Promise<{ success: boolean; txHash?: string; error?: string; amountOut?: string }> {
+  /** The swap the confirm screen simulated and displayed. Signed as-is while fresh; rebuilt otherwise. */
+  prepared?: PreparedSwap;
+  /** Receives the final pre-flight verdict taken right before signing. */
+  onPreflight?: (verdict: PreflightVerdict) => void;
+  /** Token symbols/decimals for the decoded error copy. */
+  decodeCtx?: DecodeContext;
+}): Promise<{ success: boolean; txHash?: string; error?: string; amountOut?: string; preflight?: PreflightVerdict }> {
   const onStep = params.onStep || (() => {});
   try {
     const eth = browserEth();
@@ -485,23 +626,31 @@ export async function executeSwap(params: {
         ? params.outputRecipient
         : account;
 
-    // Fresh quote at execution time → exact plan + honest minimum-out floor. The fee is re-read live here
-    // too, so minAmountOut is built on the post-fee output at the instant of execution.
+    // The swap to sign. The confirm screen hands over the one it simulated and displayed, and it is signed
+    // byte-for-byte while it is fresh (same pair, amount and recipient; deadline comfortably ahead). Otherwise
+    // a fresh one is built — exact plan + honest minimum-out floor, fee re-read live — and it goes through
+    // the same pre-flight gate below before anything is signed.
     onStep(0, "Swap", "pending");
-    // Pair-scoped, same as the display quote — the route that executes must be built from the same
-    // registry rows the price was shown from, not a different arbitrary slice of the table.
-    const rows = await loadPoolRows({ tokenIn: params.tokenIn, tokenOut: params.tokenOut, weth: WETH });
-    const feeBps = await getAggFeeBps(Date.now());
-    const q = await quoteSwap(rows, {
-      tokenIn: aggIn,
-      tokenOut: aggOut,
-      amountIn,
-      recipient,
-      slippageBps: resolveSlippageBps(params.slippageBps),
-      feeBps,
-      weth: WETH,
-    });
-    if (!q) return { success: false, error: "No route for this pair" };
+    const nowS = BigInt(Math.floor(Date.now() / 1000));
+    const handed = params.prepared;
+    const fresh =
+      !!handed &&
+      handed.tokenIn.toLowerCase() === aggIn.toLowerCase() &&
+      handed.tokenOut.toLowerCase() === aggOut.toLowerCase() &&
+      handed.amountIn === amountIn &&
+      handed.recipient.toLowerCase() === recipient.toLowerCase() &&
+      handed.deadline > nowS + PREPARED_MIN_TTL_S;
+    const prepared =
+      (fresh ? handed : null) ??
+      (await prepareSwap({
+        tokenIn: params.tokenIn,
+        tokenOut: params.tokenOut,
+        amountIn: params.amountIn,
+        recipient: account,
+        outputRecipient: recipient.toLowerCase() === account.toLowerCase() ? null : recipient,
+        slippageBps: params.slippageBps,
+      }));
+    if (!prepared) return { success: false, error: "No route for this pair" };
 
     // ERC-20 input: ensure a standing allowance to MoleRouter.
     if (!isNativeIn) {
@@ -526,30 +675,29 @@ export async function executeSwap(params: {
       }
     }
 
-    // Simulate against live state first — catches an obvious revert (e.g. price already moved past
-    // minOut) BEFORE the user signs and pays gas, and surfaces the exact reason.
+    // THE PRE-FLIGHT GATE. The exact calldata is run AS the user against live state (balance diff, not just a
+    // return value) right before the signature is requested. A revert, a pull larger than the displayed input,
+    // a delivery below the slippage floor, or two RPC providers disagreeing all stop here with the decoded
+    // reason — so do an RPC that cannot run the probe at all (fail closed). Nothing is signed past a verdict
+    // that is not "ok", and a mismatch is never retried automatically.
     onStep(0, "Swap", "signing");
-    try {
-      await pub.simulateContract({
-        address: CONTRACTS.MOLE_ROUTER as `0x${string}`,
-        abi: moleRouterAbi as any,
-        functionName: "swap",
-        args: [q.encoded as any],
-        value: q.value,
-        account,
-      });
-    } catch (simErr) {
+    const verdict = await preflightSwap(prepared, account, params.decodeCtx);
+    params.onPreflight?.(verdict);
+    if (verdict.status !== "ok") {
       onStep(0, "Swap", "error");
-      return { success: false, error: getContractErrorMessage(simErr) };
+      const error =
+        verdict.status === "unavailable"
+          ? `Pre-flight could not run, so nothing was signed: ${verdict.reason.message}`
+          : verdict.reason.message;
+      return { success: false, error, preflight: verdict };
     }
 
-    const hash = await wallet.writeContract({
-      address: CONTRACTS.MOLE_ROUTER as `0x${string}`,
-      abi: moleRouterAbi as any,
-      functionName: "swap",
-      args: [q.encoded as any],
-      value: q.value,
+    // Send the bytes that were simulated — no re-encoding between the pre-flight and the signature.
+    const hash = await wallet.sendTransaction({
       account,
+      to: CONTRACTS.MOLE_ROUTER as `0x${string}`,
+      data: prepared.calldata,
+      value: prepared.value,
       chain: robinhoodChain,
     });
     // CRITICAL: waitForTransactionReceipt does NOT throw on a reverted tx — it returns status
@@ -557,14 +705,14 @@ export async function executeSwap(params: {
     const receipt = await pub.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") {
       onStep(0, "Swap", "error");
-      return { success: false, txHash: hash, error: "Swap reverted on-chain — the price moved past your minimum. Try again or raise slippage." };
+      return { success: false, txHash: hash, error: "Swap reverted on-chain — the price moved past your minimum. Try again or raise slippage.", preflight: verdict };
     }
     onStep(0, "Swap", "confirmed");
 
-    return { success: true, txHash: hash, amountOut: q.quote.amountOut.toString() };
+    return { success: true, txHash: hash, amountOut: prepared.amountOut.toString(), preflight: verdict };
   } catch (err) {
     onStep(0, "Swap", "error");
-    return { success: false, error: getContractErrorMessage(err) };
+    return { success: false, error: getContractErrorMessage(err, params.decodeCtx) };
   }
 }
 
