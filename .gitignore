@@ -74,3 +74,6 @@ PATCH-PROPOSAL-exit-path.md
 test/attack/AttackQueueFailClosed.t.sol
 test/attack/AttackHardening_unlockAuth.t.sol
 test/attack/AttackHardening_settleTriple.t.sol
+
+# local-only security audit report (unfixed defects in live code)
+AUDIT-*.md
