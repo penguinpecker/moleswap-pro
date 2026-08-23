@@ -52,6 +52,13 @@ describe("chain registry", () => {
     expect(contractsFor(999999).MOLE_ROUTER).toBe(CONTRACTS.MOLE_ROUTER);
   });
 
+  it("carries the mined Arc hook address, whose low 14 bits are the permission bitmap", () => {
+    // The bitmap IS the address. If this constant is ever edited to a non-mined value the pools
+    // silently stop calling our callbacks, so the test asserts the bits, not just the string.
+    const hook = BigInt(contractsFor(5042).MOLE_HOOK);
+    expect(Number(hook & 0x3fffn)).toBe(0x38c4);
+  });
+
   it("pins Arc's WETH to the zero address so no native path can half-work", () => {
     // Arc has no WETH. The deployed router's weth slot is pinned to the USDC ERC-20 precisely so a
     // native route fails closed; the client must not offer one either.
@@ -63,7 +70,8 @@ describe("chain registry", () => {
     expect(isAvailable("swap", 5042)).toBe(true);
     // The ALM is Robinhood-only today, and lending is not deployed anywhere yet.
     expect(isAvailable("pools", 4663)).toBe(true);
-    expect(isAvailable("pools", 5042)).toBe(false);
+    // Arc LP went live 2026-08-23 (hook 0xfFDCBf2f.., vault 0x8e6bB60d..).
+    expect(isAvailable("pools", 5042)).toBe(true);
     expect(isAvailable("lending", 4663)).toBe(false);
     expect(isAvailable("lending", 5042)).toBe(false);
   });
@@ -78,7 +86,7 @@ describe("chain registry", () => {
   });
 
   it("can name the chains a product is live on, for the 'switch to X' prompt", () => {
-    expect(chainsWith("pools").map((c) => c.id)).toEqual([RH_CHAIN.id]);
+    expect(chainsWith("pools").map((c) => c.id)).toEqual([RH_CHAIN.id, ARC_CHAIN.id]);
     expect(chainsWith("swap").map((c) => c.id)).toEqual([RH_CHAIN.id, ARC_CHAIN.id]);
     expect(chainsWith("lending")).toEqual([]);
   });

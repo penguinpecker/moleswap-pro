@@ -106,9 +106,13 @@ const ARC_CONTRACTS: ChainContracts = {
   // native-ETH code path fails closed rather than half-working. Nothing here should wrap or unwrap.
   WETH: ZERO,
   MOLE_FEE_DIAL: "0x6a8E4aB1A2e9Ef23366Aa0a67568D4e7F1cdF539",
-  // The ALM and the lending market are not deployed on Arc yet.
-  MOLE_HOOK: ZERO,
-  MOLE_POSITIONS: ZERO,
+  // Deployed and proven with a real-fund open/withdraw round trip on 2026-08-23.
+  // The hook address is mined: its low 14 bits are 0x38C4 and cannot be changed.
+  MOLE_HOOK: "0xfFDCBf2f5b53C0fa2c5D7d25A87F99514Fbe78c4",
+  MOLE_POSITIONS: "0x8e6bB60d6A75e0390Ee3Da2b280aec2e39769D77",
+  // Lending is NOT deployed on Arc, and not because of engineering effort: the chain
+  // has no collateral asset with both a Chainlink feed and liquidatable depth. See
+  // AVAILABILITY below and rh-lending/PLAN.md §9.
   LENDING_POOL: ZERO,
 };
 
@@ -130,7 +134,7 @@ export const contractsFor = (chainId: number | undefined): ChainContracts =>
  */
 export const AVAILABILITY: Record<ProductKey, Record<number, boolean>> = {
   swap: { [RH_CHAIN.id]: true, [ARC_CHAIN.id]: true },
-  pools: { [RH_CHAIN.id]: true, [ARC_CHAIN.id]: false },
+  pools: { [RH_CHAIN.id]: true, [ARC_CHAIN.id]: true },
   lending: { [RH_CHAIN.id]: false, [ARC_CHAIN.id]: false },
 };
 
