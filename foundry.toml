@@ -13,6 +13,10 @@ optimizer = true
 # bytecode and gas; re-measure after touching it.
 optimizer_runs = 44444444
 ffi = false
+# READ-ONLY access to src/ for test/ExitPathStatic.t.sol, which reads the contract SOURCE and asserts the
+# exit call graph carries no pause modifier, no recipient parameter and no keeper/oracle/admin read. The
+# static half of the "no key, pause or upgrade can block an exit" claim lives there; nothing writes.
+fs_permissions = [{ access = "read", path = "./src" }]
 
 remappings = [
     "forge-std/=lib/forge-std/src/",
