@@ -184,9 +184,42 @@ function err(e: any): TxResult {
   return { success: false, error: e?.shortMessage || e?.message?.split("\n")[0] || "Transaction failed" };
 }
 
+/**
+ * DEPOSITS ARE CLOSED. Set by hand on 2026-08-23, and this is the one gate in the app that exists to
+ * stop a stranger losing money rather than to shape a product.
+ *
+ * MoleQueue is the only contract in this system with the shape that drained Arrakis Finance V1 on
+ * the same day: ONE SHARED ESCROW POT, and a settlement price whose freshness guard the settler
+ * composes inside their own transaction. `settle` anchors on `consult()` but validates it against
+ * `StateLibrary.getSlot0`, and a same-block swap contributes exactly zero to the TWAP (the hook
+ * advances the accumulator by `elapsed * lastTick`, and `elapsed` is 0) while moving spot freely.
+ * So the settler pushes spot toward the stale anchor, the drift check passes, and the whole epoch
+ * crosses at a price the market has already left. Orders cannot be cancelled after the freeze.
+ * Measured cost in AUDIT-2026-08-23.md: 8.75%-10% of epoch notional for about $50 of LP fees.
+ *
+ * The escrow is empty today, but `freeze()` is permissionless, so anyone can roll a fresh epoch and
+ * reopen deposits. The /queue route still returns HTTP 200 and still renders its controls, and
+ * removing it from the navigation did NOT close this door — so the door is closed here, at the one
+ * function every UI path funnels through, rather than in a component someone can route around.
+ *
+ * TO RE-OPEN: delete this block. Do that only once MoleQueue's settle path carries a spot-vs-TWAP
+ * gate that the settler cannot compose, plus the depth, max-jump and observation-count guards that
+ * test/attack/AttackQueueFailClosed.t.sol asserts and that are red today. Withdrawals are
+ * deliberately NOT gated — `cancel` and `claim` below stay open, because trapping funds is its own
+ * incident.
+ */
+const QUEUE_DEPOSITS_OPEN = false;
+
 /** Place a batch-auction order. zeroForOne = selling WETH for USDG. amountIn in escrow-token wei. */
 export async function placeOrder(zeroForOne: boolean, amountIn: bigint): Promise<TxResult> {
   try {
+    if (!QUEUE_DEPOSITS_OPEN) {
+      return {
+        success: false,
+        error:
+          "Queue deposits are paused while the batch-settlement price guard is rebuilt. Existing orders can still be cancelled and claimed.",
+      };
+    }
     if (amountIn <= 0n) return { success: false, error: "Enter an amount" };
     const { w, account, pub } = await wallet();
     const escrow = (zeroForOne ? WETH.address : USDG.address) as Address;

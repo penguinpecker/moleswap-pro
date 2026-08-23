@@ -77,3 +77,9 @@ test/attack/AttackHardening_settleTriple.t.sol
 
 # local-only security audit report (unfixed defects in live code)
 AUDIT-*.md
+
+# Adversarial review of the live Arc deployment — names unfixed defects, keep local
+ARC-REVIEW-*.md
+
+# Authority register — enumerates every privileged key, keep local
+AUTHORITY-REGISTER.md
