@@ -58,11 +58,26 @@ describe("no keyed provider URL can reach the browser", () => {
     expect(src).not.toMatch(/process\.env\.NEXT_PUBLIC_[A-Z_]*UPSTREAM/);
   });
 
-  it("both chains proxy their RPC — neither is a special case", () => {
-    // The gap existed because Arc got the lesson and Robinhood kept the habit. Pinning both together
-    // means the next chain added has an obvious pattern to copy and a test that notices if it doesn't.
+  it("Arc's proxy exists, and any chain proxy added later must not reuse Arc's constants", () => {
     expect(fs.existsSync(path.join(root, "app/rpc/v1/arc/route.ts"))).toBe(true);
-    expect(fs.existsSync(path.join(root, "app/rpc/v1/rh/route.ts"))).toBe(true);
+
+    // A Robinhood proxy was written on 2026-08-24 by copying the Arc route, and it was WRONG in a way
+    // worth pinning against. lib/rpc/policy.ts and lib/rpc/proxy.ts answer eth_chainId from
+    // ARC_CHAIN_ID_HEX as a last resort — a deliberate Arc-specific optimisation, since a chain id is
+    // a constant of the protocol rather than state. Reused unchanged for Robinhood, the endpoint
+    // forwarded eth_blockNumber to Robinhood (44,758,712, real RH data) while answering eth_chainId
+    // with 0x13b2, Arc's id. Reads worked, so it looked healthy; a wallet would have been told it was
+    // on a chain it was not reading. That is worse than an outright failure.
+    //
+    // The route was removed rather than patched: the shared proxy has to be parameterised by chain
+    // first, and a half-built proxy that reports the wrong chain id is worse than no proxy.
+    for (const dir of fs.readdirSync(path.join(root, "app/rpc/v1"), { withFileTypes: true })) {
+      if (!dir.isDirectory() || dir.name === "arc") continue;
+      const route = path.join(root, "app/rpc/v1", dir.name, "route.ts");
+      if (!fs.existsSync(route)) continue;
+      const body = fs.readFileSync(route, "utf8");
+      expect(body, `${dir.name} reuses Arc's chain constants — it will report Arc's chain id`).not.toMatch(/ARC_CHAIN_ID/);
+    }
   });
 
   it("no keyed provider URL is hardcoded anywhere the client can import", () => {
