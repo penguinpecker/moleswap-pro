@@ -185,33 +185,35 @@ function err(e: any): TxResult {
 }
 
 /**
- * DEPOSITS ARE OPEN AGAIN as of 2026-08-24, and the reason is recorded here rather than in a commit
- * nobody will read, because this flag was set to false on 2026-08-23 for a specific reason.
+ * DEPOSITS ARE CLOSED AGAIN — 2026-08-24, after a re-audit of the settlement guards.
  *
- * WHAT WAS WRONG. MoleQueue is the one contract in this system shaped like the Arrakis V1 vault that
- * was drained the day before: a single shared escrow pot, and a settlement price whose freshness guard
- * the settler composed inside their own transaction. `settle` anchored on `consult()` but validated it
- * against `getSlot0` spot, and a same-block swap contributes exactly zero seconds to the TWAP while
- * moving spot freely — so the settler pushed spot toward the stale anchor, the drift check passed, and
- * the whole epoch crossed at a price the market had already left. 8.75-10% of epoch notional for about
- * $50 of LP fees, and orders cannot be cancelled after the freeze.
+ * They were reopened earlier today because the guards were built and mutation-verified. A re-audit of
+ * the merged tree then confirmed a HIGH that none of those tests could see, because it is an
+ * INTERACTION between two changes that were each correct on their own:
  *
- * WHAT CLOSED IT. The freshness reference is now a SECOND, SHORT TWAP read (`effectiveShortTwapWindow`,
- * live at 60s) instead of spot. The settler's own swap sets the hook's `lastTimestamp` to now, which
- * forces `consult` onto the bracketed ring path, so their manipulation contributes zero seconds to the
- * number that judges them — the same-transaction reversal is dead rather than merely expensive.
- * Alongside it: a depth floor (`minSettleLiquidity`), a max-jump bound against the last clearing
- * (`maxClearingJumpTicks`), an oracle-staleness bound, and an upper bound on the settle window so a
- * settler cannot wait for whichever hour pays them best.
+ *   MoleHook.consult() was fixed this week so that a window over a pool that has not traded returns
+ *   `lastTick` — which is right, and is genuinely the arithmetic mean when the tick has been constant
+ *   for the whole window. But MoleQueue's settlement has THREE price guards, and on a quiet pool the
+ *   long TWAP, the short TWAP and slot0 all resolve to that same single number. Both drift checks
+ *   then compute a difference of zero BY CONSTRUCTION and cannot fire however old the price is.
  *
- * ALL OF IT IS LIVE AND CARRIES REAL VALUES, not the zero-storage defaults an upgrade leaves behind —
- * the derived default for the depth floor was ONE WEI of liquidity, which is not a depth floor. On
- * Robinhood Chain 4663 the queue reads shortTwapWindow 60, maxOracleStaleness 3600, maxClearingJump
- * 1200, minSettleLiquidity 1,475,685,058,350 (25% of the pool's in-range liquidity).
+ * That leaves `maxOracleStaleness` as the only guard standing, and it reads `lastObsTimestamp`, which
+ * the hook advances on ANY swap past its observation interval — including a one-raw-unit swap that
+ * moves no price and carries no information. So: queue on the side a fossil price favours, wait for
+ * the freeze (after which nobody can cancel, by design), then in one transaction swap one unit and
+ * settle. Every guard passes and the batch crosses at a price the pool has not quoted for days. If
+ * the fossil never favours the attacker they simply never settle and reclaim in kind at timeout — a
+ * free option on the whole batch, exercised after seeing the market.
  *
- * IF YOU ARE CLOSING THIS AGAIN, set the flag to false rather than deleting the machinery, and say why.
+ * The escrow is zero and this door had been open for hours with nobody in it, so nothing was lost.
+ * But a confirmed HIGH on the settle path is not something to leave a door open in front of.
+ *
+ * TO RE-OPEN: the settle path needs a guard that fails when the anchor carries NO INFORMATION, not
+ * merely when it is old — a pool nobody trades has no honest price, and three guards reading one
+ * number is one guard wearing three hats. Do not reopen on the strength of a green suite again: the
+ * suite was green for this, because every test exercised a pool that trades.
  */
-const QUEUE_DEPOSITS_OPEN = true;
+const QUEUE_DEPOSITS_OPEN = false;
 
 /** Place a batch-auction order. zeroForOne = selling WETH for USDG. amountIn in escrow-token wei. */
 export async function placeOrder(zeroForOne: boolean, amountIn: bigint): Promise<TxResult> {
