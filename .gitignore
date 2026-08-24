@@ -86,3 +86,6 @@ AUTHORITY-REGISTER.md
 
 # A reference clone of Aave v3.7 for the lending work — not part of this repo
 lib/aave-v3-origin/
+
+# Claude Code session state, including full worktree copies of this repo
+.claude/
