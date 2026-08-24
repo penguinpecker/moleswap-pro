@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -9,13 +9,26 @@ import { useWalletContext, useChainClient, WalletUI } from "@/lib/chain/provider
 import { useWallet } from "@/lib/chain/provider";
 import { loadLivePools, tvlUsd as calcTvlUsd } from "@/lib/chain/livePools";
 import {
-  CONTRACTS, TOKENS, POOLS as AMM_POOLS,
-  getTokenByAddress, findPool,
-  getSwapQuote, getProvider,
+  CONTRACTS, TOKENS,
+  getTokenByAddress,
+  getSwapQuote,
   getPoolDisplayInfo,
   AMM_ROUTER, AMM_FACTORY, RH_CHAIN_ID,
   type TokenInfo, type PoolInfo,
 } from "@/lib/chain/amm";
+// The chain the wallet is ACTUALLY on, and everything that has to be resolved from it: which pools to
+// ask for, which RPC to read, which pool a position lives in, and where to offer a switch. See
+// lib/mole/poolsSurface.ts for why every one of those used to be a Robinhood constant.
+import { SUPPORTED_CHAINS, chainMetaFor } from "@/lib/chain/chains";
+import {
+  poolsChainView,
+  poolsProvider,
+  readSlot0,
+  pairForPoolId,
+  vaultPoolFor,
+  type ListedPool,
+  type PoolPair,
+} from "@/lib/mole/poolsSurface";
 import { ethers } from "ethers";
 import { createClient } from "@/lib/supabase/client";
 import { ProvenanceCard } from "./ProvenanceCard";
@@ -76,12 +89,16 @@ async function fetchPoolVolumes(poolKeys: string[]): Promise<Map<string, { vol: 
 }
 
 /**
- * Build a /dapp URL that pre-selects `from` → `to` on Robinhood Chain. Used by the
+ * Build a /dapp URL that pre-selects `from` → `to` ON THE CHAIN THE POOL IS ON. Used by the
  * zero-balance CTA in PoolDetail — if the user lacks one of a pool's tokens,
  * clicking "GET X" takes them to the swap page with the route already wired.
+ *
+ * The chain id is a PARAMETER and no longer `RH_CHAIN_ID`. Handing the swap page a Robinhood chain id
+ * with two Arc token addresses does not fail loudly — it asks for a pair that does not exist on the
+ * chain named, and the user is left looking at a broken route with no way to tell which half is wrong.
  */
-function getSwapUrl(fromAddress: string, toAddress: string): string {
-  const cid = String(RH_CHAIN_ID);
+function getSwapUrl(fromAddress: string, toAddress: string, chainId: number): string {
+  const cid = String(chainId);
   const params = new URLSearchParams({ from: fromAddress, fromChainId: cid, to: toAddress, toChainId: cid });
   return `/dapp?${params.toString()}`;
 }
@@ -104,6 +121,16 @@ const DYNAMIC_FEE_FLAG = 0x800000;
 const feeLabel = (fee: number): string =>
   (Number(fee) & DYNAMIC_FEE_FLAG) !== 0 ? "DYNAMIC" : `${(Number(fee) / 10000).toFixed(2)}%`;
 
+/**
+ * A deposited amount as text. "..." = not computed yet; "—" = the pool's tick could not be read, so
+ * there is no honest number to print. Never a figure derived from a price the pool has never had.
+ */
+const amtText = (n: number | undefined) =>
+  n === undefined ? "..." : Number.isFinite(n) ? n.toFixed(n < 0.01 ? 6 : 4) : "—";
+
+/** Sum, skipping anything that is not a real number — an unknown amount must not poison a total. */
+const sumFinite = (xs: number[]) => xs.reduce((s, x) => (Number.isFinite(x) ? s + x : s), 0);
+
 const fmt = (n: number) => {
   if (!Number.isFinite(n) || isNaN(n)) return "0.00";
   if (n < 0) return "0.00";
@@ -115,9 +142,15 @@ const fmt = (n: number) => {
   return n.toFixed(2);
 };
 
+/**
+ * Robinhood keeps the magenta this page has always drawn it in (its `.chainb` default); every other
+ * supported chain is tinted with the accent the chain switcher in the chrome already uses for it, so a
+ * badge and the switcher cannot disagree about which chain the user is looking at.
+ */
 const chainColors: Record<string, string> = {
   "Robinhood Chain": "#D548EC",
 };
+for (const c of SUPPORTED_CHAINS) if (!chainColors[c.name]) chainColors[c.name] = c.accent;
 
 /* Coin-chip colors for tokens without a real remote logo (Burrow palette). */
 const COIN_COLORS: Record<string, string> = {
@@ -168,10 +201,8 @@ interface PoolDisplay {
   serviceTag: PoolServiceTag;
 }
 
-const POOL_ABI = [
-  "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
-  "function liquidity() view returns (uint128)",
-];
+/* The v3 pool ABI that used to sit here moved into lib/mole/poolsSurface with `readSlot0`, which is
+   the only thing that ever used it — and which now reads it on the chain the pool is actually on. */
 
 const ERC20_BAL_ABI = [
   "function balanceOf(address account) view returns (uint256)",
@@ -208,37 +239,12 @@ function safeBigInt(v: unknown): bigint {
   }
 }
 
-/** v4 periphery: a v4 pool has no address, its slot0 is read from the singleton by PoolId. */
-const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b";
-const STATE_VIEW_ABI = [
-  "function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
-];
-
 /**
- * Live slot0 for either flavour of pool, keyed on the shape of its identity:
- *   - 32-byte PoolId  → v4, read StateView.getSlot0(poolId)
- *   - 20-byte address → v3, read the pool contract's own slot0()
- * The old code called `new ethers.Contract(<bytes32>).slot0()` unconditionally, which ethers rejects as
- * a non-address (it tries to ENS-resolve it) — the throw was swallowed and the tick stayed 0 forever.
+ * Live slot0 for either flavour of pool now lives in lib/mole/poolsSurface as `readSlot0(chainId, id)`.
+ * It moved because the reader here built its provider from `getProvider()`, which is pinned to Robinhood
+ * — so on Arc it asked Robinhood's StateView about an Arc PoolId, got nothing back, and the page kept
+ * whatever tick it already had without ever saying the read had failed.
  */
-async function readPoolSlot0(id: string): Promise<{ sqrtPriceX96: bigint; tick: number } | null> {
-  try {
-    const provider = getProvider();
-    if (/^0x[0-9a-fA-F]{64}$/.test(id)) {
-      const sv = new ethers.Contract(STATE_VIEW, STATE_VIEW_ABI, provider);
-      const s = await sv.getSlot0(id);
-      return { sqrtPriceX96: BigInt(s[0]), tick: Number(s[1]) };
-    }
-    if (ethers.isAddress(id)) {
-      const c = new ethers.Contract(id, POOL_ABI, provider);
-      const s = await c.slot0();
-      return { sqrtPriceX96: BigInt(s[0]), tick: Number(s[1]) };
-    }
-  } catch (err) {
-    console.error("Failed to read pool slot0:", err);
-  }
-  return null;
-}
 
 function calcTvl(reserve0: number, reserve1: number, price: number): number {
   if (!Number.isFinite(price) || price <= 0) return reserve1 * 2;
@@ -248,18 +254,31 @@ function calcTvl(reserve0: number, reserve1: number, price: number): number {
   return tvl;
 }
 
-async function fetchPoolData(): Promise<PoolDisplay[]> {
+/**
+ * MoleSwap's own pools ON ONE CHAIN.
+ *
+ * `chainId` is threaded into the query because /api/v1/pools has been chain-scoped for a while and this
+ * page never said which chain it meant — so it always got the default, Robinhood, and rendered it under
+ * whatever chain the switcher in the chrome happened to be showing. The endpoint refuses an unknown
+ * chain by name rather than answering for Robinhood, so a bad id surfaces as an error here instead of as
+ * another chain's pools wearing this chain's label.
+ */
+async function fetchPoolData(chainId: number): Promise<PoolDisplay[]> {
   // MoleSwap's own v4 pools, priced server-side. A v4 pool has no address to call slot0() on and no
   // per-pool token balance — its state lives in the PoolManager singleton keyed by PoolId, and its
   // TVL is derived from the open positions. That work belongs in one place, so this page consumes
   // /api/v1/pools rather than reimplementing it against a pool address that does not exist.
-  const res = await fetch("/api/v1/pools", { cache: "no-store" });
+  const res = await fetch(`/api/v1/pools?chainId=${chainId}`, { cache: "no-store" });
   // Throw rather than return []: an empty array is the caller's "this venue has no pools" answer, and a
   // 429/500 must not be dressed up as that. loadPools() catches, logs, and keeps whatever list is
   // already on screen instead of blanking it.
   if (!res.ok) throw new Error(`/api/v1/pools responded ${res.status}`);
   const json = await res.json();
   const pools: any[] = json?.data?.pools || [];
+  // The chain NAMES ITSELF in the response. Taken from there rather than from a constant so a token's
+  // `sourceChain` — which is what every chain badge on this page renders — can never say one chain while
+  // the addresses beside it belong to another.
+  const sourceChain: string = json?.data?.chain || chainMetaFor(chainId)?.name || `chain ${chainId}`;
   if (!pools.length) return [];
 
   // Real 24h volume/fees where the indexer has them, keyed by mp_pools.id (see fetchPoolVolumes). Pass
@@ -273,11 +292,11 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
   return pools.map((p) => {
     const t0: TokenInfo = {
       address: p.token0.address, symbol: p.token0.symbol, name: p.token0.name,
-      decimals: p.token0.decimals, sourceChain: "Robinhood Chain", logoURI: p.token0.logoURI || "",
+      decimals: p.token0.decimals, sourceChain, logoURI: p.token0.logoURI || "",
     } as TokenInfo;
     const t1: TokenInfo = {
       address: p.token1.address, symbol: p.token1.symbol, name: p.token1.name,
-      decimals: p.token1.decimals, sourceChain: "Robinhood Chain", logoURI: p.token1.logoURI || "",
+      decimals: p.token1.decimals, sourceChain, logoURI: p.token1.logoURI || "",
     } as TokenInfo;
 
     const vlm =
@@ -313,7 +332,11 @@ async function fetchPoolData(): Promise<PoolDisplay[]> {
       tickSpacing: Number.isFinite(Number(p.tickSpacing)) && p.tickSpacing !== null && p.tickSpacing !== undefined ? Number(p.tickSpacing) : null,
       // A v4 row (PoolId identity) is MoleHook-served only if its hook IS MoleHook; an unknown hook on a
       // PoolId-identified row is foreign v4, fail-closed — it never earns Provide / Queue by default.
-      serviceTag: poolServiceTag({ venue: "mole_v4", hooks: typeof p.hooks === "string" ? p.hooks : null }),
+      // Tagged against THIS chain's MoleHook. Arc's hook is a different address from Robinhood's (its
+      // low 14 bits are mined, so it cannot be the same one), and without the chain the check compared
+      // every pool against Robinhood's — which made MoleSwap's own live Arc pool read as "Foreign hook"
+      // and stripped its Provide action.
+      serviceTag: poolServiceTag({ venue: "mole_v4", hooks: typeof p.hooks === "string" ? p.hooks : null }, chainId),
     } as PoolDisplay;
   });
 }
@@ -387,6 +410,18 @@ interface LiquidityPosition {
   token0Info?: TokenInfo;
   token1Info?: TokenInfo;
   poolInfo?: PoolInfo;
+  /**
+   * The v4 PoolId this position is actually in, and the chain it was read from.
+   *
+   * Both used to be implicit, and both were wrong the moment a second chain existed: every ALM position
+   * was labelled with the first pool in the Robinhood registry, so a CASHCAT/WETH position on Robinhood
+   * read as WETH/USDG and an Arc position read as a Robinhood one. The id is what `pairForPoolId` joins
+   * on; the chain is what the exit is sent to and what the switch prompt names.
+   */
+  poolId?: string;
+  chainId?: number;
+  /** The pool's current tick, when known — what the deposited amounts are computed at. */
+  poolTick?: number | null;
 }
 
 /* Page-scoped Burrow styles (mirrors the pools.html prototype's style block). */
@@ -503,11 +538,65 @@ const POOLS_CSS = `
 .m-btn:not(:disabled):active { transform: translateY(1px); }
 `;
 
+/**
+ * What the page renders where a list of pools would go, when the wallet is on a chain MoleSwap runs no
+ * pools on.
+ *
+ * Copied in shape and in wording from the vault screen's `NoVaultHere`, deliberately: the two screens
+ * refuse for the same reason and should refuse in the same voice. The switch is OFFERED rather than
+ * performed — silently moving a wallet to another network is the app deciding where somebody's money
+ * lives — but it IS offered, which is the whole gap this closes. Before this, a user on Arc got the
+ * refusal sentence and no button.
+ */
+const NoPoolsHere = ({ chainName, chains, onSwitch, busy }: {
+  chainName: string; chains: { id: number; name: string; shortName: string }[];
+  onSwitch: (id: number) => void; busy: boolean;
+}) => (
+  <div className="p-card" data-testid="no-pools-here">
+    <h3>Not on this network</h3>
+    <p className="d" style={{ marginTop: 10 }}>
+      MoleSwap runs no pools on {chainName}. They live on{" "}
+      {chains.map((c) => c.name).join(" and ")} — switch there to provide liquidity, or stay here and use Swap.
+    </p>
+    <div className="p-chipset" style={{ marginTop: 14 }}>
+      {chains.map((c) => (
+        <button key={c.id} data-testid={`switch-to-${c.id}`} onClick={() => onSwitch(c.id)} disabled={busy}>
+          SWITCH TO {c.shortName.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  </div>
+);
+
 const PoolsContent = () => {
   const walletCtx = useWalletContext();
   const { chainClient } = useChainClient();
   const isConnected = walletCtx?.connectionStatus === WalletUI.CONSTANTS.CONNECTION.STATUS.CONNECTED;
-  const { address } = useWallet();
+  const { address, chainId, switchTo } = useWallet();
+
+  // Everything on this page is about ONE chain: the one the wallet is on. `live` is false where MoleSwap
+  // runs no pools, and that is rendered as an explanation with a switch button rather than as an empty
+  // list — "No pools found" on Arc read as "MoleSwap has nothing here", which was never true.
+  const chain = useMemo(() => poolsChainView(chainId), [chainId]);
+  /**
+   * The chain as of the LATEST render, readable from inside an awaited fetch.
+   *
+   * Without it a slow answer from the chain the user just left wins the race against the fast answer
+   * from the chain they are on: switch Arc → Robinhood while the Arc pool list is in flight and it
+   * lands afterwards, putting Arc's pools under Robinhood's header. Every setState below is gated on
+   * this still matching the chain the request was made for.
+   */
+  const chainRef = useRef(chain.chainId);
+  chainRef.current = chain.chainId;
+  const [switching, setSwitching] = useState(false);
+  const switchChain = useCallback(async (id: number) => {
+    setSwitching(true);
+    try {
+      await switchTo(id);
+    } finally {
+      setSwitching(false);
+    }
+  }, [switchTo]);
 
   const [tab, setTab] = useState<"markets" | "positions">("markets");
   const [selectedPool, setSelectedPool] = useState<PoolDisplay | null>(null);
@@ -519,32 +608,53 @@ const PoolsContent = () => {
   const [posLoading, setPosLoading] = useState(false);
 
   const loadPools = useCallback(async () => {
+    // A chain with no pools has nothing to fetch, and asking anyway would be answered for Robinhood by
+    // the endpoint's default. Empty the list first so no previous chain's rows survive the switch.
+    if (!chain.live) {
+      setPools([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
+    const forChain = chain.chainId;
     try {
-      const data = await fetchPoolData();
+      const data = await fetchPoolData(forChain);
+      if (chainRef.current !== forChain) return; // the wallet moved while this was in flight
       setPools(data);
     } catch (err) {
       console.error("Failed to fetch pool data:", err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [chain.live, chain.chainId]);
 
   const loadPositions = useCallback(async () => {
     if (!address) return;
+    if (!chain.live) {
+      setPositions([]);
+      return;
+    }
     setPosLoading(true);
     try {
-      // The only user LP venue on this deployment is the v4 ALM vault (WETH/USDG). Read the real ALM
-      // positions and map them into the shape this tab renders; the enrichment effect below then computes
-      // real token amounts from the pool's slot0. (getUserPositions in amm.ts is a fail-closed stub.)
+      // The user's LP venue on every chain is the v4 ALM vault, and WHICH vault is a function of the
+      // chain: 0x6746…536A on Robinhood, 0x8e6b…9D77 on Arc. This call used to pass no chain at all, so
+      // `vault.ts` fell back to its Robinhood default and a wallet on Arc was shown Robinhood's
+      // positions. The chain goes in explicitly now — `getAlmPositions` reads exactly that chain's vault.
       const { getAlmPositions } = await import("@/lib/mole/vault");
-      const alm = await getAlmPositions(address);
-      const wethUsdg = AMM_POOLS[0];
+      const forChain = chain.chainId;
+      const alm = await getAlmPositions(address, forChain);
+      if (chainRef.current !== forChain) return; // ditto: never show one chain's positions on another
+      // Stored with the PoolId the vault holds against each position and the chain it was read from.
+      // The pair is joined on separately (see `labelledPositions`) so that a pool list arriving late
+      // relabels the positions already on screen instead of leaving them anonymous.
       const mapped = alm.map((p) => ({
-        tokenId: p.id,
-        token0: wethUsdg.token0,
-        token1: wethUsdg.token1,
-        fee: wethUsdg.fee,
+        tokenId: Number(p.id),
+        poolId: p.poolId,
+        chainId: forChain,
+        token0: "",
+        token1: "",
+        fee: 0,
+        poolTick: null,
         liquidity: p.liquidity.toString(),
         amount0: "0",
         amount1: "0",
@@ -560,10 +670,50 @@ const PoolsContent = () => {
     } finally {
       setPosLoading(false);
     }
-  }, [address]);
+  }, [address, chain.live, chain.chainId]);
+
+  /**
+   * Each position labelled with ITS OWN pool, matched by PoolId against this chain's pool list.
+   *
+   * A position whose pool is not in the list keeps a null pair and renders as a bare id. That is the
+   * point: the old code labelled EVERY position with the first pool in the Robinhood registry, so a
+   * CASHCAT/WETH position read as WETH/USDG and every Arc position read as a Robinhood one — with the
+   * other pool's decimals used to format the amounts underneath.
+   */
+  const labelledPositions = useMemo(() => {
+    const listed: ListedPool[] = pools.map((p) => ({
+      poolId: p.pool.address,
+      token0: p.token0,
+      token1: p.token1,
+      fee: p.fee,
+      tickSpacing: p.tickSpacing,
+      tick: p.tick,
+    }));
+    return positions.map((p) => {
+      const pair: PoolPair | null = pairForPoolId(p.poolId, listed, p.chainId ?? chain.chainId);
+      if (!pair) return p;
+      return {
+        ...p,
+        token0: pair.token0.address,
+        token1: pair.token1.address,
+        token0Info: { ...pair.token0, sourceChain: chain.name } as TokenInfo,
+        token1Info: { ...pair.token1, sourceChain: chain.name } as TokenInfo,
+        fee: pair.fee,
+        poolTick: pair.tick,
+      };
+    });
+  }, [positions, pools, chain.chainId, chain.name]);
 
   useEffect(() => { loadPools(); }, [loadPools]);
   useEffect(() => { if (tab === "positions" && address) loadPositions(); }, [tab, address, loadPositions]);
+  // A chain change invalidates BOTH lists at once. Clearing them here rather than waiting for the reload
+  // is what stops Robinhood's positions being visible for a beat under an Arc header — the exact frame
+  // in which somebody would click Exit on a position that does not exist on the chain they are on.
+  useEffect(() => {
+    setPools([]);
+    setPositions([]);
+    setSelectedPool(null);
+  }, [chain.chainId]);
 
   const chains = useMemo(() => ["all", ...new Set(pools.map(p => p.token0.sourceChain))], [pools]);
   const filtered = pools.filter(p => category === "all" || p.category === category);
@@ -602,8 +752,13 @@ const PoolsContent = () => {
         </div>
       </div>
 
-      {selectedPool ? (
-        <PoolDetail pool={selectedPool} onBack={() => setSelectedPool(null)} address={address} isConnected={isConnected} walletCtx={walletCtx} chainClient={chainClient} />
+      {!chain.live ? (
+        /* Neither tab can say anything true on a chain MoleSwap runs no pools on — so the page says
+           that, and offers the switch, instead of rendering an empty market list under this chain's
+           name and an empty position list that would have been another chain's. */
+        <NoPoolsHere chainName={chain.name} chains={chain.alternatives} onSwitch={switchChain} busy={switching} />
+      ) : selectedPool ? (
+        <PoolDetail pool={selectedPool} onBack={() => setSelectedPool(null)} address={address} isConnected={isConnected} walletCtx={walletCtx} chainClient={chainClient} chainId={chain.chainId} chainName={chain.name} explorerUrl={chain.explorerUrl} />
       ) : tab === "markets" ? (
         <>
           <div className="stats" style={{ marginTop: 0 }}>
@@ -662,7 +817,7 @@ const PoolsContent = () => {
               <div className="load-block">
                 <div className="ldr" />
                 <div className="t1">Reading on-chain data...</div>
-                <div className="t2">Fetching from Robinhood Chain</div>
+                <div className="t2">Fetching from {chain.name}</div>
               </div>
             ) : sorted.length === 0 ? (
               <div className="empty">
@@ -677,7 +832,7 @@ const PoolsContent = () => {
                     <div>
                       <div className="nm">{p.name}</div>
                       <div className="tag">
-                        <Badge chain="Robinhood Chain" />
+                        <Badge chain={p.token0.sourceChain} />
                         <span className="fee">{feeLabel(p.fee)}</span>
                         {/* MoleHook-served vs foreign, from the key's hook address (a row with no hook on
                             record is not guessed to be ours). */}
@@ -697,9 +852,15 @@ const PoolsContent = () => {
                     <div className="num col-apy" style={{ color: "var(--ink-3)" }}>—</div>
                   )}
                   {/* Provide is the vault, and the vault only admits MoleHook pools — offer it nowhere else.
-                      Let the link go to the vault without also opening the detail view. */}
+                      Let the link go to the vault without also opening the detail view.
+
+                      THE HREF PINS NO CHAIN, AND MUST NOT. /vault resolves its chain from
+                      useWallet().chainId through vaultChainFor() — the same wallet chain this list was
+                      built from — so the context survives the navigation by construction. Pinning a
+                      chain in the URL would be the bug in reverse: a link written on Arc still saying
+                      4663, or a link the vault ignores while the reader believes it was honoured. */}
                   {engineActionsAllowed(p.serviceTag) ? (
-                    <Link href="/vault" className="liq-btn" onClick={(e) => e.stopPropagation()}>
+                    <Link href="/vault" className="liq-btn" data-chain-id={chain.chainId} onClick={(e) => e.stopPropagation()}>
                       + Liquidity
                     </Link>
                   ) : (
@@ -713,18 +874,23 @@ const PoolsContent = () => {
       ) : (
         /* ═══ POSITIONS TAB ═══ */
         <PositionsTab
-          positions={positions}
+          positions={labelledPositions}
           loading={posLoading}
           isConnected={isConnected}
           walletCtx={walletCtx}
           chainClient={chainClient}
           address={address}
+          chainId={chain.chainId}
+          chainName={chain.name}
+          chains={chain.alternatives}
+          onSwitchChain={switchChain}
+          switching={switching}
           onRefresh={loadPositions}
           onGoToMarkets={() => setTab("markets")}
         />
       )}
 
-      <p className="foot-cap">Concentrated liquidity on Robinhood Chain — best execution via the MoleSwap aggregator</p>
+      <p className="foot-cap">Concentrated liquidity on {chain.name} — best execution via the MoleSwap aggregator</p>
     </main>
   );
 };
@@ -825,7 +991,9 @@ const RemoveLiquidityModal = ({ pos, ep, t0, t1, fees0, fees1, onConfirm, onCanc
   pos: LiquidityPosition; ep?: EnrichedPosition; t0: TokenInfo; t1: TokenInfo;
   fees0: number; fees1: number; onConfirm: () => void; onCancel: () => void; removing: boolean;
 }) => {
-  const feeTier = `${(pos.fee / 10000).toFixed(2)}%`;
+  // DYNAMIC, not "838.86%": every MoleSwap v4 pool carries the dynamic-fee sentinel in its key, and
+  // dividing a flag by 10 000 prints a fee no pool ever charged. Same helper the rest of the page uses.
+  const feeTier = feeLabel(pos.fee);
   const isFullRange = pos.tickLower <= -887200 && pos.tickUpper >= 887200;
 
   if (typeof document === "undefined") return null;
@@ -849,11 +1017,11 @@ const RemoveLiquidityModal = ({ pos, ep, t0, t1, fees0, fees1, onConfirm, onCanc
           <div className="p-rows">
             <div className="p-row">
               <span className="k" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><TokenIcon token={t0} size={16} />{t0.symbol}</span>
-              <span className="v">{ep ? ep.amount0.toFixed(ep.amount0 < 0.01 ? 6 : 4) : "..."}</span>
+              <span className="v">{amtText(ep?.amount0)}</span>
             </div>
             <div className="p-row">
               <span className="k" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}><TokenIcon token={t1} size={16} />{t1.symbol}</span>
-              <span className="v">{ep ? ep.amount1.toFixed(ep.amount1 < 0.01 ? 6 : 4) : "..."}</span>
+              <span className="v">{amtText(ep?.amount1)}</span>
             </div>
           </div>
 
@@ -875,7 +1043,9 @@ const RemoveLiquidityModal = ({ pos, ep, t0, t1, fees0, fees1, onConfirm, onCanc
 
           <div className="m-lbl">Total estimated</div>
           <div className="tot-box">
-            {ep ? `${(ep.amount0 + fees0).toFixed(4)} ${t0.symbol} + ${(ep.amount1 + fees1).toFixed(4)} ${t1.symbol}` : "..."}
+            {ep && Number.isFinite(ep.amount0) && Number.isFinite(ep.amount1)
+              ? `${(ep.amount0 + fees0).toFixed(4)} ${t0.symbol} + ${(ep.amount1 + fees1).toFixed(4)} ${t1.symbol}`
+              : "..."}
           </div>
 
           <div className="warnbox">
@@ -900,7 +1070,9 @@ const CollectFeesModal = ({ pos, t0, t1, fees0, fees1, onConfirm, onCancel, coll
   pos: LiquidityPosition; t0: TokenInfo; t1: TokenInfo;
   fees0: number; fees1: number; onConfirm: () => void; onCancel: () => void; collecting: boolean;
 }) => {
-  const feeTier = `${(pos.fee / 10000).toFixed(2)}%`;
+  // DYNAMIC, not "838.86%": every MoleSwap v4 pool carries the dynamic-fee sentinel in its key, and
+  // dividing a flag by 10 000 prints a fee no pool ever charged. Same helper the rest of the page uses.
+  const feeTier = feeLabel(pos.fee);
   const hasAny = fees0 > 0 || fees1 > 0;
 
   if (typeof document === "undefined") return null;
@@ -956,62 +1128,100 @@ const CollectFeesModal = ({ pos, t0, t1, fees0, fees1, onConfirm, onCancel, coll
 };
 
 // ═══ POSITIONS TAB (REDESIGNED) ═══
-const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient, address, onRefresh, onGoToMarkets }: {
+const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient, address, chainId, chainName, chains, onSwitchChain, switching, onRefresh, onGoToMarkets }: {
   positions: LiquidityPosition[]; loading: boolean; isConnected: boolean; walletCtx: any; chainClient: any; address: string | null;
+  /** The chain these positions were READ from — and the chain their exits are sent to. */
+  chainId: number; chainName: string;
+  /** The chains LP is live on, for the switch prompt below. */
+  chains: { id: number; name: string; shortName: string }[];
+  onSwitchChain: (id: number) => void; switching: boolean;
   onRefresh: () => void; onGoToMarkets: () => void;
 }) => {
   const [removing, setRemoving] = useState<number | null>(null);
   const [collecting, setCollecting] = useState<number | null>(null);
   const [txMsg, setTxMsg] = useState<string | null>(null);
+  /** Set when an exit was refused because the wallet had moved off this list's chain. */
+  const [mismatch, setMismatch] = useState(false);
   const [enriched, setEnriched] = useState<EnrichedPosition[]>([]);
   const [enriching, setEnriching] = useState(false);
   const [removeModal, setRemoveModal] = useState<LiquidityPosition | null>(null);
   const [collectModal, setCollectModal] = useState<LiquidityPosition | null>(null);
 
+  /**
+   * Real token amounts for each position, computed at ITS OWN POOL'S current tick, on ITS OWN CHAIN.
+   *
+   * What this replaces: a `getProvider()` pinned to Robinhood, a pool found by looking the position's
+   * two tokens up in the Robinhood AMM registry, and a tick that stayed 0 whenever that lookup missed —
+   * which, for a v4 ALM position, it always did, because a v4 pool has no address to call slot0() on.
+   * A tick of 0 is not "unknown" to the concentrated-liquidity formulas below, it is a price of 1.0, so
+   * every amount shown was arithmetic performed at a price no pool has ever had.
+   *
+   * Now: the tick comes from the position's own pool — seeded from the pool list, topped up by a single
+   * StateView read per pool on the chain the position lives on. A pool whose tick cannot be established
+   * yields no amounts at all rather than amounts at a fictional price.
+   */
   useEffect(() => {
     if (positions.length === 0) { setEnriched([]); return; }
     let cancelled = false;
     (async () => {
       setEnriching(true);
       try {
-        const provider = getProvider();
+        // One read per POOL, not per position: four Robinhood positions sit in three pools.
+        const ids = Array.from(new Set(positions.map((p) => p.poolId).filter(Boolean))) as string[];
+        const live = new Map<string, number>();
+        await Promise.all(ids.map(async (id) => {
+          const s = await readSlot0(chainId, id);
+          if (s) live.set(id.toLowerCase(), s.tick);
+        }));
+
         const enrichedList: EnrichedPosition[] = [];
         for (const pos of positions) {
           const t0 = pos.token0Info || getTokenByAddress(pos.token0);
           const t1 = pos.token1Info || getTokenByAddress(pos.token1);
-          const poolInfo = pos.poolInfo || findPool(pos.token0, pos.token1);
-          let currentTick = 0;
-          let poolAddress = poolInfo?.address || "";
-          if (poolAddress) {
-            try {
-              const poolContract = new ethers.Contract(poolAddress, POOL_ABI, provider);
-              const slot0 = await poolContract.slot0();
-              currentTick = Number(slot0[1]);
-            } catch {}
-          }
-          const { amount0, amount1 } = getTokenAmounts(
-            BigInt(pos.liquidity), pos.tickLower, pos.tickUpper, currentTick,
-            t0?.decimals || 18, t1?.decimals || 18
-          );
-          enrichedList.push({ ...pos, amount0, amount1, currentTick, feeTier: `${(pos.fee / 10000).toFixed(2)}%`, poolAddress });
+          const tick = pos.poolId
+            ? live.get(pos.poolId.toLowerCase()) ?? pos.poolTick ?? null
+            : pos.poolTick ?? null;
+          const known = tick !== null && t0 !== undefined && t1 !== undefined;
+          const { amount0, amount1 } = known
+            ? getTokenAmounts(BigInt(pos.liquidity), pos.tickLower, pos.tickUpper, tick as number, t0!.decimals, t1!.decimals)
+            : { amount0: NaN, amount1: NaN };
+          enrichedList.push({
+            ...pos,
+            amount0,
+            amount1,
+            currentTick: tick ?? 0,
+            feeTier: feeLabel(pos.fee),
+            // A v4 pool has no address; its identity IS the PoolId, which is what the card shows.
+            poolAddress: pos.poolId || pos.poolInfo?.address || "",
+          });
         }
         if (!cancelled) setEnriched(enrichedList);
       } catch (err) { console.error("Failed to enrich positions:", err); }
       finally { if (!cancelled) setEnriching(false); }
     })();
     return () => { cancelled = true; };
-  }, [positions]);
+  }, [positions, chainId]);
 
   const handleRemove = async (pos: LiquidityPosition) => {
     if (!address || removing) return;
     setRemoving(pos.tokenId);
     setRemoveModal(null);
     setTxMsg("Exiting position...");
+    setMismatch(false);
     try {
       // ALM positions exit via the verified-safe withdrawAll(id) — reads liquidity inside the call.
+      // THE CHAIN GOES WITH THE ID. A position id is only meaningful against one vault, and the two
+      // chains' vaults number their positions independently: id 2 is a live Arc position and also a
+      // burnt Robinhood one. Passing no chain let `vault.ts` fall back to Robinhood, so an Arc exit was
+      // aimed at Robinhood's vault — refused there by the wallet-network check, but refused is not the
+      // same as correct, and the refusal named a chain the user had not chosen to be on.
       const { almWithdraw } = await import("@/lib/mole/vault");
-      const result = await almWithdraw(String(pos.tokenId));
+      const result = await almWithdraw(String(pos.tokenId), pos.chainId ?? chainId);
       setTxMsg(result.success ? "Position exited!" : (result.error || "Failed"));
+      // A refusal that names a network is answerable with a button, not with a sentence. `vault.ts`
+      // refuses (rather than silently switching) when the wallet has moved since this list was read;
+      // this is what turns that refusal into something the user can act on.
+      if (!result.success && /wallet is on|switch network/i.test(result.error || "")) setMismatch(true);
       setTimeout(() => { setTxMsg(null); onRefresh(); }, 3000);
     } catch (err: any) {
       setTxMsg(err?.message?.slice(0, 100) || "Failed");
@@ -1117,12 +1327,35 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
         <div className="statline" style={{ margin: "0 0 6px", color: "#ffcd7d" }}>{txMsg}</div>
       )}
 
+      {/* The switch affordance the refusal never had. `vault.ts` answers a moved wallet with "your
+          wallet is on X, but this position lives on Y" and stops there; a sentence naming a network is
+          only actionable if the page can put the user on it. Same shape and same wording as the vault
+          screen's own prompt, because it is the same refusal. */}
+      {mismatch && (
+        <div className="p-card" data-testid="position-chain-mismatch" style={{ marginBottom: 6 }}>
+          <p className="d" style={{ margin: 0 }}>
+            These positions live on {chainName}. Switch your wallet there to exit them.
+          </p>
+          <div className="p-chipset" style={{ marginTop: 12 }}>
+            {(chains.some((c) => c.id === chainId) ? chains.filter((c) => c.id === chainId) : chains).map((c) => (
+              <button key={c.id} data-testid={`switch-to-${c.id}`} onClick={() => onSwitchChain(c.id)} disabled={switching}>
+                SWITCH TO {c.shortName.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Portfolio Summary */}
       <div className="p-grid p-3">
         <div className="p-card tight">
           <div className="sm-lbl">Total deposited</div>
           <div className="sm-val mono">
-            {enriched.length > 0 ? `${enriched.reduce((s, e) => s + e.amount0, 0).toFixed(4)} / ${enriched.reduce((s, e) => s + e.amount1, 0).toFixed(4)}` : "..."}
+            {/* Positions whose pool tick is unknown carry NaN amounts (see the enrichment above) and are
+                skipped rather than turning the whole total into "NaN". */}
+            {enriched.length > 0
+              ? `${sumFinite(enriched.map((e) => e.amount0)).toFixed(4)} / ${sumFinite(enriched.map((e) => e.amount1)).toFixed(4)}`
+              : "..."}
           </div>
         </div>
         <div className="p-card tight">
@@ -1167,11 +1400,13 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
                 <div>
                   <div className="nm">{poolName}</div>
                   <div className="tag">
-                    <Badge chain="Robinhood Chain" />
-                    {t0 && t0.sourceChain !== "Robinhood Chain" && (
+                    {/* The chain this position was READ from, not the chain the app used to assume. It
+                        is the same chain its exit will be sent to, which is why it is stated here. */}
+                    <Badge chain={chainName} />
+                    {t0 && t0.sourceChain && t0.sourceChain !== chainName && (
                       <span className="badge2">bridged from {t0.sourceChain}</span>
                     )}
-                    <span className="fee">{ep?.feeTier || `${(pos.fee / 10000).toFixed(2)}%`}</span>
+                    <span className="fee">{ep?.feeTier || feeLabel(pos.fee)}</span>
                     <span className="badge2">NFT #{pos.tokenId}</span>
                   </div>
                 </div>
@@ -1191,8 +1426,10 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
                       <span className="k" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
                         <TokenIcon token={item.tok} size={16} />{item.tok.symbol} deposited
                       </span>
+                      {/* "—" where the pool's tick could not be established: an amount computed at a
+                          price no pool has had is worse than no amount. "..." still means "not read yet". */}
                       <span className="v">
-                        {item.amt !== undefined ? item.amt.toFixed(item.amt < 0.01 ? 6 : 4) : "..."}
+                        {item.amt === undefined ? "..." : Number.isFinite(item.amt) ? item.amt.toFixed(item.amt < 0.01 ? 6 : 4) : "—"}
                       </span>
                     </div>
                   ))}
@@ -1283,8 +1520,10 @@ const PositionsTab = ({ positions, loading, isConnected, walletCtx, chainClient,
 };
 
 // ═══ POOL DETAIL (REDESIGNED) ═══
-const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient }: {
+const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient, chainId, chainName, explorerUrl }: {
   pool: PoolDisplay; onBack: () => void; address: string | null; isConnected: boolean; walletCtx: any; chainClient: any;
+  /** The chain this pool lives on — every balance, tick and explorer link below is read from it. */
+  chainId: number; chainName: string; explorerUrl: string | null;
 }) => {
   const router = useRouter();
   const [actionTab, setActionTab] = useState<"add" | "remove" | null>(null);
@@ -1313,7 +1552,11 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
     if (!address) return;
     const fetchBalances = async () => {
       try {
-        const provider = getProvider();
+        // The chain the POOL is on, not Robinhood. `getProvider()` here read Robinhood balances for
+        // Arc token addresses — which returns 0 for a token that does not exist there, i.e. it told a
+        // funded user they held nothing.
+        const provider = poolsProvider(chainId);
+        if (!provider) { setBalance0(null); setBalance1(null); return; }
         const isNative0 = pool.token0.address === ethers.ZeroAddress || pool.token0.address === "0x0000000000000000000000000000000000000000";
         const isNative1 = pool.token1.address === ethers.ZeroAddress || pool.token1.address === "0x0000000000000000000000000000000000000000";
         const [b0, b1] = await Promise.all([
@@ -1325,7 +1568,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
       } catch (err) { console.error("Failed to fetch balances:", err); }
     };
     fetchBalances();
-  }, [address, pool]);
+  }, [address, pool, chainId]);
 
   // Refresh tick AND price straight from the pool's slot0. The list already carries both (they come from
   // the same StateView read the API does), so this is a top-up, not the only source — a failed read
@@ -1335,14 +1578,14 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
     setCurrentTick(pool.tick || 0);
     setLivePrice(null);
     (async () => {
-      const s = await readPoolSlot0(pool.pool.address);
+      const s = await readSlot0(chainId, pool.pool.address);
       if (!s || cancelled) return;
       setCurrentTick(s.tick);
       const px = sqrtPriceToPrice(s.sqrtPriceX96, pool.token0.decimals, pool.token1.decimals);
       if (px > 0) setLivePrice(px);
     })();
     return () => { cancelled = true; };
-  }, [pool]);
+  }, [pool, chainId]);
 
   // One price for the whole detail view: the live slot0 read when it lands, else the list's value.
   const price = livePrice ?? pool.price;
@@ -1368,13 +1611,29 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   const canSubmit = amount0 && amount1 && Number(amount0) > 0 && Number(amount1) > 0 && !hasInsufficientBalance && !loading;
 
   // ── One-sided deposit derivations ────────────────────────────────────────────────────────────
-  // Only the live WETH/USDG v4 pool is whitelisted by MolePositions, so one-sided opens are gated
-  // to it — offering the toggle on a pool where open() would revert wastes the user's gas.
-  const isLivePool =
-    pool.token0.address.toLowerCase() === LIVE_POOL_KEY.currency0.toLowerCase() &&
-    pool.token1.address.toLowerCase() === LIVE_POOL_KEY.currency1.toLowerCase();
-  // {mid, observedAt, ageSec, stale} for the live pool's hook oracle — only that pool has one.
-  const { oracle } = useOracleHealth({ enabled: isLivePool });
+  /**
+   * Is this the pool THIS CHAIN's ALM vault manages? Matched by PoolId — the pool's real identity —
+   * against `vaultChainFor(chainId)`, rather than against Robinhood's WETH/USDG token addresses, which
+   * is what the comparison here used to be. Only the vault's own pool is whitelisted by MolePositions,
+   * so anything gated on this is gated on where `open()` can actually succeed.
+   */
+  const vaultPool = useMemo(() => vaultPoolFor(chainId), [chainId]);
+  const isVaultPool =
+    vaultPool !== null && pool.pool.address.toLowerCase() === vaultPool.poolId.toLowerCase();
+  /**
+   * WHETHER THE ONE-TOKEN ADD MAY BE OFFERED, which is a narrower question than `isVaultPool`.
+   *
+   * `addLiquidityOneSided` in lib/chain/amm.ts is pinned to Robinhood in every line that matters: it
+   * calls `wallet_switchEthereumChain` to 4663 before signing, builds its client on `robinhoodChain`,
+   * and takes its currencies from `LIVE_POOL_KEY`. Offering the button on Arc's vault pool would move
+   * the user's wallet to Robinhood and open a ROBINHOOD position with money they meant to put on Arc.
+   * So it is offered only where the signer can honour it; the vault CTA beside it IS chain-aware and
+   * is the path Arc deposits take.
+   */
+  const oneSidedAvailable = isVaultPool && chainId === RH_CHAIN_ID;
+  // {mid, observedAt, ageSec, stale} for THIS chain's hook oracle — only the vault's pool has one, and
+  // the hook that keeps it is a different contract on each chain.
+  const { oracle } = useOracleHealth({ poolId: vaultPool?.poolId, chainId, enabled: isVaultPool });
   const oneSidedSide: OneSidedSide = oneSide === 0 ? "token0" : "token1";
   const oneSidedPreset: OneSidedPreset =
     oneSidedPresetKey === "custom"
@@ -1383,7 +1642,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   // Preview only — the signing path (addLiquidityOneSided) recomputes from a fresh tick and
   // re-asserts the range is strictly one-sided immediately before sending.
   const oneSidedRange = useMemo(() => {
-    if (depositMode !== "one" || !isLivePool) return null;
+    if (depositMode !== "one" || !oneSidedAvailable) return null;
     try {
       return computeOneSidedRange({
         side: oneSidedSide,
@@ -1396,7 +1655,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
     }
     // oneSidedPreset is rebuilt each render; its inputs are the real deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depositMode, isLivePool, oneSidedSide, currentTick, oneSidedPresetKey, customWidth]);
+  }, [depositMode, oneSidedAvailable, oneSidedSide, currentTick, oneSidedPresetKey, customWidth]);
   const off0 = depositMode === "one" && oneSide !== 0; // token0 input greyed out
   const off1 = depositMode === "one" && oneSide !== 1; // token1 input greyed out
   const oneAmt = oneSide === 0 ? amount0 : amount1;
@@ -1404,7 +1663,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   const otherTok = oneSide === 0 ? pool.token1 : pool.token0;
   const oneInsufficient = oneSide === 0 ? insufficientBalance0 : insufficientBalance1;
   const canSubmitOneSided =
-    depositMode === "one" && isLivePool && !!oneAmt && Number(oneAmt) > 0 &&
+    depositMode === "one" && oneSidedAvailable && !!oneAmt && Number(oneAmt) > 0 &&
     !oneInsufficient && !loading && !!oneSidedRange;
 
   const handleAddLiquidityOneSided = async () => {
@@ -1454,7 +1713,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
   // Zero-balance CTA targets: swap from the OTHER pool token into the missing one.
   const getMissingTokenSwapUrl = (missing: TokenInfo) => {
     const other = missing.address.toLowerCase() === pool.token0.address.toLowerCase() ? pool.token1 : pool.token0;
-    return getSwapUrl(other.address, missing.address);
+    return getSwapUrl(other.address, missing.address, chainId);
   };
   // Which pool token should the primary CTA try to acquire? The first one the
   // user is short of (entered amount > balance, or balance is 0).
@@ -1503,8 +1762,8 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
         <h2>
           {getPoolDisplayInfo(pool.token0).symbol}/{getPoolDisplayInfo(pool.token1).symbol}
         </h2>
-        <Badge chain="Robinhood Chain" />
-        {pool.token0.sourceChain !== "Robinhood Chain" && (
+        <Badge chain={chainName} />
+        {pool.token0.sourceChain && pool.token0.sourceChain !== chainName && (
           <span className="badge2">bridged from {pool.token0.sourceChain}</span>
         )}
         <span className="badge2">Fee {feeLabel(pool.fee)}</span>
@@ -1518,6 +1777,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
       {engineActionsAllowed(pool.serviceTag) && pool.hooks && pool.tickSpacing !== null && (
         <div style={{ marginBottom: 14 }}>
           <ProvenanceCard
+            chainId={chainId}
             poolKey={{
               currency0: pool.token0.address as `0x${string}`,
               currency1: pool.token1.address as `0x${string}`,
@@ -1556,7 +1816,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
               <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
                 <TokenIcon token={item.tok} size={24} />
                 <b style={{ fontSize: 14.5 }}>{poolDisp.symbol}</b>
-                <Badge chain="Robinhood Chain" />
+                <Badge chain={chainName} />
               </div>
               <div className="sm-lbl" style={{ marginTop: 14 }}>Pooled amount</div>
               <div className="sm-val mono">{item.reserve}</div>
@@ -1597,8 +1857,11 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
             ) : txDone ? (
               <div className="center" style={{ padding: "8px 0" }}>
                 <p className="statline ok" style={{ marginTop: 0 }}>Liquidity added ✓</p>
-                {txHash && (
-                  <a href={`https://robinhoodchain.blockscout.com/tx/${txHash}`} target="_blank" rel="noopener noreferrer" className="linkish" style={{ display: "block", marginTop: 6 }}>
+                {/* This chain's explorer, from the chain registry. The hard-coded Blockscout URL that
+                    used to be here sent an Arc user to a Robinhood explorer, where their transaction
+                    hash simply does not exist. */}
+                {txHash && explorerUrl && (
+                  <a href={`${explorerUrl}/tx/${txHash}`} target="_blank" rel="noopener noreferrer" className="linkish" style={{ display: "block", marginTop: 6 }}>
                     View on explorer →
                   </a>
                 )}
@@ -1635,7 +1898,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                 {/* Direct one-token deposit (MolePositions.open with a beyond-spot range) — the
                     single-sided OPTION this feature adds. Only offered on the live whitelisted
                     pool; everything else stays vault-managed exactly as before. */}
-                {isLivePool && (
+                {oneSidedAvailable && (
                   <div className="act-row" style={{ marginTop: 8 }}>
                     <button
                       className="act-btn add"
@@ -1646,9 +1909,14 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                     </button>
                   </div>
                 )}
+                {/* Names the pool the vault ACTUALLY manages on this chain, from the resolved config,
+                    rather than Robinhood's pair — on Arc the sentence said WETH/USDG about a pool that
+                    holds neither token. */}
                 {engineActionsAllowed(pool.serviceTag) && (
                   <p className="d" style={{ marginTop: 12 }}>
-                    WETH/USDG liquidity is auto-managed by the MoleSwap ALM vault — deposit or exit there.
+                    {isVaultPool
+                      ? `${pool.token0.symbol}/${pool.token1.symbol} liquidity is auto-managed by the MoleSwap ALM vault on ${chainName} — deposit or exit there.`
+                      : `The MoleSwap ALM vault on ${chainName} runs ${vaultPool?.label ?? "no pool"} — this pool is MoleHook-served, and the vault is where MoleSwap-managed liquidity lives.`}
                   </p>
                 )}
               </>
@@ -1665,7 +1933,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                   {/* Deposit mode — Both tokens (default, unchanged) / One token (range beyond spot).
                       Same pattern as create-pool. One-sided is only offered on the whitelisted
                       WETH/USDG v4 pool, the only pool MolePositions.open accepts. */}
-                  {isLivePool && (
+                  {oneSidedAvailable && (
                     <div className="relative mb-2 rounded px-3 py-2.5">
                       <div className="mb-2 flex items-center justify-between">
                         <span className="font-display text-lg text-gray-200">DEPOSIT MODE</span>
@@ -1848,7 +2116,7 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
                     ))}
                     {/* The hook's TWAP mid with its observation age — the number the vault re-centres on
                         and the queue crosses at. Stale = the last tick, extended, not an average. */}
-                    {isLivePool && (
+                    {isVaultPool && (
                       <div className="flex items-center justify-between py-0.5">
                         <span className="font-display text-base text-gray-200">ORACLE</span>
                         <span className={`font-display flex items-center gap-2 text-base ${oracle?.stale ? "text-red-400" : "text-[#5b9bd5]"}`}>

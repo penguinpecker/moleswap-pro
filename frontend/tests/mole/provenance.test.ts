@@ -13,6 +13,7 @@ import {
   ERC1967_IMPLEMENTATION_SLOT,
   upgradeability,
   provenanceRows,
+  addressesFor,
   type PoolProvenance,
 } from "../../lib/mole/provenance";
 import { hookBitmapProof } from "../../lib/mole/hookBitmap";
@@ -187,9 +188,32 @@ describe("ATTACK — disagreements and unread values are shown, never smoothed o
   });
 
   it("a queue bound to another pool says so", () => {
-    const p = live({ queue: { ...live().queue, boundToThisPool: false } });
+    const p = live({ queue: { ...live().queue!, boundToThisPool: false } });
     expect(row(p, "queue").ok).toBe(false);
     expect(row(p, "queue").note).toMatch(/another pool/);
+  });
+
+  it("resolves each chain's OWN contracts and never falls back across chains", () => {
+    const rh = addressesFor(4663);
+    const arc = addressesFor(5042);
+    // vault and router exist on both chains and must DIFFER — one shared address here means a screen
+    // is reading the other chain's deployment
+    expect(rh.molePositions.toLowerCase()).not.toBe(arc.molePositions.toLowerCase());
+    expect(rh.moleRouter.toLowerCase()).not.toBe(arc.moleRouter.toLowerCase());
+    // Robinhood has a queue; Arc has none, and that must surface as undefined rather than as
+    // Robinhood's address or a placeholder
+    expect(rh.moleQueue).toBeTruthy();
+    expect(arc.moleQueue).toBeUndefined();
+  });
+
+  it("a chain with no queue deployed says ABSENT rather than borrowing another chain's address", () => {
+    // Arc has no batch queue. The row must survive, name no address, and never inherit Robinhood's.
+    const p = live({ queue: null });
+    const r = row(p, "queue");
+    expect(r.mutability).toBe("ABSENT");
+    expect(r.note).toMatch(/no batch queue deployed on this chain/);
+    expect(r.value).toBe("—");
+    expect(r.ok).toBeUndefined();
   });
 
   it("a hostile hook's bitmap row shows ✗ on the proof line", () => {

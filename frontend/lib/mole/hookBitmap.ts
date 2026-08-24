@@ -21,6 +21,10 @@
  * Pure, dependency-free, server- and client-safe.
  */
 import { MOLE_ADDRESSES } from "./chain";
+// The per-chain address book. MoleHook is a DIFFERENT address on each chain — its low 14 bits are mined,
+// so the same contract cannot sit at the same address twice — and identity here has to be per chain or
+// our own Arc pool reads as somebody else's. See below.
+import { SUPPORTED_CHAINS, contractsFor } from "@/lib/chain/chains";
 
 /** All 14 permission bits. */
 export const HOOK_PERMISSION_MASK = 0x3fff;
@@ -134,15 +138,50 @@ export function hookBitmapProof(hook: string): HookBitmapProof {
 
 /* ---------------------------------------------------------------- identity + service tag */
 
-const MOLE_HOOK_LC = MOLE_ADDRESSES.moleHook.toLowerCase();
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 /**
- * True only if `hooks` IS the pinned MoleHook address (case-insensitive). This is the identity check —
- * the bitmap alone never is. Undefined / malformed / zero → false, never "probably ours".
+ * Every MoleHook we have deployed, lower-cased, from the one multi-chain registry.
+ *
+ * WHY THIS IS A SET AND NOT A CONSTANT. It used to be `MOLE_ADDRESSES.moleHook` alone, which is
+ * Robinhood's. MoleHook is live on Arc too at 0xfFDCBf2f… — a different address by necessity, since the
+ * low 14 bits are mined into it and one address cannot be CREATE2'd twice — so on Arc our own pool
+ * failed this identity check. It was labelled "Foreign hook" in the pool list, it lost its Provide
+ * action, and the aggregator called a MoleSwap route "Uniswap v4". Not one of those is a formatting
+ * problem: the page told a user that MoleSwap does not serve MoleSwap's own live pool.
+ *
+ * THE ZERO ADDRESS IS FILTERED OUT, and that is load-bearing rather than tidy: a chain with no hook
+ * deployed carries 0x000…0 in the registry, and a hookless v4 pool also carries 0x000…0 in its key. If
+ * the zero address ever entered this set, every hookless pool on that chain would be tagged as ours and
+ * offered the vault.
  */
-export function isMoleHookServed(hooks: string | null | undefined): boolean {
+const MOLE_HOOKS_LC: ReadonlySet<string> = new Set(
+  [MOLE_ADDRESSES.moleHook, ...SUPPORTED_CHAINS.map((c) => contractsFor(c.id).MOLE_HOOK)]
+    .map((a) => String(a).toLowerCase())
+    .filter((a) => ADDRESS_RE.test(a) && a !== ZERO_ADDRESS),
+);
+
+/** The MoleHook on ONE chain, lower-cased, or null where none is deployed there. */
+function moleHookOn(chainId: number): string | null {
+  const a = String(contractsFor(chainId).MOLE_HOOK).toLowerCase();
+  return ADDRESS_RE.test(a) && a !== ZERO_ADDRESS ? a : null;
+}
+
+/**
+ * True only if `hooks` IS a MoleHook address (case-insensitive). This is the identity check — the
+ * bitmap alone never is. Undefined / malformed / zero → false, never "probably ours".
+ *
+ * Pass `chainId` where the chain is known, and it is checked against THAT chain's MoleHook alone: a pool
+ * on Arc carrying Robinhood's hook address is not ours, whatever the address book says elsewhere.
+ * Without a chain the check is "any MoleHook we have deployed", which is what a caller looking at a
+ * cross-chain route list has to mean.
+ */
+export function isMoleHookServed(hooks: string | null | undefined, chainId?: number): boolean {
   if (typeof hooks !== "string" || !ADDRESS_RE.test(hooks)) return false;
-  return hooks.toLowerCase() === MOLE_HOOK_LC;
+  const lc = hooks.toLowerCase();
+  if (lc === ZERO_ADDRESS) return false;
+  if (chainId !== undefined) return lc === moleHookOn(chainId);
+  return MOLE_HOOKS_LC.has(lc);
 }
 
 /**
@@ -170,9 +209,9 @@ const V4_VENUES = new Set(["mole_v4", "uniswap_v4", "UniswapV4"]);
  * filed under `mole_v4` with someone else's hook is foreign; a row filed under `uniswap_v4` that carries
  * MoleHook is ours. Only the address decides.
  */
-export function poolServiceTag(p: TaggablePool): PoolServiceTag {
+export function poolServiceTag(p: TaggablePool, chainId?: number): PoolServiceTag {
   const hooks = p.hooks ?? p.poolKey?.hooks ?? null;
-  if (isMoleHookServed(hooks)) return "molehook";
+  if (isMoleHookServed(hooks, chainId)) return "molehook";
   if (V4_VENUES.has(p.venue ?? "") || p.poolKey != null || (typeof hooks === "string" && ADDRESS_RE.test(hooks))) {
     return "foreign-v4";
   }
@@ -185,8 +224,8 @@ export function engineActionsAllowed(tag: PoolServiceTag): boolean {
 }
 
 /** Route-row venue label for a v4 hop. Only a MoleHook pool may be called MoleSwap's. */
-export function v4VenueLabel(hooks: string | null | undefined): "MoleSwap v4" | "Uniswap v4" {
-  return isMoleHookServed(hooks) ? "MoleSwap v4" : "Uniswap v4";
+export function v4VenueLabel(hooks: string | null | undefined, chainId?: number): "MoleSwap v4" | "Uniswap v4" {
+  return isMoleHookServed(hooks, chainId) ? "MoleSwap v4" : "Uniswap v4";
 }
 
 /** Badge text per tag — minimal, and honest about what a foreign pool is. */

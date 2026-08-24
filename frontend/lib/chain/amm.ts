@@ -1,8 +1,23 @@
 /**
- * MoleSwap swap engine — Robinhood Chain (4663).
+ * MoleSwap swap engine — Robinhood Chain (4663) and Arc (5042).
  *
  * Quotes come from the MoleSwap off-chain router (exact against the chain to the wei), and execution
  * goes through MoleRouter — the immutable on-chain aggregator executor — via the connected wallet.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ *  WHAT THIS FILE USED TO DO, AND WHY IT WAS A LIE.
+ *  Every read here built `new ethers.JsonRpcProvider(RH_RPC_URL, RH_CHAIN_ID)` and every write called
+ *  `wallet_switchEthereumChain` to drag the wallet back to 4663. So a user who picked Arc in the
+ *  chrome's switcher got Robinhood balances, Robinhood prices, and — the moment they pressed a
+ *  button — a silent network switch back to Robinhood. The app ADVERTISED Arc and then made it
+ *  unreachable without ever saying so. This is the same defect that was already fixed in the vault
+ *  (lib/mole/vaultChain.ts); the fix simply never reached this file.
+ *
+ *  SO: the provider, the viem chain, the public client and the ROUTER ADDRESS all come from
+ *  `contractsFor(chainId)` / `chainMetaFor(chainId)`, and NOTHING here switches the user's network.
+ *  A wallet on the wrong chain gets a refusal that names the chain to move to; the switch itself is
+ *  the caller's to offer and the user's to accept.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  *
  * Design contract for the UI:
  *   - getSwapQuote()        → { amountIn, amountOut, tokenIn, tokenOut, fee, pool, priceImpact, gas }
@@ -37,7 +52,19 @@ import {
   type TokenInfo,
   type PoolInfo,
 } from "./contracts";
-import { robinhoodChain } from "./wagmi-config";
+import { robinhoodChain, arcChain } from "./wagmi-config";
+// The one multi-chain registry. Addresses are NEVER restated in this file — a corrected address there
+// must not be able to leave a stale twin here.
+import {
+  ARC_CHAIN,
+  RH_CHAIN,
+  chainMetaFor,
+  chainsWith,
+  contractsFor,
+  isAvailable,
+  isSupportedChain,
+  type ChainMeta,
+} from "./chains";
 import { moleRouterAbi, erc20Abi, NATIVE_SENTINEL, type EncodedPlan } from "@/lib/aggregator/router";
 import { quoteSwap } from "@/lib/aggregator/client";
 import type { PoolRow } from "@/lib/aggregator/client";
@@ -94,6 +121,7 @@ export {
 /** The tolerance used when the user has not chosen one (Max Slippage = AUTO). */
 export { DEFAULT_SLIPPAGE_BPS };
 
+/** Robinhood's router, kept for the callers that predate multi-chain. Chain-aware code uses `routerFor`. */
 export const AMM_ROUTER = CONTRACTS.MOLE_ROUTER;
 export const AMM_FACTORY = CONTRACTS.FACTORY;
 export type RhToken = TokenInfo;
@@ -102,7 +130,29 @@ export const RH_TOKENS = TOKENS;
 
 const ZERO = "0x0000000000000000000000000000000000000000";
 const WETH = CONTRACTS.WETH;
-const RH_CHAIN_HEX = "0x1237"; // 4663
+
+/* ─── which chain (everything below resolves from here, nothing is pinned) ─────────── */
+
+/**
+ * The chain a call acts on when the caller did not name one.
+ *
+ * Robinhood, and it must stay Robinhood: every existing call site — `screens/pools`, `SwapPage`, the
+ * one-sided add-liquidity path — passes no chain and means 4663. Changing this default would
+ * re-point them silently, which is exactly the class of bug this file is being fixed for.
+ */
+const DEFAULT_CHAIN_ID = RH_CHAIN.id;
+
+const metaFor = (chainId?: number): ChainMeta => chainMetaFor(chainId ?? DEFAULT_CHAIN_ID) ?? RH_CHAIN;
+
+/** The viem `Chain` for a chain id. Both come from wagmi-config, which builds them from `chains.ts`. */
+export function viemChainFor(chainId?: number) {
+  return (chainId ?? DEFAULT_CHAIN_ID) === ARC_CHAIN.id ? arcChain : robinhoodChain;
+}
+
+/** MoleRouter on `chainId` — the approval target AND the swap executor. Never assume Robinhood's. */
+export function routerFor(chainId?: number): `0x${string}` {
+  return contractsFor(chainId ?? DEFAULT_CHAIN_ID).MOLE_ROUTER as `0x${string}`;
+}
 
 /**
  * The slippage tolerance to quote and sign with, in bps.
@@ -177,8 +227,173 @@ export function getContractErrorMessage(err: any, ctx?: DecodeContext): string {
   return decodeSwapFailure(err, ctx).message;
 }
 
-export function getProvider(): ethers.JsonRpcProvider {
-  return new ethers.JsonRpcProvider(RH_RPC_URL, RH_CHAIN_ID);
+/**
+ * An ethers provider for `chainId`. Omitting the argument still means Robinhood, so every existing
+ * caller (`screens/pools`, the pool readers below) keeps its behaviour byte-for-byte.
+ */
+export function getProvider(chainId?: number): ethers.JsonRpcProvider {
+  const meta = metaFor(chainId);
+  return new ethers.JsonRpcProvider(meta.rpcUrl, meta.id);
+}
+
+/* ─── what this engine can and cannot do on a given chain ──────────────────────────── */
+
+/**
+ * Whether the OFF-CHAIN quoting engine can price `chainId`, and why not when it cannot.
+ *
+ * THIS IS NOT THE SAME QUESTION AS `isAvailable("swap", chainId)`. MoleRouter is live on Arc and has
+ * moved real money there, so swapping on Arc is a real product. What is Robinhood-only is the pricing
+ * engine underneath `lib/aggregator/`:
+ *
+ *   - `serverPools.ts` queries `mp_pools` WITHOUT filtering on chain_id — and the column exists but
+ *     the indexer stamps every row 4663, so there are no Arc rows to find. Worse, `poolPairTokens`
+ *     injects Robinhood's WETH and USDG into the token set of every query, so an Arc pair comes back
+ *     holding Robinhood's pools.
+ *   - `discover.ts` probes six V3 factory addresses that exist on Robinhood, through a client pinned
+ *     to `robinhoodChain`, and hubs every route through Robinhood's WETH and USDG.
+ *   - `client.ts` unconditionally adds Robinhood's live MoleHook pool as the bridge edge, by its
+ *     Robinhood pool id.
+ *   - `transport.ts` and `venues/v4Reader.ts` default to Robinhood's RPC.
+ *
+ * A v4 pool has no address, so it is reachable ONLY through a registry row — which means Arc's v4
+ * pool cannot be quoted until the indexer writes Arc rows. Arc's v3-style venue COULD be discovered
+ * (factory 0xf0db7b58… does answer `getPool`; the USDC/Architects 1% pool at 0x0069cb6F… was read
+ * live on 2026-08-24 with 1.74e18 liquidity), but only once discovery is given Arc's factory set AND
+ * MoleRouter's ability to execute that fork's swap callback on Arc has been proven.
+ *
+ * Point that at Arc addresses and it does not fail — it prices them against ROBINHOOD liquidity and
+ * returns a confident, wrong number. A wrong quote is worse than no quote: a user can act on it. So
+ * the swap surface refuses OUT LOUD here, in the same words `lib/api/chain-scope.ts` already refuses
+ * `/api/v1/quote` with, and this function starts returning null the day the registry carries chain
+ * ids and discovery learns Arc's factories.
+ */
+export function quotingUnavailableOn(chainId?: number): string | null {
+  const meta = metaFor(chainId);
+  if (meta.id === RH_CHAIN.id) return null;
+  return (
+    `Live quotes are not served on ${meta.name} yet. MoleRouter IS live there ` +
+    `(${contractsFor(meta.id).MOLE_ROUTER}) and the vault's LP pools work, but MoleSwap's pricing ` +
+    `engine reads a pool registry that only indexes ${RH_CHAIN.name} and discovers venues through ` +
+    `${RH_CHAIN.name} factories — it would price ${meta.name} tokens against ${RH_CHAIN.name} ` +
+    `liquidity and show a confident, wrong number. Showing nothing is the safe answer until the ` +
+    `registry carries chain ids.`
+  );
+}
+
+/**
+ * Why this chain has no native/wrap path, or null when it has one.
+ *
+ * Arc has no WETH: MoleRouter's `weth` slot there is pinned to the USDC ERC-20 (read back live on
+ * chain 5042 — `weth()` returns 0x3600…0000, not a wrapper) precisely so every native-ETH code path
+ * fails closed instead of half-working, and a transfer to the zero address reverts on Arc anyway.
+ * The sentence is returned rather than a boolean because the UI must SAY this, not just hide a button.
+ */
+export function nativePathUnavailableOn(chainId?: number): string | null {
+  const meta = metaFor(chainId);
+  const weth = contractsFor(meta.id).WETH;
+  if (weth && weth !== ZERO) return null;
+  return (
+    `${meta.name} has no wrapped-native token, so there is nothing to wrap: MoleRouter's WETH slot is ` +
+    `pinned to the gas token's ERC-20 there so native paths fail closed rather than half-work. Swap ` +
+    `the ERC-20 directly — on ${meta.name} the balance you pay gas with IS the balance you swap.`
+  );
+}
+
+/** A wallet-chain verdict: usable as-is, or a refusal that names where to go. Never a silent switch. */
+export type ChainVerdict =
+  | { ok: true; chainId: number }
+  | {
+      ok: false;
+      /** One sentence for the user. Always names the chain(s) that DO work. */
+      reason: string;
+      /** The chain to offer a switch to. The CALLER offers it; this module never performs it. */
+      offer: { chainId: number; name: string } | null;
+    };
+
+/**
+ * Judge the chain the wallet is sitting on, without touching it.
+ *
+ * `wallet_switchEthereumChain` used to be called from three places in this file, unprompted, the
+ * instant a user pressed a button. That is why picking Arc "changed nothing": the app moved them
+ * back. Deciding a user's network for them is not a convenience when the app has two live
+ * deployments — it is the app overruling an explicit choice — so this only ever REPORTS.
+ */
+export function swapChainStatus(walletChainId: number | undefined, wanted?: number): ChainVerdict {
+  const want = wanted ?? walletChainId ?? DEFAULT_CHAIN_ID;
+  const live = chainsWith("swap");
+  const fallback = live[0] ?? RH_CHAIN;
+
+  if (!isSupportedChain(walletChainId)) {
+    return {
+      ok: false,
+      reason:
+        `Your wallet is on a network MoleSwap has no deployment on (chain ${walletChainId ?? "unknown"}). ` +
+        `Swapping runs on ${live.map((c) => c.name).join(" and ")}.`,
+      offer: { chainId: fallback.id, name: fallback.name },
+    };
+  }
+  if (!isAvailable("swap", want)) {
+    const meta = metaFor(want);
+    return {
+      ok: false,
+      reason:
+        `Swapping is not live on ${meta.name} yet. It runs on ` +
+        `${live.map((c) => c.name).join(" and ")}.`,
+      offer: { chainId: fallback.id, name: fallback.name },
+    };
+  }
+  if (walletChainId !== want) {
+    const meta = metaFor(want);
+    return {
+      ok: false,
+      reason: `Your wallet is on ${metaFor(walletChainId).name}, but this swap is built for ${meta.name}.`,
+      offer: { chainId: meta.id, name: meta.name },
+    };
+  }
+  return { ok: true, chainId: want };
+}
+
+/* ─── balances, on the chain the user is actually on ───────────────────────────────── */
+
+/**
+ * One token balance, read from `chainId`'s OWN RPC.
+ *
+ * `lib/wallet/walletClient.ts` — what the swap card used before — builds every public client on
+ * Robinhood's RPC regardless of the chainId it is handed, so a balance "on Arc" was a Robinhood
+ * balance wearing an Arc label. That is the ETH balance visible under the Arc switcher in the bug
+ * report.
+ *
+ * `token` may be the zero address / the native sentinel, which reads the chain's NATIVE balance —
+ * and on Arc that is the SAME money as the 6-decimal ERC-20 at 0x3600…0000 reported with 18
+ * decimals. Pass the token's own decimals; never assume 18, and never add the two views together.
+ */
+export async function readTokenBalance(params: {
+  chainId?: number;
+  owner: string;
+  token: string;
+  decimals?: number;
+}): Promise<string | null> {
+  try {
+    const t = (params.token || "").toLowerCase();
+    const isNative =
+      !t || t === ZERO || t === NATIVE_SENTINEL.toLowerCase() || t === "native" || t === "eth";
+    const pub = publicClient(params.chainId);
+    const raw = isNative
+      ? await pub.getBalance({ address: params.owner as `0x${string}` })
+      : ((await pub.readContract({
+          address: params.token as `0x${string}`,
+          abi: erc20Abi as any,
+          functionName: "balanceOf",
+          args: [params.owner as `0x${string}`],
+        })) as bigint);
+    return ethers.formatUnits(raw, params.decimals ?? 18);
+  } catch (err) {
+    console.error(
+      `[MoleSwap] balance read failed for ${params.token} on chain ${params.chainId ?? DEFAULT_CHAIN_ID}:`,
+      err instanceof Error ? `${err.name}: ${err.message}` : err,
+    );
+    return null;
+  }
 }
 
 /* ─── Pool registry loader (indexer → Supabase) ────────────────────────── */
@@ -297,7 +512,17 @@ export async function getSwapQuote(params: {
   fee?: number;
   /** Tolerated shortfall in bps. Omitted → the user's persisted Max Slippage (AUTO → 50 bps). */
   slippageBps?: number;
+  /** The chain to price on. Omitted → Robinhood, which is what every existing caller means. */
+  chainId?: number;
 }): Promise<SwapQuote | null> {
+  // A chain the pricing engine cannot see must never be priced — it would answer with the OTHER
+  // chain's liquidity. This is thrown from OUTSIDE the catch below on purpose: that catch turns
+  // everything into `null`, and `null` is this function's word for "no route", which is a statement
+  // about the market. "We cannot price this chain" is a statement about us, and the two must not
+  // share a return value (learnings.txt 2026-08-14 #2).
+  const unquotable = quotingUnavailableOn(params.chainId);
+  if (unquotable) throw new Error(unquotable);
+
   try {
     const amountIn = BigInt(params.amountIn || "0");
     if (amountIn <= 0n) return null;
@@ -357,6 +582,7 @@ export async function estimateSwapDetails(params: {
   tokenOut: string;
   amountIn: string;
   recipient: string;
+  chainId?: number;
 }): Promise<{ etaSeconds: number; totalGas: number; txCount: number; breakdown: string[] } | null> {
   try {
     const amountIn = BigInt(params.amountIn || "0");
@@ -369,9 +595,9 @@ export async function estimateSwapDetails(params: {
     if (!isNativeIn && params.recipient) {
       let needsApproval = true;
       try {
-        const provider = getProvider();
+        const provider = getProvider(params.chainId);
         const token = new ethers.Contract(params.tokenIn, ERC20_ABI as any, provider);
-        const allowance: bigint = await token.allowance(params.recipient, CONTRACTS.MOLE_ROUTER);
+        const allowance: bigint = await token.allowance(params.recipient, routerFor(params.chainId));
         needsApproval = allowance < amountIn;
       } catch { needsApproval = true; }
       if (needsApproval) steps.push({ label: "Approve token", gas: 46000 });
@@ -401,32 +627,42 @@ function browserEth(): any {
   return (window as any).ethereum ?? null;
 }
 
-async function ensureChain(eth: any): Promise<void> {
+/**
+ * The chain the wallet is on right now, or undefined if it will not say.
+ *
+ * This REPLACES `ensureChain`, which used to force `wallet_switchEthereumChain` (and even
+ * `wallet_addEthereumChain`) back to Robinhood before every approve, swap and deposit. Reading is all
+ * this file is entitled to do: the user picked their network, and a swap engine that quietly overrules
+ * that choice is the reason the chain switcher "changed nothing".
+ */
+async function walletChainId(eth: any): Promise<number | undefined> {
   try {
     const cid = await eth.request({ method: "eth_chainId" });
-    if (parseInt(cid, 16) !== RH_CHAIN_ID) {
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: RH_CHAIN_HEX }] });
-    }
-  } catch (e: any) {
-    // 4902 = chain not added; add it, then switch.
-    if (e?.code === 4902) {
-      await eth.request({
-        method: "wallet_addEthereumChain",
-        params: [{
-          chainId: RH_CHAIN_HEX,
-          chainName: "Robinhood Chain",
-          rpcUrls: [RH_RPC_URL],
-          nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-          blockExplorerUrls: ["https://robinhoodchain.blockscout.com"],
-        }],
-      });
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: RH_CHAIN_HEX }] });
-    }
+    const n = typeof cid === "string" ? parseInt(cid, 16) : Number(cid);
+    return Number.isFinite(n) ? n : undefined;
+  } catch {
+    return undefined;
   }
 }
 
-function publicClient() {
-  return createPublicClient({ chain: robinhoodChain, transport: http(RH_RPC_URL) });
+/**
+ * Refuse, in words, when the wallet is not where this call needs it — never switch.
+ *
+ * Returns null when the wallet is good to go, or the sentence to show the user. The sentence always
+ * names the chain to move to, so the caller can put a "Switch to X" button beside it; performing the
+ * switch is the UI's job, taken on an explicit click, not this module's to do behind the user's back.
+ */
+async function chainRefusal(eth: any, wanted?: number): Promise<string | null> {
+  const verdict = swapChainStatus(await walletChainId(eth), wanted);
+  if (verdict.ok) return null;
+  return verdict.offer
+    ? `${verdict.reason} Switch your wallet to ${verdict.offer.name} and try again.`
+    : verdict.reason;
+}
+
+function publicClient(chainId?: number) {
+  const meta = metaFor(chainId);
+  return createPublicClient({ chain: viemChainFor(meta.id), transport: http(meta.rpcUrl) });
 }
 
 /* ─── APPROVE ───────────────────────────────────────────────────────────── */
@@ -434,24 +670,30 @@ export async function approveToken(
   _client: any,
   token: string,
   amount?: string,
-  spender: string = CONTRACTS.MOLE_ROUTER,
+  spender?: string,
+  chainId?: number,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
   try {
     const eth = browserEth();
     if (!eth) return { success: false, error: "No wallet found" };
-    await ensureChain(eth);
-    const wallet = createWalletClient({ chain: robinhoodChain, transport: custom(eth) });
+    // An approval aimed at the wrong chain's router is the fund-loss shape this whole file exists to
+    // avoid, so a wallet on the wrong network is refused rather than moved.
+    const refusal = await chainRefusal(eth, chainId);
+    if (refusal) return { success: false, error: refusal };
+    const viemChain = viemChainFor(chainId);
+    const target = (spender ?? routerFor(chainId)) as `0x${string}`;
+    const wallet = createWalletClient({ chain: viemChain, transport: custom(eth) });
     const [account] = await wallet.getAddresses();
     const value = amount ? BigInt(amount) : (1n << 256n) - 1n;
     const hash = await wallet.writeContract({
       address: token as `0x${string}`,
       abi: erc20Abi as any,
       functionName: "approve",
-      args: [spender as `0x${string}`, value],
+      args: [target, value],
       account,
-      chain: robinhoodChain,
+      chain: viemChain,
     });
-    const rcpt = await publicClient().waitForTransactionReceipt({ hash });
+    const rcpt = await publicClient(chainId).waitForTransactionReceipt({ hash });
     if (rcpt.status !== "success") return { success: false, txHash: hash, error: "Approval reverted on-chain" };
     return { success: true, txHash: hash };
   } catch (err) {
@@ -468,6 +710,11 @@ export async function approveToken(
  * signed. `calldata` is encoded once here and sent as-is; nothing re-encodes it downstream.
  */
 export interface PreparedSwap {
+  /**
+   * The chain this calldata is for. Optional only so the pre-existing callers that never named one
+   * still typecheck; absent means Robinhood, the same default as everywhere else in this file.
+   */
+  chainId?: number;
   /** Aggregator form: the NATIVE sentinel or the ERC-20 address. */
   tokenIn: string;
   tokenOut: string;
@@ -505,7 +752,14 @@ export async function prepareSwap(params: {
   outputRecipient?: string | null;
   /** Tolerated shortfall in bps. Omitted → the user's Max Slippage. */
   slippageBps?: number;
+  /** The chain this transaction is for. Omitted → Robinhood. */
+  chainId?: number;
 }): Promise<PreparedSwap | null> {
+  // Same rule as getSwapQuote, and it matters more here: this function's output is signed. A route
+  // built from another chain's pools would be calldata aimed at pool addresses that do not exist.
+  const unquotable = quotingUnavailableOn(params.chainId);
+  if (unquotable) throw new Error(unquotable);
+
   const amountIn = BigInt(params.amountIn || "0");
   if (amountIn <= 0n) return null;
   const aggIn = toAggInput(params.tokenIn);
@@ -530,6 +784,7 @@ export async function prepareSwap(params: {
   if (!q) return null;
   const calldata = encodeFunctionData({ abi: moleRouterAbi, functionName: "swap", args: [q.encoded as any] });
   return {
+    chainId: params.chainId ?? DEFAULT_CHAIN_ID,
     tokenIn: aggIn,
     tokenOut: aggOut,
     amountIn,
@@ -548,15 +803,24 @@ export async function prepareSwap(params: {
   };
 }
 
-/** The RPCs the pre-flight consults: the configured endpoint first, the public one as the second opinion. */
-export function preflightRpcUrls(): string[] {
-  return [...new Set([RH_RPC_URL, RH_PUBLIC_RPC_URL].filter(Boolean))];
+/**
+ * The RPCs the pre-flight consults for `chainId`: the configured endpoint first, then a second
+ * opinion where one exists. Robinhood has a distinct public endpoint; Arc's proxy IS the public one,
+ * so there the list is a single URL and the pre-flight's cross-provider check degrades to one
+ * provider rather than pretending to have two.
+ */
+export function preflightRpcUrls(chainId?: number): string[] {
+  const meta = metaFor(chainId);
+  const extra = meta.id === RH_CHAIN.id ? [RH_PUBLIC_RPC_URL] : [];
+  return [...new Set([meta.rpcUrl, ...extra].filter(Boolean))];
 }
 
-/** Token symbol/decimals for the decoder's messages; native resolves to ETH, unknown tokens to raw units. */
+/** Token symbol/decimals for the decoder's messages; native resolves to the chain's gas symbol. */
 function decodeContextFor(prepared: PreparedSwap): DecodeContext {
+  const nativeMeta = metaFor(prepared.chainId);
   const meta = (addr: string) => {
-    if (addr.toLowerCase() === NATIVE_SENTINEL.toLowerCase()) return { symbol: "ETH", decimals: 18 };
+    if (addr.toLowerCase() === NATIVE_SENTINEL.toLowerCase())
+      return { symbol: nativeMeta.nativeSymbol, decimals: nativeMeta.nativeDecimals };
     const t = getTokenByAddress(addr);
     return t ? { symbol: t.symbol, decimals: t.decimals } : undefined;
   };
@@ -573,8 +837,8 @@ export async function preflightSwap(
   ctx?: DecodeContext,
 ): Promise<PreflightVerdict> {
   return runSwapPreflight({
-    rpcUrls: preflightRpcUrls(),
-    router: CONTRACTS.MOLE_ROUTER as `0x${string}`,
+    rpcUrls: preflightRpcUrls(prepared.chainId),
+    router: routerFor(prepared.chainId),
     account: account as `0x${string}`,
     calldata: prepared.calldata,
     value: prepared.value,
@@ -609,15 +873,23 @@ export async function executeSwap(params: {
   onPreflight?: (verdict: PreflightVerdict) => void;
   /** Token symbols/decimals for the decoded error copy. */
   decodeCtx?: DecodeContext;
+  /** The chain to swap on. Omitted → the prepared swap's chain, else Robinhood. */
+  chainId?: number;
 }): Promise<{ success: boolean; txHash?: string; error?: string; amountOut?: string; preflight?: PreflightVerdict }> {
   const onStep = params.onStep || (() => {});
+  const chainId = params.chainId ?? params.prepared?.chainId ?? DEFAULT_CHAIN_ID;
   try {
     const eth = browserEth();
     if (!eth) return { success: false, error: "No wallet found" };
-    await ensureChain(eth);
+    // The wallet is READ, never moved. This used to be `ensureChain`, which switched the user back to
+    // Robinhood here — so pressing Swap on Arc silently executed on Robinhood's router instead.
+    const refusal = await chainRefusal(eth, chainId);
+    if (refusal) return { success: false, error: refusal };
 
-    const wallet = createWalletClient({ chain: robinhoodChain, transport: custom(eth) });
-    const pub = publicClient();
+    const viemChain = viemChainFor(chainId);
+    const router = routerFor(chainId);
+    const wallet = createWalletClient({ chain: viemChain, transport: custom(eth) });
+    const pub = publicClient(chainId);
     const [account] = await wallet.getAddresses();
     if (!account) return { success: false, error: "Wallet not connected" };
 
@@ -643,6 +915,9 @@ export async function executeSwap(params: {
     const handed = params.prepared;
     const fresh =
       !!handed &&
+      // A prepared swap built for ANOTHER chain is not stale, it is wrong: its pool addresses and its
+      // router do not exist here. Rebuild rather than sign it.
+      (handed.chainId ?? DEFAULT_CHAIN_ID) === chainId &&
       handed.tokenIn.toLowerCase() === aggIn.toLowerCase() &&
       handed.tokenOut.toLowerCase() === aggOut.toLowerCase() &&
       handed.amountIn === amountIn &&
@@ -657,16 +932,17 @@ export async function executeSwap(params: {
         recipient: account,
         outputRecipient: recipient.toLowerCase() === account.toLowerCase() ? null : recipient,
         slippageBps: params.slippageBps,
+        chainId,
       }));
     if (!prepared) return { success: false, error: "No route for this pair" };
 
-    // ERC-20 input: ensure a standing allowance to MoleRouter.
+    // ERC-20 input: ensure a standing allowance to THIS chain's MoleRouter.
     if (!isNativeIn) {
       const allowance = (await pub.readContract({
         address: aggIn as `0x${string}`,
         abi: erc20Abi as any,
         functionName: "allowance",
-        args: [account, CONTRACTS.MOLE_ROUTER as `0x${string}`],
+        args: [account, router],
       })) as bigint;
       if (allowance < amountIn) {
         onStep(0, "Approve token", "signing");
@@ -674,9 +950,9 @@ export async function executeSwap(params: {
           address: aggIn as `0x${string}`,
           abi: erc20Abi as any,
           functionName: "approve",
-          args: [CONTRACTS.MOLE_ROUTER as `0x${string}`, amountIn],
+          args: [router, amountIn],
           account,
-          chain: robinhoodChain,
+          chain: viemChain,
         });
         await pub.waitForTransactionReceipt({ hash: ah });
         onStep(0, "Approve token", "confirmed");
@@ -703,10 +979,10 @@ export async function executeSwap(params: {
     // Send the bytes that were simulated — no re-encoding between the pre-flight and the signature.
     const hash = await wallet.sendTransaction({
       account,
-      to: CONTRACTS.MOLE_ROUTER as `0x${string}`,
+      to: router,
       data: prepared.calldata,
       value: prepared.value,
-      chain: robinhoodChain,
+      chain: viemChain,
     });
     // CRITICAL: waitForTransactionReceipt does NOT throw on a reverted tx — it returns status
     // "reverted". Without this check the UI reported "SWAP COMPLETED" for a failed swap.
@@ -817,10 +1093,14 @@ export async function addLiquidityOneSided(params: {
   try {
     const eth = browserEth();
     if (!eth) return { success: false, error: "No wallet found" };
-    await ensureChain(eth);
+    // LIVE_POOL_KEY / LIVE_POOL_ID below are Robinhood's pool, so this path IS Robinhood-only — and
+    // that is now said out loud instead of enforced by dragging the wallet across chains. The vault's
+    // Arc deposit path lives in lib/mole/vault.ts, which resolves its own chain.
+    const refusal = await chainRefusal(eth, RH_CHAIN.id);
+    if (refusal) return { success: false, error: refusal };
 
     const wallet = createWalletClient({ chain: robinhoodChain, transport: custom(eth) });
-    const pub = publicClient();
+    const pub = publicClient(RH_CHAIN.id);
     const [account] = await wallet.getAddresses();
     if (!account) return { success: false, error: "Wallet not connected" };
 

@@ -22,6 +22,8 @@
 import { createPublicClient, http, type Address, type Hex } from "viem";
 import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { MOLE_ADDRESSES, ROBINHOOD_RPC_URL, DYNAMIC_FEE_FLAG, tokenByAddress } from "./chain";
+import { contractsFor } from "@/lib/chain/chains";
+import { vaultChainFor } from "./vaultChain";
 import { poolIdOf, type V4PoolKey } from "./poolId";
 import { hookBitmapProof, isMoleHookServed, type HookBitmapProof } from "./hookBitmap";
 
@@ -83,9 +85,34 @@ const erc20Abi = [
   { type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
 ] as const;
 
-function client() {
+/**
+ * The client this card reads its evidence from, on the chain the card is DESCRIBING.
+ *
+ * This used to be pinned to Robinhood. On a pools page that had become chain-aware, that meant an Arc
+ * pool rendered a provenance card built from ROBINHOOD's PoolManager, MolePositions, MoleQueue and
+ * MoleRouter — a trust surface, confidently displaying another chain's contracts as proof about this
+ * one. That is worse than showing nothing: the card exists precisely so a user does not have to take
+ * the pool's word for what it is, and a card that lies is a card that launders a wrong answer.
+ */
+function client(chainId?: number) {
+  const cfg = vaultChainFor(chainId);
+  if (cfg) return createPublicClient({ chain: cfg.chain as any, transport: http(cfg.rpcUrl) });
   const rpc = (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) || ROBINHOOD_RPC_URL;
   return createPublicClient({ chain: robinhoodChain, transport: http(rpc) });
+}
+
+/** The MoleSwap addresses for the chain being described, never the flat Robinhood-only registry. */
+/**
+ * Exported for tests: this is the function that decides WHICH chain's contracts the trust card
+ * describes, and a silent fallback here is the failure mode the card exists to prevent.
+ */
+export function addressesFor(chainId?: number) {
+  const c = contractsFor(chainId);
+  return {
+    molePositions: c.MOLE_POSITIONS as Address,
+    moleQueue: (c as { MOLE_QUEUE?: string }).MOLE_QUEUE as Address | undefined,
+    moleRouter: c.MOLE_ROUTER as Address,
+  };
 }
 
 /* ----------------------------------------------------------------------------- mutability */
@@ -96,7 +123,12 @@ function client() {
  * TUNABLE    — has a setter; one transaction changes it under the current implementation's cap.
  * UNVERIFIED — the read that decides it failed; never rendered as a guarantee.
  */
-export type Mutability = "IMMUTABLE" | "UPGRADEABLE" | "TUNABLE" | "UNVERIFIED";
+/**
+ * ABSENT is distinct from UNVERIFIED on purpose: UNVERIFIED means a contract is there and we could
+ * not prove what it is, ABSENT means there is no such contract on this chain at all. Collapsing the
+ * two would let a missing deployment read as a mere verification gap.
+ */
+export type Mutability = "IMMUTABLE" | "UPGRADEABLE" | "TUNABLE" | "UNVERIFIED" | "ABSENT";
 
 const isZero = (a: string | null | undefined) => typeof a === "string" && /^0x0{40}$/i.test(a);
 
@@ -154,10 +186,16 @@ export interface PoolProvenance {
     maxPositionLiquidity: bigint | null;
     performanceFeeBps: number | null;
   };
-  readonly queue: ProxyFacts & {
+  /**
+   * NULL on a chain that has no batch queue deployed at all (Arc today). That is a real state, not a
+   * read failure, and the card must render it as "no queue on this chain" rather than fall back to
+   * another chain's queue address — a provenance card naming a contract that is not there is worse
+   * than one admitting the gap.
+   */
+  readonly queue: (ProxyFacts & {
     /** Whether the queue's own `key()` hashes to THIS pool's id. */
     boundToThisPool: boolean | null;
-  };
+  }) | null;
   readonly router: ProxyFacts & { feeDial: string | null; feeBps: number | null };
   readonly currencies: readonly [CurrencyInfo, CurrencyInfo];
   readonly readAt: number;
@@ -170,22 +208,22 @@ const ok = <T,>(r: MC | undefined, map: (v: any) => T): T | null =>
   r && r.status === "success" ? map(r.result) : null;
 
 /** Read everything the card shows for `key`, tolerating per-field failures (each becomes null). */
-export async function readPoolProvenance(key: V4PoolKey): Promise<PoolProvenance> {
-  const c = client();
+export async function readPoolProvenance(key: V4PoolKey, chainId?: number): Promise<PoolProvenance> {
+  const c = client(chainId);
   const poolId = poolIdOf(key) as Hex;
   const hook = key.hooks as Address;
-  const { molePositions, moleQueue, moleRouter } = MOLE_ADDRESSES;
+  const { molePositions, moleQueue, moleRouter } = addressesFor(chainId);
 
   const implOf = (addr: Address) =>
     c.getStorageAt({ address: addr, slot: ERC1967_IMPLEMENTATION_SLOT })
       .then((w) => (w ? `0x${w.slice(-40)}` : null))
       .catch(() => null);
 
-  const [mc, hookImpl, vaultImpl, queueImpl, routerImpl] = await Promise.all([
-    c.multicall({
-      multicallAddress: MULTICALL3,
-      allowFailure: true,
-      contracts: [
+  /**
+   * The reads whose positions the destructuring below depends on. Held in its own array so that
+   * FIXED_READS is DERIVED from it: adding a read here can never silently shift the queue slice.
+   */
+  const fixedReads = [
         { address: STATE_VIEW, abi: stateViewAbi, functionName: "getSlot0", args: [poolId] },
         { address: hook, abi: hookAbi, functionName: "lpFeePips" },
         { address: hook, abi: hookAbi, functionName: "hookFeePips" },
@@ -200,28 +238,44 @@ export async function readPoolProvenance(key: V4PoolKey): Promise<PoolProvenance
         { address: molePositions, abi: vaultAbi, functionName: "minPositionLiquidity" },
         { address: molePositions, abi: vaultAbi, functionName: "maxPositionLiquidity" },
         { address: molePositions, abi: vaultAbi, functionName: "performanceFeeBps" },
-        { address: moleQueue, abi: queueAbi, functionName: "upgradeAdmin" },
-        { address: moleQueue, abi: queueAbi, functionName: "key" },
         { address: moleRouter, abi: routerAbi, functionName: "upgradeAdmin" },
         { address: moleRouter, abi: routerAbi, functionName: "feeDial" },
         { address: key.currency0 as Address, abi: erc20Abi, functionName: "decimals" },
         { address: key.currency0 as Address, abi: erc20Abi, functionName: "symbol" },
         { address: key.currency1 as Address, abi: erc20Abi, functionName: "decimals" },
         { address: key.currency1 as Address, abi: erc20Abi, functionName: "symbol" },
+  ];
+  const FIXED_READS = fixedReads.length;
+
+  const [mc, hookImpl, vaultImpl, queueImpl, routerImpl] = await Promise.all([
+    c.multicall({
+      multicallAddress: MULTICALL3,
+      allowFailure: true,
+      contracts: [
+        ...fixedReads,
+        // Tail, and conditional: a chain without a queue contributes no entries here, which is why the
+        // fixed reads above are destructured positionally and these two are sliced off the end.
+        ...(moleQueue
+          ? [
+              { address: moleQueue, abi: queueAbi, functionName: "upgradeAdmin" },
+              { address: moleQueue, abi: queueAbi, functionName: "key" },
+            ]
+          : []),
       ],
     }) as Promise<MC[]>,
     implOf(hook),
     implOf(molePositions as Address),
-    implOf(moleQueue as Address),
+    moleQueue ? implOf(moleQueue) : Promise.resolve(null),
     implOf(moleRouter as Address),
   ]);
 
   const [
     slot0R, lpFeeR, hookFeeR, hookAdminR, poolCreatorR, restrictedR,
     vaultAdminR, vaultHookR, whitelistedR, minWR, maxWR, minLR, maxLR, perfR,
-    queueAdminR, queueKeyR, routerAdminR, feeDialR,
+    routerAdminR, feeDialR,
     dec0R, sym0R, dec1R, sym1R,
   ] = mc;
+  const [queueAdminR, queueKeyR] = moleQueue ? mc.slice(FIXED_READS) : [undefined, undefined];
 
   // The dial is whatever the ROUTER says it is — read, not assumed — and its rate is a second hop.
   const feeDial = ok(feeDialR, (v) => String(v));
@@ -289,12 +343,14 @@ export async function readPoolProvenance(key: V4PoolKey): Promise<PoolProvenance
       maxPositionLiquidity: ok(maxLR, (v) => BigInt(v)),
       performanceFeeBps: ok(perfR, (v) => Number(v)),
     },
-    queue: {
-      address: moleQueue,
-      impl: queueImpl,
-      upgradeAdmin: ok(queueAdminR, (v) => String(v)),
-      boundToThisPool,
-    },
+    queue: moleQueue
+      ? {
+          address: moleQueue,
+          impl: queueImpl,
+          upgradeAdmin: ok(queueAdminR, (v) => String(v)),
+          boundToThisPool,
+        }
+      : null,
     router: {
       address: moleRouter,
       impl: routerImpl,
@@ -331,7 +387,7 @@ const eqAddr = (a: string | null, b: string | null) => !!a && !!b && a.toLowerCa
 export function provenanceRows(p: PoolProvenance): ProvenanceRow[] {
   const hookUp = upgradeability(p.hook.impl, p.hook.upgradeAdmin);
   const vaultUp = upgradeability(p.vault.impl, p.vault.upgradeAdmin);
-  const queueUp = upgradeability(p.queue.impl, p.queue.upgradeAdmin);
+  const queueUp = p.queue ? upgradeability(p.queue.impl, p.queue.upgradeAdmin) : null;
   const routerUp = upgradeability(p.router.impl, p.router.upgradeAdmin);
   const [c0, c1] = p.currencies;
   const isDynamic = (p.poolKey.fee & DYNAMIC_FEE_FLAG) !== 0;
@@ -436,14 +492,25 @@ export function provenanceRows(p: PoolProvenance): ProvenanceRow[] {
       mutability: vaultUp.label,
       note: "of realised LP fees · no setter",
     },
-    {
-      key: "queue",
-      label: "Queue",
-      value: short(p.queue.address),
-      mutability: queueUp.label,
-      note: `${queueUp.note}${p.queue.boundToThisPool === null ? "" : p.queue.boundToThisPool ? " · bound to this pool" : " · bound to another pool"}`,
-      ok: p.queue.boundToThisPool ?? undefined,
-    },
+    // A chain with no queue says so. It is NOT dropped from the list: a missing row reads as an
+    // oversight, whereas "not deployed on this chain" is the actual fact and is worth stating.
+    p.queue && queueUp
+      ? {
+          key: "queue",
+          label: "Queue",
+          value: short(p.queue.address),
+          mutability: queueUp.label,
+          note: `${queueUp.note}${p.queue.boundToThisPool === null ? "" : p.queue.boundToThisPool ? " · bound to this pool" : " · bound to another pool"}`,
+          ok: p.queue.boundToThisPool ?? undefined,
+        }
+      : {
+          key: "queue",
+          label: "Queue",
+          value: "—",
+          mutability: "ABSENT" as const,
+          note: "no batch queue deployed on this chain",
+          ok: undefined,
+        },
     {
       key: "router",
       label: "Router",

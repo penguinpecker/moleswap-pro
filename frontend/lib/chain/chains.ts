@@ -82,6 +82,12 @@ export interface ChainContracts {
   /** LP-pool contracts. Zero address where the product is not deployed on this chain. */
   MOLE_HOOK: string;
   MOLE_POSITIONS: string;
+  /**
+   * The batch-auction queue. OPTIONAL because it is a per-chain fact, not a universal one: Robinhood
+   * has one, Arc does not. Absent must stay absent — a screen that falls back to the other chain's
+   * queue address would show a trust card for a contract that is not on the chain being viewed.
+   */
+  MOLE_QUEUE?: string;
   /** Lending market. Zero address until it ships. */
   LENDING_POOL: string;
 }
@@ -95,6 +101,7 @@ const RH_CONTRACTS: ChainContracts = {
   MOLE_FEE_DIAL: "0x242263f3Ea6165a70B463d8b65F8DdFdd66762EA",
   MOLE_HOOK: "0xb2c9A0af48dF8858F3765385E733Cd8776a138C4",
   MOLE_POSITIONS: "0x674625B6E6a2614ef6e247aF099BEA2e65e1536A",
+  MOLE_QUEUE: "0x3dCb2494cBC9604f270177E38160ae4CA76CDEbd",
   LENDING_POOL: ZERO,
 };
 

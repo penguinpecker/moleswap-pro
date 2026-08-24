@@ -2,16 +2,23 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowUpDown, Clock, Fuel, Search, Settings as SettingsIcon } from "lucide-react";
 import { DappStep } from ".";
-import { getChains, getTokensForChain, tokenFallbackIcon, type ChainEntry } from "@/lib/chain/tokenList";
-import { useWallet } from "@/lib/chain/provider";
+import {
+  getChains,
+  getTokensForChain,
+  tokenFallbackIcon,
+  chainEntryFor,
+  defaultPairFor,
+  type ChainEntry,
+} from "@/lib/chain/tokenList";
+import { useWallet, readPreferredChainId } from "@/lib/chain/provider";
+import { RH_CHAIN, chainMetaFor, isSupportedChain } from "@/lib/chain/chains";
 import { getTokenByAddress, POOLS, CONTRACTS, getPoolDisplayInfo, TOKENS } from "@/lib/chain/contracts";
-import { loadPoolRows } from "@/lib/chain/amm";
+import { loadPoolRows, quotingUnavailableOn, readTokenBalance } from "@/lib/chain/amm";
 import { LivePairSession, type LiveQuote } from "@/lib/aggregator/live";
 import { getOrCreateUser, getUserSwapHistory } from "@/lib/supabase/api";
-import { getTokenBalance } from "@/lib/wallet/walletClient";
 import { useRouter } from "next/navigation";
 import type { Address } from "viem";
-import { createPublicClient, http, isAddress, parseUnits, formatUnits, parseEther } from "viem";
+import { createPublicClient, http, isAddress, parseUnits, formatUnits } from "viem";
 import { robinhoodChain } from "@/lib/chain/wagmi-config";
 import { createClient as createSupabaseBrowser } from "@/lib/supabase/client";
 import { tokenHasPool } from "@/lib/aggregator/discover";
@@ -243,6 +250,45 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   const router = useRouter();
   const walletState = useWallet();
 
+  /* ────────────────────────── WHICH CHAIN THIS CARD IS ABOUT ──────────────────────────
+   *
+   * THE BUG THIS REPLACES. The card used to be pinned to Robinhood in three separate places — a
+   * hardcoded `getChains()` array, `setFromChainId("4663")` on every token pick, and a
+   * `modalChain?.id || 4663` default — so switching the chrome's switcher to Arc changed the pill and
+   * nothing else: the pair still read "Robinhood Chain / ETH", the balance underneath was a Robinhood
+   * balance, and the quote priced Robinhood pools. Every number on screen belonged to a chain the
+   * user was not on, with nothing saying so.
+   *
+   * THE WALLET IS THE TRUTH while connected, exactly as the chain switcher treats it. Disconnected,
+   * the switcher only records a PREFERENCE (there is no wallet to switch), so this follows the same
+   * stored preference — and re-reads it on a short interval because the switcher writes localStorage
+   * from a sibling component, and a same-document write fires no `storage` event to subscribe to.
+   */
+  const [preferredChainId, setPreferredChainId] = useState<number>(RH_CHAIN.id);
+  useEffect(() => {
+    // Read after mount only: reading localStorage during render hydrate-mismatches.
+    setPreferredChainId(readPreferredChainId());
+  }, []);
+  useEffect(() => {
+    if (walletState.isConnected) return;
+    const id = setInterval(() => {
+      const p = readPreferredChainId();
+      setPreferredChainId((cur) => (cur === p ? cur : p));
+    }, 750);
+    return () => clearInterval(id);
+  }, [walletState.isConnected]);
+
+  /**
+   * Connected to a network we have no deployment on. Rendered as its own state rather than quietly
+   * falling back to Robinhood — every address, balance and price on the card would be wrong, and the
+   * user would have no way to tell.
+   */
+  const wrongNetwork = walletState.isConnected && !isSupportedChain(walletState.chainId);
+  const uiChainId = walletState.isConnected
+    ? (walletState.activeChain?.id ?? RH_CHAIN.id)
+    : preferredChainId;
+  const uiChainMeta = chainMetaFor(uiChainId) ?? RH_CHAIN;
+
   // ----- Original state (kept) -----
   const [fromToken, setFromToken] = useState(""); // address
   const [toToken, setToToken] = useState(""); // address
@@ -312,63 +358,95 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
 
   // Swap history: loaded from Supabase when wallet connects
   const [swapHistory, setSwapHistory] = useState<any[]>([]);
-  // ----- Load chains (kept) -----
-  // Deep-link support: `?from=<addr>&fromChainId=<id>&to=<addr>&toChainId=<id>`
-  // lets other screens open the swap with the
-  // route already wired. Params are read from `window.location` to avoid
-  // Next.js Suspense requirements on `useSearchParams`.
+  // ----- Load chains -----
   useEffect(() => {
     setLoadingChains(true);
     getChains()
-      .then((c) => {
-        setChains(c);
-        if (c[0]) {
-          // Sensible defaults
-          let initFromChainId = String(c[0].id);
-          let initToChainId = String(c[0].id);
-          let initFromToken =
-            c[0].currency?.address || "0x0000000000000000000000000000000000000000";
-          // Default receive side = USDG, the chain's stable leg. (The registry is
-          // the source of truth — a token address the registry doesn't know
-          // renders a broken card, so deep-links are validated below.)
-          let initToToken =
-            TOKENS.find((t) => t.symbol === "USDG")?.address ||
-            "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
-
-          // URL overrides — only if the chain id appears in the loaded list
-          // (otherwise keep defaults so the picker doesn't show an empty chain).
-          if (typeof window !== "undefined") {
-            const sp = new URLSearchParams(window.location.search);
-            const urlFrom = sp.get("from");
-            const urlTo = sp.get("to");
-            const urlFromCid = sp.get("fromChainId");
-            const urlToCid = sp.get("toChainId");
-            const knownChain = (id: string | null) =>
-              !!id && c.some((ch) => String(ch.id) === id);
-            const knownToken = (addr: string | null) =>
-              !!addr &&
-              c.some((ch) =>
-                getTokensForChain(ch).some(
-                  (t) => t.address?.toLowerCase() === addr.toLowerCase(),
-                ),
-              );
-
-            if (knownChain(urlFromCid)) initFromChainId = urlFromCid!;
-            if (knownChain(urlToCid)) initToChainId = urlToCid!;
-            // Unknown deep-linked tokens keep the defaults instead of breaking
-            // the quote card with unresolvable metadata.
-            if (knownToken(urlFrom)) initFromToken = urlFrom!;
-            if (knownToken(urlTo)) initToToken = urlTo!;
-          }
-
-          setFromChainId(initFromChainId);
-          setToChainId(initToChainId);
-          setFromToken(initFromToken);
-          setToToken(initToToken);
-        }
-      })
+      .then(setChains)
       .finally(() => setLoadingChains(false));
   }, []);
+
+  /** The loaded entry for the chain the wallet is on — its tokens, its gas unit, its default pair. */
+  const chainEntry = useMemo(() => chainEntryFor(chains, uiChainId), [chains, uiChainId]);
+
+  /**
+   * A deep link that names a chain the wallet is NOT on. Recorded rather than obeyed: applying its
+   * tokens would put another chain's assets on the card, which is precisely the staleness bug. The
+   * card offers the switch instead — see the notice this renders.
+   */
+  const [deepLinkChain, setDeepLinkChain] = useState<number | null>(null);
+
+  /**
+   * PUT THE ACTIVE CHAIN'S PAIR ON THE CARD — on first load, and AGAIN EVERY TIME THE CHAIN CHANGES.
+   *
+   * The reset is the fix for the reported bug. Leaving the previous chain's tokens on screen is worse
+   * than an empty card: the symbols still read "ETH → USDG" while the balance, the decimals and the
+   * router underneath have all moved to Arc, and nothing on screen contradicts them.
+   *
+   * Deep-link params (`?from=&to=&fromChainId=&toChainId=`) are still honoured, but only on the FIRST
+   * application and only for tokens the ACTIVE chain actually has — a link for another chain sets
+   * `deepLinkChain` so the card can offer to switch rather than silently mixing the two.
+   */
+  const appliedChainRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!chainEntry) return;
+    if (appliedChainRef.current === chainEntry.id) return;
+    const first = appliedChainRef.current === null;
+    appliedChainRef.current = chainEntry.id;
+
+    const pair = defaultPairFor(chainEntry);
+    let nextFrom = pair.from;
+    let nextTo = pair.to;
+
+    if (first && typeof window !== "undefined") {
+      const sp = new URLSearchParams(window.location.search);
+      const urlFrom = sp.get("from");
+      const urlTo = sp.get("to");
+      const urlCid = sp.get("fromChainId") ?? sp.get("toChainId") ?? sp.get("chainId");
+      const linked = urlCid ? Number(urlCid) : NaN;
+      if (Number.isFinite(linked) && isSupportedChain(linked) && linked !== chainEntry.id) {
+        setDeepLinkChain(linked);
+      } else {
+        const onThisChain = (addr: string | null) =>
+          !!addr &&
+          getTokensForChain(chainEntry).some(
+            (t) => t.address?.toLowerCase() === addr.toLowerCase(),
+          );
+        // A token this chain does not have keeps the default rather than rendering a card whose
+        // metadata cannot be resolved.
+        if (onThisChain(urlFrom)) nextFrom = urlFrom!;
+        if (onThisChain(urlTo)) nextTo = urlTo!;
+      }
+    }
+
+    setFromChainId(String(chainEntry.id));
+    setToChainId(String(chainEntry.id));
+    setFromToken(nextFrom);
+    setToToken(nextTo);
+
+    if (!first) {
+      // Everything below the pair described the PREVIOUS chain. An amount in 18-decimal ETH carried
+      // into a 6-decimal USDC field, or a balance read on Robinhood shown under an Arc symbol, is the
+      // same class of error as the stale pair — so all of it goes.
+      setAmount("");
+      setQuote(null);
+      setQuoteFailure(null);
+      setQuoteUpdatedAt(null);
+      setFromTokenBalance(null);
+      setImportedTokens([]);
+      setHeldList([]);
+      setPopularList([]);
+      setSearchResults([]);
+      setSearchQuery("");
+      setPoolIdToken(null);
+      setMarketInfo(new Map());
+      setTokenBalances({});
+      setLoadingBalances({});
+      fetchedBalancesRef.current.clear();
+      sessionRef.current = null;
+      setDeepLinkChain(null);
+    }
+  }, [chainEntry]);
 
   useEffect(() => {
     setMounted(true);
@@ -429,6 +507,9 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
 
         const mapped = history.map((s: any) => ({
           id: s.id,
+          // The chain the swap actually happened on. Without it every row linked to Robinhood's
+          // explorer, which would 404 for an Arc hash and read as a lost transaction.
+          chainId: Number(s.from_chain_id) || RH_CHAIN.id,
           fromSymbol: symOf(s.from_token),
           toSymbol: symOf(s.to_token),
           fromAmount: s.from_amount || "0",
@@ -446,13 +527,36 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [walletState.isConnected, walletState.address]);
 
-  // ----- Derived chain/token lists (kept) -----
-  // Since all virtual chains share id=4663, find the chain GROUP containing
-  // the selected token (not just the first chain matching the id).
+  // ----- Derived token list -----
+  /**
+   * Only the ACTIVE chain's tokens, plus anything imported on it.
+   *
+   * This used to flatten EVERY chain's tokens together. With one chain that was a no-op; with two it
+   * would put Robinhood's ETH/WETH/USDG in Arc's picker, let the user select a token that does not
+   * exist on the chain they are on, and then price it against the wrong pools.
+   */
   const allTokens = useMemo(
-    () => [...chains.flatMap((c) => getTokensForChain(c)), ...importedTokens],
-    [chains, importedTokens],
+    () => (chainEntry ? [...getTokensForChain(chainEntry), ...importedTokens] : [...importedTokens]),
+    [chainEntry, importedTokens],
   );
+
+  /**
+   * Whether TOKEN DISCOVERY works on this chain — the address-paste import, the PoolId lookup, the
+   * `mp_tokens` name search, the held-token sweep and the "popular tokens" list.
+   *
+   * Every one of those reads `lib/chain/tokenSearch.ts`, `lib/aggregator/discover.ts` or
+   * `lib/chain/poolIdLookup.ts`, and all three are pinned to Robinhood: a Robinhood viem client, six
+   * Robinhood factory addresses, and a `mp_tokens` table whose rows are Robinhood tokens. Run them on
+   * Arc and the picker fills with ROBINHOOD tokens under an Arc header — the exact confusion this
+   * whole change is undoing. They are therefore switched off, WITH A SENTENCE, rather than left to
+   * return the wrong chain's answers.
+   */
+  const discoveryOnThisChain = uiChainId === RH_CHAIN.id && !wrongNetwork;
+  const discoveryUnavailableCopy =
+    `Searching and importing tokens by address is only wired for ${RH_CHAIN.name} right now — the ` +
+    `token index and the on-chain pool discovery behind it are ${RH_CHAIN.name}-only. On ` +
+    `${uiChainMeta.name} the list below is the chain's live MoleSwap market, read from chain ` +
+    `${uiChainMeta.id}.`;
 
   // On a launchpad chain the identifier to hand is often a v4 PoolId, not a token address — it is
   // what the launch UI and the explorer display. Pasting one used to read "No token found", which
@@ -460,7 +564,9 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
   // pair and hand the non-hub leg to the normal import path below.
   useEffect(() => {
     const q = searchQuery.trim();
-    if (!looksLikePoolId(q)) {
+    // PoolId resolution reads Robinhood's v4 StateView through a Robinhood-pinned client, so it can
+    // only answer for Robinhood. On another chain it would resolve an id that does not exist there.
+    if (!looksLikePoolId(q) || !discoveryOnThisChain) {
       setPoolIdToken(null);
       return;
     }
@@ -477,7 +583,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     return () => {
       cancelled = true;
     };
-  }, [searchQuery]);
+  }, [searchQuery, discoveryOnThisChain]);
 
   // Resolve a pasted contract address into a selectable token: it must (a) be a valid address,
   // (b) have at least one active pool in the indexer so the aggregator can actually route it, and
@@ -488,6 +594,10 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     // Either the user pasted an address, or they pasted a PoolId that resolved to one.
     const q = isAddress(typed) ? typed : poolIdToken && isAddress(poolIdToken) ? poolIdToken : "";
     if (!q) return;
+    // `tokenHasPool` probes six Robinhood factory addresses through a Robinhood-pinned client, and
+    // `tokenHasV4Pool` reads Robinhood's StateView. On another chain they answer about the wrong
+    // chain's liquidity, so the import is refused with a reason instead (rendered in the picker).
+    if (!discoveryOnThisChain) return;
     const lc = q.toLowerCase();
     if (allTokens.some((t) => t.address?.toLowerCase() === lc)) return;
     let cancelled = false;
@@ -532,8 +642,8 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                   decimals: Number(decimals),
                   logoURI: tokenFallbackIcon(q, String(symbol)),
                   displaySymbol: String(symbol),
-                  displaySubtitle: "Imported · Robinhood Chain",
-                  sourceChain: "Robinhood Chain",
+                  displaySubtitle: `Imported · ${uiChainMeta.name}`,
+                  sourceChain: uiChainMeta.name,
                 },
               ],
         );
@@ -546,14 +656,17 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     return () => {
       cancelled = true;
     };
-  }, [searchQuery, poolIdToken, allTokens]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, poolIdToken, allTokens, discoveryOnThisChain]);
 
   // Whole-chain name/symbol search: query the mp_tokens index (debounced). This is what makes the
   // search bar find ANY token on Robinhood Chain by typing its name/symbol — not just the 3 in the
   // default list and not just by pasting an address.
   useEffect(() => {
     const q = searchQuery.trim();
-    if (q.length < 2 || isAddress(q)) {
+    // `searchIndex` reads mp_tokens, which holds Robinhood tokens only — on Arc it would answer an
+    // Arc search with Robinhood results.
+    if (q.length < 2 || isAddress(q) || !discoveryOnThisChain) {
       setSearchResults([]);
       setSearchingIndex(false);
       return;
@@ -571,11 +684,15 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [searchQuery]);
+  }, [searchQuery, discoveryOnThisChain]);
 
   // Load the default "verified" list (most-liquid vetted tokens) when the picker opens.
   useEffect(() => {
-    if (selectionMode === "none") return;
+    // Same reason as the search above: this list is ranked from the Robinhood-only index.
+    if (selectionMode === "none" || !discoveryOnThisChain) {
+      setPopularList([]);
+      return;
+    }
     let cancelled = false;
     popularTokens(30).then((p) => {
       if (!cancelled) setPopularList(p);
@@ -583,12 +700,14 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     return () => {
       cancelled = true;
     };
-  }, [selectionMode]);
+  }, [selectionMode, discoveryOnThisChain]);
 
   // When the picker opens with a connected wallet, sweep the wallet's balances across the whole
   // indexed token universe so we can surface the tokens the user actually holds.
   useEffect(() => {
-    if (selectionMode === "none" || !walletAddress) {
+    // `heldTokens` sweeps balances over the Robinhood index through a Robinhood client. On Arc it
+    // would report what the wallet holds on the OTHER chain — the reported bug in miniature.
+    if (selectionMode === "none" || !walletAddress || !discoveryOnThisChain) {
       setHeldList([]);
       return;
     }
@@ -607,20 +726,12 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     return () => {
       cancelled = true;
     };
-  }, [selectionMode, walletAddress]);
+  }, [selectionMode, walletAddress, discoveryOnThisChain]);
 
-  const fromChain = useMemo(
-    () => chains.find((c) =>
-      getTokensForChain(c).some((t) => t.address?.toLowerCase() === fromToken.toLowerCase())
-    ) || chains.find((c) => String(c.id) === fromChainId) || chains[0],
-    [chains, fromChainId, fromToken],
-  );
-  const toChain = useMemo(
-    () => chains.find((c) =>
-      getTokensForChain(c).some((t) => t.address?.toLowerCase() === toToken.toLowerCase())
-    ) || chains.find((c) => String(c.id) === toChainId) || chains[0],
-    [chains, toChainId, toToken],
-  );
+  // Both sides are the chain the wallet is on. A cross-chain pair is not a thing MoleSwap can
+  // execute — there is no bridge — so the card must never imply one by showing two chain names.
+  const fromChain = chainEntry;
+  const toChain = chainEntry;
 
   const fromTokens = useMemo(
     () => allTokens,
@@ -659,17 +770,30 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     }
   }, [amount, fromTokenMeta]);
 
-  // ----- Can quote (kept) -----
+  /**
+   * Why this chain cannot be quoted, or null when it can.
+   *
+   * MoleRouter IS live on Arc — real money has moved through it — but the OFF-CHAIN pricing engine
+   * underneath `lib/aggregator/` reads a pool registry with no chain column and discovers venues
+   * through Robinhood-only factories. Pointed at Arc tokens it does not fail; it prices them against
+   * ROBINHOOD liquidity and returns a confident, wrong number. So the card shows the reason instead
+   * of a price. A wrong quote is worse than no quote, because a user can act on it.
+   */
+  const quotingBlocked = useMemo(() => quotingUnavailableOn(uiChainId), [uiChainId]);
+
+  // ----- Can quote -----
   const canQuote = useMemo(() => {
     return Boolean(
-      fromChainId &&
+      !quotingBlocked &&
+        !wrongNetwork &&
+        fromChainId &&
         toChainId &&
         fromToken &&
         toToken &&
         amountWei &&
         amountWei !== "0",
     );
-  }, [fromChainId, toChainId, fromToken, toToken, amountWei]);
+  }, [quotingBlocked, wrongNetwork, fromChainId, toChainId, fromToken, toToken, amountWei]);
 
   // True when the entered amount exceeds the wallet's balance — the swap would revert
   // with TransferFailed on the token pull, so block it in the UI instead.
@@ -702,6 +826,16 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
 
   useEffect(() => {
     if (!fromToken || !toToken) return;
+    // Never open a pricing session on a chain the engine cannot see. `loadPoolRows` and
+    // `LivePairSession` both read Robinhood's registry and Robinhood's RPC, so on Arc this would not
+    // error — it would quietly price Arc tokens against Robinhood pools.
+    if (quotingBlocked || wrongNetwork) {
+      sessionRef.current = null;
+      setQuote(null);
+      setQuoteFailure(null);
+      setQuoteRefreshing(false);
+      return;
+    }
     let cancelled = false;
     sessionRef.current = null;
     setQuote(null);
@@ -740,7 +874,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fromToken, toToken]);
+  }, [fromToken, toToken, quotingBlocked, wrongNetwork]);
 
   // Pure recompute off the cached snapshot — runs on every keystroke and after
   // every state refresh. Never touches the network.
@@ -848,20 +982,28 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     [quote, toTokenMeta?.decimals],
   );
 
-  // USD helper: USDG ≈ $1; ETH/WETH priced from the live WETH/USDG pool spot.
+  /**
+   * USD helper: the chain's own stable leg ≈ $1; its native/wrapped unit from the live pool spot.
+   *
+   * The stable is taken from the chain's token set (which pins `isStable` by ADDRESS), never matched
+   * by symbol — Robinhood has two 18-decimal impostors calling themselves "USDC" and its real stable
+   * is 6-decimal USDG, so a symbol match here would misprice the card by twelve orders of magnitude.
+   */
   const usdValueOf = useMemo(
     () => (human: number, tokenAddr: string | undefined) => {
       if (!isFinite(human) || human <= 0 || !tokenAddr) return null;
       const a = tokenAddr.toLowerCase();
-      const usdg = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
-      const wethLc = CONTRACTS.WETH.toLowerCase();
-      if (a === usdg) return human;
+      const isStable = allTokens.some(
+        (t: any) => t?.isStable === true && t.address?.toLowerCase() === a,
+      );
+      if (isStable) return human;
       const ethUsd = quote?.usdPerWeth ?? null;
-      if (ethUsd && (a === wethLc || a === "0x0000000000000000000000000000000000000000"))
+      const wrapped = chainEntry?.wrappedNative?.toLowerCase();
+      if (ethUsd && ((wrapped && a === wrapped) || a === "0x0000000000000000000000000000000000000000"))
         return human * ethUsd;
       return null;
     },
-    [quote?.usdPerWeth],
+    [quote?.usdPerWeth, allTokens, chainEntry],
   );
 
   const expectedOutUsd = useMemo(() => {
@@ -923,10 +1065,11 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     if (!quote) return null;
     if (quote.gasEth === null) return `~${(Number(quote.gasUnits) / 1000).toFixed(0)}k gas`;
     const usd = quote.usdPerWeth ? quote.gasEth * quote.usdPerWeth : null;
-    const eth = quote.gasEth < 0.000001 ? "<0.000001" : quote.gasEth.toFixed(6);
-    return usd !== null ? `${eth} ETH ($${usd.toFixed(4)})` : `${eth} ETH`;
-  }, [quote]);
-  const isRhSwap = fromChainId === toChainId && String(fromChainId) === "4663";
+    const native = quote.gasEth < 0.000001 ? "<0.000001" : quote.gasEth.toFixed(6);
+    // The chain's own gas symbol, not a hardcoded "ETH" — Arc charges gas in USDC.
+    const sym = uiChainMeta.nativeSymbol;
+    return usd !== null ? `${native} ${sym} ($${usd.toFixed(4)})` : `${native} ${sym}`;
+  }, [quote, uiChainMeta.nativeSymbol]);
 
   // Liquidity warning driven by the LIVE quote's real price impact across every
   // pool the aggregator scanned — not a hardcoded per-pool flag (which wrongly
@@ -1112,13 +1255,19 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     } catch {
       return;
     }
-    // For native ETH, keep a small buffer so the swap can still pay gas; for ERC-20
-    // tokens MAX is the exact balance (the router pulls precisely this amount).
-    const lc = (fromToken || "").toLowerCase();
-    const isNativeIn = !fromToken || lc === "0x0000000000000000000000000000000000000000" || lc === "eth" || lc === "native";
-    if (isNativeIn) {
-      const gasBuffer = parseEther("0.0003");
-      raw = raw > gasBuffer ? raw - gasBuffer : 0n;
+    /**
+     * Keep back whatever THIS token has to reserve for gas, in this token's own decimals.
+     *
+     * It used to be "native ETH gets a 0.0003 buffer, everything else is exact", which is right on
+     * Robinhood and wrong on Arc: Arc charges gas in USDC, and the USDC being swapped is the SAME
+     * balance the gas comes out of — so a true MAX there leaves the user unable to pay for the
+     * transaction that spends it. The buffer is carried on the token (see tokenList.ts) precisely
+     * because Robinhood's is 18-decimal ETH and Arc's is 6-decimal USDC.
+     */
+    const gasBuffer = (fromTokenMeta as any)?.gasBuffer;
+    if (gasBuffer) {
+      const keep = BigInt(gasBuffer);
+      raw = raw > keep ? raw - keep : 0n;
     }
     setAmountFromRaw(raw, decimals);
   };
@@ -1139,7 +1288,10 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     }
     onNext("swap", {
       quote,
-      fromToken: fromToken || "ETH",
+      // The chain this quote was built on. The confirm screen and executeSwap must aim at THIS
+      // chain's router — the swap engine's default is Robinhood, which is only right by accident.
+      chainId: uiChainId,
+      fromToken: fromToken || uiChainMeta.nativeSymbol,
       toToken,
       amount: amount || "0",
       expectedOut: expectedOut || "0",
@@ -1177,7 +1329,15 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     let cancelled = false;
 
     const fetchBalance = async () => {
-      if (!walletAddress || !fromChainId || !fromToken) {
+      // A balance read while the wallet sits on an unsupported network would be answered by whichever
+      // chain we defaulted to — i.e. a number belonging to a chain the user is not on.
+      //
+      // `fromTokenMeta` is required, not optional: without it the decimals fall back to 18, and on
+      // Arc that renders a 6-decimal USDC balance as ~0.0000000747 instead of ~74,760.85 — an empty
+      // wallet, to the user. There is one render between a chain change and the pair reset where the
+      // token still belongs to the previous chain and no metadata resolves; skip it rather than
+      // print a number that is wrong by twelve orders of magnitude.
+      if (!walletAddress || !fromChainId || !fromToken || !fromTokenMeta || wrongNetwork) {
         if (!cancelled) {
           setFromTokenBalance(null);
           setBalanceLoading(false);
@@ -1191,15 +1351,16 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       }
 
       try {
-        const chain = chains.find((c) => String(c.id) === fromChainId);
-        const vmType = chain?.vmType;
-        const balance = await getTokenBalance(
-          walletAddress as Address,
-          fromToken,
-          Number(fromChainId),
-          fromTokenMeta?.decimals,
-          vmType,
-        );
+        // Read from the SELECTED CHAIN'S OWN RPC, and with the TOKEN'S OWN DECIMALS.
+        // This used to go through `lib/wallet/walletClient.ts`, which builds every public client on
+        // Robinhood's RPC no matter which chainId it is handed — so "your balance on Arc" was a
+        // Robinhood balance wearing an Arc label. That is the ETH balance in the bug report.
+        const balance = await readTokenBalance({
+          chainId: Number(fromChainId),
+          owner: walletAddress,
+          token: fromToken,
+          decimals: fromTokenMeta?.decimals,
+        });
 
         if (!cancelled) {
           setFromTokenBalance(balance);
@@ -1221,7 +1382,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     return () => {
       cancelled = true;
     };
-  }, [walletAddress, fromChainId, fromToken, fromTokenMeta?.decimals, (fromTokenMeta as any)?.bridgeable, chains, walletState.origin, walletState.originChain]);
+  }, [walletAddress, fromChainId, fromToken, fromTokenMeta, fromTokenMeta?.decimals, (fromTokenMeta as any)?.bridgeable, wrongNetwork, walletState.origin, walletState.originChain]);
 
   // ----- Modal select logic -----
   // open modal: seed selectedNetwork with the chain group containing the current token
@@ -1229,17 +1390,10 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setSelectionMode(mode);
     setSearchQuery("");
     setSearchQueryNetwork("");
-    // The app runs on one chain, so BOTH pickers are fixed to Robinhood Chain. The FROM side used to
-    // wait for a network choice before showing anything, which buried the user's own holdings behind
-    // a step that has exactly one possible answer.
-    setSelectedNetwork("Robinhood Chain");
-    if (mode === "to") return;
-    // Find the chain group that contains the currently selected token for this side
-    const currentToken = fromToken;
-    const matchedChain = chains.find((c) =>
-      getTokensForChain(c).some((t) => t.address?.toLowerCase() === currentToken?.toLowerCase())
-    );
-    setSelectedNetwork(matchedChain?.name || chains[0]?.name || "");
+    // BOTH pickers are fixed to the chain the WALLET is on — a swap has no bridge, so there is
+    // nothing here that could legitimately pick a different network, and offering one would only let
+    // the card drift away from the wallet again. Changing chains is the chrome switcher's job.
+    setSelectedNetwork(chainEntry?.name || "");
   };
 
   const handleBackToExchange = () => {
@@ -1249,21 +1403,22 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     setSelectedNetwork("");
   };
 
-  // Network list (single chain — Robinhood Chain — filtered by search).
+  // Network list: the ACTIVE chain, filtered by the network search box. One entry, and it moves
+  // with the wallet — it used to be the string "Robinhood Chain" whatever the switcher said.
   const filteredNetworks = useMemo(() => {
-    const src = selectionMode === "to"
-      ? chains.filter((c) => c.name === "Robinhood Chain")
-      : chains;
+    const src = chainEntry ? [chainEntry] : [];
     return src.filter((net) =>
       (net.displayName || net.name || "")
         .toLowerCase()
         .includes(searchQueryNetwork.toLowerCase()),
     );
-  }, [chains, searchQueryNetwork, selectionMode]);
+  }, [chainEntry, searchQueryNetwork]);
 
-  // Tokens for the currently selected network in the modal.
-  const modalChain =
-    chains.find((c) => c.name === selectedNetwork) || null;
+  // Tokens for the currently selected network in the modal — never another chain's.
+  const modalChain = useMemo(
+    () => chains.find((c) => c.name === selectedNetwork) || chainEntry || null,
+    [chains, selectedNetwork, chainEntry],
+  );
   // The default list (no search): the wallet's held tokens first, then the curated registry, then any
   // the user imported by address.
   const modalTokens = useMemo(() => {
@@ -1276,9 +1431,9 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
       merged.push(t);
     };
     for (const t of heldList) add(t); // tokens the user actually owns, balance-desc
-    if (selectionMode === "to") {
-      for (const c of chains) for (const t of getTokensForChain(c)) add(t);
-    } else if (modalChain) {
+    // Both sides list the SAME chain's tokens. The "to" side used to flatten every loaded chain,
+    // which with two chains would offer a token the router cannot reach from the "from" side.
+    if (modalChain) {
       for (const t of getTokensForChain(modalChain)) add(t);
     }
     for (const t of popularList) add(t); // most-liquid verified tokens on the chain
@@ -1353,8 +1508,9 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
     let cancelled = false;
 
     const fetchTokenBalances = async () => {
-      const chainId = modalChain?.id || 4663;
-      const vmType = modalChain.vmType;
+      // The chain the picker is showing. This used to be `modalChain?.id || 4663` — a Robinhood
+      // fallback that fired whenever the entry was missing, so a picker labelled Arc read Robinhood.
+      const chainId = modalChain.id;
 
       // While searching, skip the per-token sweep: held tokens already carry their balance and the
       // (up to 40) whole-chain search results don't need one — fetching each would storm the RPC.
@@ -1396,13 +1552,12 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
         const balanceKey = `${selectedNetwork}-${token.address}`;
 
         try {
-          const balance = await getTokenBalance(
-            walletAddress as Address,
-            token.address,
+          const balance = await readTokenBalance({
             chainId,
-            token.decimals,
-            vmType,
-          );
+            owner: walletAddress,
+            token: token.address,
+            decimals: token.decimals,
+          });
 
           if (!cancelled) {
             return { balanceKey, balance };
@@ -1492,24 +1647,27 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                   decimals: token.decimals,
                   logoURI: token.logoURI || tokenFallbackIcon(tokenAddress, token.symbol),
                   displaySymbol: token.displaySymbol || token.symbol,
-                  displaySubtitle: token.displaySubtitle || "Robinhood Chain",
-                  sourceChain: "Robinhood Chain",
+                  displaySubtitle: token.displaySubtitle || uiChainMeta.name,
+                  sourceChain: uiChainMeta.name,
                 },
               ],
         );
       }
     }
-    // Single chain — always set chainId to 4663 (Robinhood Chain)
+    // The pair is always on the chain the wallet is on. Both sides used to be set to the Robinhood
+    // chain id as a string literal, justified by a comment asserting the app was single-chain —
+    // which is what pinned the card to Robinhood no matter what the switcher said.
+    const pickedChainId = String(uiChainId);
     const lcPick = tokenAddress.toLowerCase();
     if (selectionMode === "from") {
       // Same asset on both sides is not a swap and has no route. Picking the token already selected
       // opposite flips the pair, which is what the user meant.
       if (toToken && toToken.toLowerCase() === lcPick) setToToken(fromToken);
-      setFromChainId("4663");
+      setFromChainId(pickedChainId);
       setFromToken(tokenAddress);
     } else if (selectionMode === "to") {
       if (fromToken && fromToken.toLowerCase() === lcPick) setFromToken(toToken);
-      setToChainId("4663");
+      setToChainId(pickedChainId);
       setToToken(tokenAddress);
     }
     setSelectionMode("none");
@@ -1547,6 +1705,15 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                   style={{ color: "var(--ink)" }}
                 />
               </label>
+
+              {/* Why the search box cannot find anything on this chain — said out loud, with the
+                  list below it named for what it actually is, rather than an empty result set the
+                  user would read as "this chain has no tokens". */}
+              {!discoveryOnThisChain && (
+                <div className="noq" data-testid="discovery-unavailable" style={{ marginTop: 12 }}>
+                  {discoveryUnavailableCopy}
+                </div>
+              )}
 
               {/* Context label above the list */}
               {selectedNetwork && (
@@ -1732,9 +1899,12 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                       onClick={() => handleSelectNetwork(network.name)}
                       className={`tk-row ${selectedNetwork === network.name ? "sel" : ""}`}
                     >
+                      {/* No asset for a chain without one: fall through to the Burrow coin chip,
+                          which draws the chain's own two-letter mark — the same mark the chrome's
+                          switcher uses — instead of a generic placeholder image. */}
                       <TokenIcon
-                        logo={network.iconUrl || network.logoUrl || "/placeholder-logo.png"}
-                        symbol={network.displayName || network.name}
+                        logo={network.iconUrl || network.logoUrl}
+                        symbol={network.mark || network.shortName || network.name}
                         size={34}
                       />
                       <div style={{ minWidth: 0 }}>
@@ -1791,6 +1961,46 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                       </button>
                     </div>
                   </div>
+
+                  {/* ── WHAT CHAIN THIS CARD IS ABOUT, AND WHAT IT CANNOT DO HERE ──────────────
+                      Every one of these is a sentence, not a hidden control. A missing button with
+                      no explanation beside it is indistinguishable from a bug, and that is exactly
+                      how "the switcher changes nothing" started. ─────────────────────────────── */}
+
+                  {wrongNetwork && (
+                    <div className="warn-red" data-testid="wrong-network" style={{ marginTop: 14 }}>
+                      Your wallet is on a network MoleSwap has no deployment on, so nothing on this
+                      card would be true here.{" "}
+                      <button
+                        type="button"
+                        className="recip-btn"
+                        onClick={() => walletState.switchTo(RH_CHAIN.id)}
+                      >
+                        Switch to {RH_CHAIN.name}
+                      </button>
+                    </div>
+                  )}
+
+                  {deepLinkChain !== null && (
+                    <div className="warn-thin" data-testid="deeplink-chain" style={{ marginTop: 14 }}>
+                      This link is for {(chainMetaFor(deepLinkChain) ?? RH_CHAIN).name}, and your
+                      wallet is on {uiChainMeta.name} — so it was not applied.{" "}
+                      <button
+                        type="button"
+                        className="recip-btn"
+                        onClick={() => walletState.switchTo(deepLinkChain)}
+                      >
+                        Switch to {(chainMetaFor(deepLinkChain) ?? RH_CHAIN).name}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* No wrapped native here — say why, rather than silently having no ETH row. */}
+                  {!wrongNetwork && chainEntry?.nativePathUnavailable && (
+                    <div className="noq" data-testid="no-native-path" style={{ marginTop: 14 }}>
+                      {chainEntry.nativePathUnavailable}
+                    </div>
+                  )}
 
                   {/* From */}
                   <button onClick={() => openSelect("from")} className="sel-card" style={{ marginTop: 14 }}>
@@ -1873,7 +2083,9 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                         )}
                       </span>
                       <span className="sc-main">
-                        {toToken ? "Robinhood Chain" : "Select Network"}{" "}
+                        {/* The chain the WALLET is on — this was the literal "Robinhood Chain",
+                            which is what kept saying Robinhood while the switcher said Arc. */}
+                        {toToken ? (toChain?.displayName || toChain?.name || "") : "Select Network"}{" "}
                         / {(toTokenMeta as any)?.symbol ||
                           displaySymbolOf(toTokenMeta) ||
                           "Select Token"}
@@ -1974,11 +2186,15 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                         }
                         className="p-btn"
                       >
-                        {sameAsset
-                          ? "Pick two different tokens"
-                          : insufficientBalance
-                            ? `Insufficient ${displaySymbolOf(fromTokenMeta)}`
-                            : "Review swap"}
+                        {wrongNetwork
+                          ? "Wrong network"
+                          : quotingBlocked
+                            ? `Quotes not served on ${uiChainMeta.name} yet`
+                            : sameAsset
+                              ? "Pick two different tokens"
+                              : insufficientBalance
+                                ? `Insufficient ${displaySymbolOf(fromTokenMeta)}`
+                                : "Review swap"}
                       </button>
                     </>
                   )}
@@ -1991,7 +2207,14 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                   <div className="p-card">
                     <h3>Receive</h3>
                     <div style={{ marginTop: 12 }}>
-                      {!quote ? (
+                      {quotingBlocked ? (
+                        /* NOT the "no route" copy: that is a claim about the market, and this is a
+                           statement about US. Conflating the two is the mistake quoteCopy.ts exists
+                           to prevent, so the reason is rendered verbatim instead of a price. */
+                        <div className="noq" data-testid="chain-not-quotable">
+                          {quotingBlocked}
+                        </div>
+                      ) : !quote ? (
                         <div className="noq" data-testid="no-quote">
                           {noQuoteCopy({ quoteRefreshing, quoteFailure, canQuote })}
                         </div>
@@ -2157,7 +2380,7 @@ export const ExchangePage = ({ onNext }: ExchangePageProps) => {
                             </span>
                             {txHash && (
                               <a
-                                href={`https://robinhoodchain.blockscout.com/tx/${txHash}`}
+                                href={`${(chainMetaFor(swap.chainId) ?? RH_CHAIN).explorerUrl}/tx/${txHash}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
                               >

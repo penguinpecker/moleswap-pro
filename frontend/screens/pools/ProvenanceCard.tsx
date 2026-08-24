@@ -24,11 +24,25 @@ const MUTABILITY_CLASS: Record<Mutability, string> = {
   UPGRADEABLE: "border-[#C97E00] text-yellow-300",
   TUNABLE: "border-[#C97E00] text-orange-300",
   UNVERIFIED: "border-[#523525] text-gray-400",
+  ABSENT: "border-[#3a2a1e] text-gray-500",
 };
 
 const short = (a: string) => (a && a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a);
 
-export function ProvenanceCard({ poolKey, defaultOpen = false }: { poolKey: V4PoolKey; defaultOpen?: boolean }) {
+export function ProvenanceCard({
+  poolKey,
+  chainId,
+  defaultOpen = false,
+}: {
+  poolKey: V4PoolKey;
+  /**
+   * The chain this pool lives on. REQUIRED in practice even though it is optional in the type: the
+   * reader falls back to Robinhood when it is absent, and a provenance card that silently describes
+   * the wrong chain is the one failure this component must never have.
+   */
+  chainId?: number;
+  defaultOpen?: boolean;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   const [data, setData] = useState<PoolProvenance | null>(null);
   const [failed, setFailed] = useState(false);
@@ -39,7 +53,7 @@ export function ProvenanceCard({ poolKey, defaultOpen = false }: { poolKey: V4Po
 
   load.current = async () => {
     try {
-      setData(await readPoolProvenance(poolKey));
+      setData(await readPoolProvenance(poolKey, chainId));
       setFailed(false);
     } catch {
       setFailed(true);
@@ -52,7 +66,7 @@ export function ProvenanceCard({ poolKey, defaultOpen = false }: { poolKey: V4Po
     const t = setInterval(() => load.current(), 30_000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, poolKey.currency0, poolKey.currency1, poolKey.fee, poolKey.tickSpacing, poolKey.hooks]);
+  }, [open, chainId, poolKey.currency0, poolKey.currency1, poolKey.fee, poolKey.tickSpacing, poolKey.hooks]);
 
   const rows = data ? provenanceRows(data) : [];
 
