@@ -530,6 +530,27 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
         feeRecipient = to;
     }
 
+    /// @notice Rotate the keeper. `upgradeAdmin` only.
+    /// @dev NEEDED, not convenient, and the reason is the shape of the incident it answers. `keeper` was
+    ///      initializer-only, and `setKeeperExpiry` can DISABLE a keeper but cannot REPLACE one — so
+    ///      recovering from a leaked keeper key meant shipping a new implementation through
+    ///      `upgradeAdmin`. That inverts the blast radius: an incident on the LOWEST-privilege key in the
+    ///      system forced the operator to reach for the HIGHEST one, the key that can rewrite `withdraw`.
+    ///      A hot key that signs on a schedule will eventually leak; the recovery for it should be one
+    ///      transaction and an event, not a code deployment.
+    ///
+    ///      It grants no new power — the upgrade key could already do this by replacing the
+    ///      implementation — and it makes the rotation AUDITABLE, which a code-diff rotation is not.
+    ///      address(0) is allowed on purpose: it is the same "no keeper at all" state `setKeeperExpiry`
+    ///      already reaches, and every position owner keeps `setKeeperRevoked` regardless.
+    function setKeeper(address to) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        emit KeeperSet(keeper, to);
+        keeper = to;
+    }
+
+    event KeeperSet(address indexed from, address indexed to);
+
     event PositionSizeBandSet(uint128 minLiquidity, uint128 maxLiquidity);
     event KeeperRevoked(uint256 indexed id, address indexed owner, bool revoked);
 

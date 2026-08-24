@@ -336,6 +336,25 @@ contract MoleRouter is IUnlockCallback, Initializable, UUPSUpgradeable {
     ///         once the fee model has settled, and it is the only mechanical protection available here.
     /// @dev Deliberately one-step and deliberately allows address(0): a two-step handshake cannot express
     ///      "burn it", and burning is the option that matters most for this particular contract.
+    /// @notice Rotate where the router's fee is paid. `upgradeAdmin` only.
+    /// @dev `feeRecipient` was initializer-only on a UUPS proxy, so moving the fee destination to a
+    ///      treasury multisig required shipping a new implementation. The validation mirrors
+    ///      `initialize` exactly rather than approximately, and reuses its error: the destination must
+    ///      not be zero (the fee would be burned on every swap), must not be this contract (the router
+    ///      is supposed to hold nothing between transactions, and paying itself quietly breaks the
+    ///      zero-residual invariant every test asserts), and must not be `weth` or the PoolManager,
+    ///      because both are addresses the swap path already moves value to for other reasons.
+    function setFeeRecipient(address to) external {
+        if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
+        if (to == address(0) || to == address(this) || to == weth || to == address(poolManager)) {
+            revert BadFeeConfig();
+        }
+        emit FeeRecipientSet(feeRecipient, to);
+        feeRecipient = to;
+    }
+
+    event FeeRecipientSet(address indexed from, address indexed to);
+
     function transferUpgradeAdmin(address to) external {
         if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
         emit UpgradeAdminTransferred(upgradeAdmin, to);

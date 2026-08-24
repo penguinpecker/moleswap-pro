@@ -590,7 +590,7 @@ contract ExitPathStaticTest is SourceReader {
             "withdrawWithMinimums' parameters changed"
         );
 
-        string[] memory want = new string[](22);
+        string[] memory want = new string[](23);
         want[0] = "initialize(InitParams memory p_)";
         want[1] = "setKeeperExpiry(uint64 expiry)";
         want[2] = "setFeeRecipient(address to)"; // repoints where ERC-6909 fee claims are minted
@@ -621,17 +621,33 @@ contract ExitPathStaticTest is SourceReader {
         // so without a setter the cap that answers the finding is unreachable there. Read by `rebalance`
         // only.
         want[21] = "setEjectionCap(uint16 bps)";
+        // ROTATION, not authority. `keeper` was initializer-only and `setKeeperExpiry` can DISABLE a
+        // keeper but not REPLACE one, so recovering from a leaked keeper key meant shipping a new
+        // implementation through `upgradeAdmin` — the key that can rewrite `withdraw`. An incident on the
+        // least trusted key in the system should not force the operator to reach for the most trusted
+        // one. It takes an address, which is what this pin is watching for, and it is admitted because
+        // that address is a ROLE and never a payout target: `keeper` is read by `rebalance` and by the
+        // `onlyKeeper` modifier, and by nothing on the exit path — which
+        // test_static_vaultExitBodiesReadNoKeeperOracleAdminWhitelistClockOrBound proves separately.
+        want[22] = "setKeeper(address to)";
         _assertSurfaceIs(src, want, "the vault");
 
-        // NON-VACUITY OF THE "no recipient" HALF: exactly three of the twenty-two spell `address` in their
-        // parameter list, and the count is pinned so a fourth cannot arrive without this line moving. Two
-        // are admin plumbing and the third is a view that returns ids. Neither of the two exits, and none
-        // of the four functions added in 2026-08-24's pin update, is among them.
+        // NON-VACUITY OF THE "no recipient" HALF: exactly four of the twenty-three spell `address` in
+        // their parameter list, and the count is pinned so a fifth cannot arrive without this line
+        // moving. Three are admin plumbing (setFeeRecipient, transferUpgradeAdmin, setKeeper) and the
+        // fourth is a view that returns ids. Neither of the two exits is among them.
+        //
+        // EVERY ONE OF THE THREE NAMES A ROLE, NEVER A PAYOUT TARGET, and that distinction is the whole
+        // point of counting: `feeRecipient` is where ERC-6909 fee CLAIMS are minted rather than where
+        // principal is sent, `upgradeAdmin` is the root key, and `keeper` is read only by `rebalance`
+        // and the `onlyKeeper` modifier. That none of them is reachable from the exit is proved
+        // separately by test_static_vaultExitBodiesReadNoKeeperOracleAdminWhitelistClockOrBound; this
+        // line only stops a FOURTH kind of address arriving unnoticed.
         uint256 withAddress;
         for (uint256 i = 0; i < want.length; i++) {
             if (_contains(bytes(want[i]), "address ")) withAddress++;
         }
-        assertEq(withAddress, 3, "the number of address-taking entry points changed");
+        assertEq(withAddress, 4, "the number of address-taking entry points changed");
         assertTrue(_hasToken(want, "setFeeRecipient(address to)"), "setFeeRecipient is no longer one of them");
         assertTrue(_hasToken(want, "transferUpgradeAdmin(address to)"), "transferUpgradeAdmin is no longer one of them");
         assertTrue(_hasToken(want, "positionsOf(address owner)"), "positionsOf is no longer one of them");
