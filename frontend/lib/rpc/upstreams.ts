@@ -90,3 +90,32 @@ export function parseUpstreams(raw: string | undefined): Upstream[] {
 export function arcUpstreams(): Upstream[] {
   return parseUpstreams(process.env.ARC_RPC_UPSTREAMS);
 }
+
+/**
+ * Robinhood Chain's public fallback. Keyless on purpose, and rate-limited by its operator — which is
+ * exactly why a keyed upstream is worth having in front of it.
+ */
+export const DEFAULT_RH_UPSTREAMS: readonly string[] = ["https://rpc.mainnet.chain.robinhood.com"];
+
+/**
+ * The configured Robinhood upstreams. SERVER-ONLY, for the reason this whole file exists.
+ *
+ * This function was added on 2026-08-24 because Robinhood was doing the exact thing the header above
+ * warns about. The RH endpoint was published to the browser as `NEXT_PUBLIC_RH_RPC_URL`, and anything
+ * with that prefix is inlined into the client bundle at build time — so the keyed Alchemy URL was
+ * readable in three of the shipped JavaScript chunks on the live site. A provider URL published to
+ * users IS a published API key, and the people who spend it are not your users.
+ *
+ * Arc had been doing this correctly since it launched. Robinhood, the older of the two, never got the
+ * same treatment, which is the ordinary way this kind of gap survives: the newer thing gets the
+ * lesson and the older thing keeps the habit.
+ */
+export function rhUpstreams(): Upstream[] {
+  const parsed = parseUpstreams(process.env.RH_RPC_UPSTREAMS);
+  // parseUpstreams falls back to Arc's default when its env var is unset, which is the wrong chain
+  // entirely. Detect that case by identity and substitute Robinhood's own public endpoint.
+  if (parsed.length === 1 && parsed[0].url === DEFAULT_ARC_UPSTREAMS[0] && !process.env.RH_RPC_UPSTREAMS) {
+    return [{ url: DEFAULT_RH_UPSTREAMS[0], label: hostOf(DEFAULT_RH_UPSTREAMS[0]) }];
+  }
+  return parsed;
+}
