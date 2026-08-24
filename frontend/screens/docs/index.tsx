@@ -2,6 +2,11 @@
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { MoleGlyph } from "@/screens/shared";
+// The contract table at the bottom is RENDERED from this, not transcribed into it. The hand-written
+// table it replaces listed seven addresses that have no code on Robinhood Chain at all — a docs page
+// telling integrators to approve a spender that does not exist. Reading the same registry the API
+// resolves from is the only version of this table that cannot drift away from what the API answers.
+import { SUPPORTED_CHAINS, contractsFor, type ChainContracts } from "@/lib/chain/chains";
 
 const BASE = typeof window !== "undefined" ? window.location.origin : "https://www.moleswap.com";
 
@@ -16,6 +21,7 @@ const NAV: NavGroup[] = [
     { id: "introduction", label: "Introduction", icon: "📖" },
     { id: "quickstart", label: "Quick Start", icon: "⚡" },
     { id: "authentication", label: "Authentication", icon: "🔑" },
+    { id: "chains", label: "Chains", icon: "⛓️" },
     { id: "concepts", label: "Core Concepts", icon: "💡" },
   ]},
   { title: "API Reference", items: [
@@ -156,6 +162,36 @@ function ParamTable({ params }: { params: { name: string; type: string; required
     </div>
   );
 }
+
+/**
+ * `chainId`, documented once.
+ *
+ * Every v1 route takes it and every v1 route defaults it to Robinhood, so writing the row seven times
+ * is seven chances for the tables to disagree with each other about what the default is. The GET and
+ * POST wordings differ only in where the parameter is written.
+ */
+const CHAIN_PARAM_DESC =
+  "Which chain to answer for: 4663 (Robinhood Chain) or 5042 (Arc). Default: 4663. An unsupported " +
+  "chain is refused with a 400 — this endpoint never answers for Robinhood under another chain's name.";
+const CHAIN_QUERY_PARAM = { name: "chainId", type: "number", required: false, desc: CHAIN_PARAM_DESC };
+const CHAIN_BODY_PARAM = {
+  name: "chainId",
+  type: "number",
+  required: false,
+  desc: CHAIN_PARAM_DESC + " May also be passed in the query string.",
+};
+
+/** What each contract in the registry is FOR, in the order an integrator meets them. */
+const CONTRACT_ROWS: { key: keyof ChainContracts; label: string; desc: string }[] = [
+  { key: "MOLE_ROUTER", label: "MoleRouter", desc: "The aggregator's executor — and the approval target for a swap." },
+  { key: "MOLE_POSITIONS", label: "MolePositions", desc: "The ALM vault. Approve it to open an LP position; it custodies the position, so there is no NFT." },
+  { key: "MOLE_HOOK", label: "MoleHook", desc: "Part of the pool key. Sets the LP fee per swap and answers the TWAP the deposit gate prices against." },
+  { key: "POOL_MANAGER", label: "PoolManager", desc: "The Uniswap v4 singleton. A pool is a key hashed into it, not a contract of its own." },
+  { key: "MOLE_FEE_DIAL", label: "MoleFeeDial", desc: "Where MoleRouter reads the aggregator fee, in basis points, at swap time." },
+  { key: "WETH", label: "WETH", desc: "Wrapped native, where the chain has one." },
+];
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 function MethodBadge({ method }: { method: "GET" | "POST" }) {
   return <span className={`docs-method ${method.toLowerCase()}`}>{method}</span>;
@@ -318,13 +354,13 @@ export default function ApiDocsPage() {
             <div className="docs-hero">
               <h1>MoleSwap API Documentation</h1>
               <p className="docs-hero-sub">
-                Integrate with MoleSwap DEX on Robinhood Chain. Get swap quotes, build transactions,
-                create pools, and add liquidity — all through a simple REST API.
+                Integrate with MoleSwap DEX on Robinhood Chain and Arc. Get swap quotes, build
+                transactions, create pools, and add liquidity — all through a simple REST API.
               </p>
               <div className="docs-hero-pills">
                 <span className="docs-pill">Base URL: <code>{BASE}/api/v1</code></span>
-                <span className="docs-pill">Chain ID: <code>4663</code></span>
-                <span className="docs-pill">Robinhood Chain</span>
+                <span className="docs-pill">Robinhood Chain <code>4663</code> — default</span>
+                <span className="docs-pill">Arc <code>5042</code></span>
               </div>
             </div>
 
@@ -470,6 +506,134 @@ X-RateLimit-Reset: 1711234627` }]} />
             </InfoCard>
           </section>
 
+          {/* ── CHAINS ── */}
+          <section id="chains" data-section>
+            <h2>Chains</h2>
+            <p>
+              MoleSwap runs on two chains, and every endpoint answers for exactly one of them. Say which
+              with <code>chainId</code> — in the query string on a <code>GET</code>, in the JSON body on a{" "}
+              <code>POST</code> (the query string works there too).
+            </p>
+
+            <div className="docs-param-table">
+              <table>
+                <thead><tr><th>Chain</th><th>chainId</th><th>Gas token</th><th>RPC</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td>Robinhood Chain <span className="docs-opt">default</span></td>
+                    <td><code>4663</code></td>
+                    <td>ETH (18 decimals)</td>
+                    <td><code>https://rpc.mainnet.chain.robinhood.com</code></td>
+                  </tr>
+                  <tr>
+                    <td>Arc</td>
+                    <td><code>5042</code></td>
+                    <td>USDC — see below</td>
+                    <td><code>https://www.moleswap.com/rpc/v1/arc</code></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <CodeTabs tabs={[
+              { label: "cURL", lang: "bash", code: `# No chainId → Robinhood Chain, exactly as before
+curl "${BASE}/api/v1/tokens"
+
+# Arc's token universe and Arc's contract addresses
+curl "${BASE}/api/v1/tokens?chainId=5042"
+
+# A chain we do not serve is a 400, not a Robinhood answer
+curl "${BASE}/api/v1/tokens?chainId=1"` },
+              { label: "JavaScript", lang: "js", code: `const arc = await fetch("${BASE}/api/v1/tokens?chainId=5042").then(r => r.json());
+console.log(arc.data.contracts.swapRouter);   // Arc's MoleRouter — never Robinhood's
+
+// POST routes take it in the body
+const tx = await fetch("${BASE}/api/v1/tx/add-liquidity", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ chainId: 5042, /* ...deposit params... */ }),
+}).then(r => r.json());` },
+            ]} />
+
+            <InfoCard icon="🧭" title="Omitting chainId means 4663, and always will">
+              This API served one chain for long enough that integrators shipped against it. A request with no{" "}
+              <code>chainId</code> is therefore answered for Robinhood Chain exactly as it was before Arc existed.
+              Silently re-pointing a running integration at another chain would be a worse bug than the one the
+              parameter fixes.
+            </InfoCard>
+
+            <InfoCard icon="⛔" title="An unknown chain is refused, never absorbed">
+              <code>chainId=1</code> returns <code>400</code> and names the chains that are served. It does not
+              quietly fall back: a response carrying another chain's router address and another chain's prices
+              looks exactly like a correct one, and an approval built from it lands somewhere the caller never meant.
+            </InfoCard>
+
+            <h3>What is live where</h3>
+            <p>
+              Where a product is not live on the chain you asked for, the endpoint says so by name and points at the
+              chains that do have it. A flat <code>404</code> would leave you unable to tell a wrong address from a
+              wrong chain.
+            </p>
+            <div className="docs-param-table">
+              <table>
+                <thead><tr><th>Capability</th><th>Robinhood 4663</th><th>Arc 5042</th><th>Refusal</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td>Swap calldata — <code>POST /tx/swap</code></td>
+                    <td>Live</td><td>Live</td>
+                    <td><code>400</code> if swapping is not live on the chain</td>
+                  </tr>
+                  <tr>
+                    <td>Quoting — <code>GET /quote</code></td>
+                    <td>Live</td><td>Not served yet</td>
+                    <td><code>501</code>, with why — see below</td>
+                  </tr>
+                  <tr>
+                    <td>LP pools — <code>GET /pools</code>, <code>POST /tx/add-liquidity</code></td>
+                    <td>WETH/USDG</td><td>USDC/Architects</td>
+                    <td><code>400</code> on a chain where the vault runs no pool</td>
+                  </tr>
+                  <tr>
+                    <td>Pool creation — <code>POST /tx/create-pool</code></td>
+                    <td>Live</td><td>No v3 factory</td>
+                    <td><code>400</code> naming the v4 pool to deposit into instead</td>
+                  </tr>
+                  <tr>
+                    <td>MoleQueue (batch auction)</td>
+                    <td>Deployed</td><td>Deliberately not deployed</td>
+                    <td><code>400</code> naming the chains that run it</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3>Arc pays gas in USDC</h3>
+            <p>
+              Arc has no ether. Its gas token is USDC, and the same balance is read two ways: the{" "}
+              <strong>native</strong> unit (<code>eth_getBalance</code>, <code>msg.value</code>) is
+              18-decimal, while the <strong>ERC-20</strong> view of that identical balance at{" "}
+              <code>0x3600000000000000000000000000000000000000</code> is 6-decimal. One balance, two
+              conventions, and nothing in between them — there is no wrapper contract to deposit into.{" "}
+              <code>GET /api/v1/tokens?chainId=5042</code> returns both counts in its{" "}
+              <code>nativeCurrency</code> block so a client never has to guess which one an amount is in.
+            </p>
+            <InfoCard icon="🚫" title="There is no WETH on Arc, so 0x0 is not a currency there">
+              On Robinhood, <code>0x000…000</code> means native ETH and the API inserts a wrap step for you. Arc
+              has no wrapped native at all, so every request that names <code>0x000…000</code> on chain 5042 is
+              refused rather than half-built: there is nothing to wrap into, and a transfer to the zero address
+              reverts on Arc outright. Spend Arc's gas token through its ERC-20 view instead.
+            </InfoCard>
+
+            <h3>Quoting is Robinhood-only for now</h3>
+            <p>
+              <code>GET /quote</code> and <code>POST /tx/swap</code> return <code>501</code> for chain 5042.
+              MoleRouter <em>is</em> live on Arc and the app swaps on it; what is Robinhood-only is this API's
+              off-chain pricing engine, whose pool registry indexes chain 4663 alone. Pointed at Arc addresses it
+              would not fail — it would price them against Robinhood liquidity and return a confident, wrong
+              number. The refusal lifts the day the registry carries chain ids.
+            </p>
+          </section>
+
           {/* ── CORE CONCEPTS ── */}
           <section id="concepts" data-section>
             <h2>Core Concepts</h2>
@@ -531,10 +695,12 @@ X-RateLimit-Reset: 1711234627` }]} />
           <section id="get-tokens" data-section>
             <h2>List Tokens</h2>
             <EndpointHeader method="GET" path="/api/v1/tokens" />
-            <p>Returns all supported ERC-20 tokens on Robinhood Chain, along with the core AMM contract addresses.</p>
+            <p>Returns one chain's supported ERC-20 tokens, along with that chain's core contract addresses
+              and the token it charges gas in.</p>
 
             <h3>Query Parameters</h3>
             <ParamTable params={[
+              CHAIN_QUERY_PARAM,
               { name: "active", type: "boolean", required: false, desc: "Only return tokens that have at least one live pool" },
               { name: "search", type: "string", required: false, desc: "Search by symbol, name, or contract address" },
             ]} />
@@ -548,15 +714,25 @@ curl "${BASE}/api/v1/tokens"
 curl "${BASE}/api/v1/tokens?active=true"
 
 # Search by symbol
-curl "${BASE}/api/v1/tokens?search=USDC"` },
+curl "${BASE}/api/v1/tokens?search=USDC"
+
+# Arc's token universe, and Arc's approval targets
+curl "${BASE}/api/v1/tokens?chainId=5042"` },
               { label: "JavaScript", lang: "js", code: `const res = await fetch("${BASE}/api/v1/tokens?active=true");
 const { data } = await res.json();
 console.log(data.tokens);       // Token list
 console.log(data.contracts);    // Core contract addresses` },
             ]} />
 
+            <InfoCard icon="🔑" title="These are approval targets">
+              <code>data.contracts</code> is what an integrator approves and calls. It is resolved from the chain
+              you asked for, so it can never hand back Robinhood's router under an Arc label — and where a chain
+              genuinely has no such contract the value is <code>null</code>, never the zero address, because{" "}
+              <code>0x000…000</code> reads as an address somebody will send to.
+            </InfoCard>
+
             <h3>Try it</h3>
-            <Playground method="GET" path="/api/v1/tokens" defaultParams={{ chain: "", search: "" }} />
+            <Playground method="GET" path="/api/v1/tokens" defaultParams={{ chainId: "4663", search: "" }} />
           </section>
 
           {/* ── GET /pools ── */}
@@ -567,7 +743,9 @@ console.log(data.contracts);    // Core contract addresses` },
 
             <h3>Query Parameters</h3>
             <ParamTable params={[
+              CHAIN_QUERY_PARAM,
               { name: "includeEmpty", type: "boolean", required: false, desc: "Include pools with zero liquidity. Default: false" },
+              { name: "category", type: "string", required: false, desc: "Filter by asset class: mains, stables, stocks, memes" },
             ]} />
 
             <h3>Examples</h3>
@@ -579,7 +757,7 @@ data.pools.forEach(p => console.log(\`\${p.name}: price \${p.price.toFixed(4)}\`
             ]} />
 
             <h3>Try it</h3>
-            <Playground method="GET" path="/api/v1/pools" defaultParams={{ includeEmpty: "" }} />
+            <Playground method="GET" path="/api/v1/pools" defaultParams={{ chainId: "4663", includeEmpty: "" }} />
           </section>
 
           {/* ── GET /pool/:address ── */}
@@ -592,6 +770,16 @@ data.pools.forEach(p => console.log(\`\${p.name}: price \${p.price.toFixed(4)}\`
             <ParamTable params={[
               { name: "address", type: "address", required: true, desc: "Pool contract address" },
             ]} />
+
+            <h3>Query Parameters</h3>
+            <ParamTable params={[CHAIN_QUERY_PARAM]} />
+
+            <InfoCard icon="🧭" title="The same address is a different contract on another chain">
+              The pool is read over the RPC of the chain you named, and its token symbols come from that same
+              chain's registry — a response can never pair one chain's price with another chain's metadata. Read
+              the wrong chain and the call either reverts or, worse, succeeds against something that merely
+              answers <code>slot0()</code>.
+            </InfoCard>
 
             <h3>Examples</h3>
             <CodeTabs tabs={[
@@ -606,7 +794,8 @@ console.log(\`Explorer: \${data.explorer}\`);` },
             ]} />
 
             <h3>Try it</h3>
-            <Playground method="GET" path="/api/v1/pool/0x012d5C099f8AE00009f40824317a18c3A342f622" />
+            <Playground method="GET" path="/api/v1/pool/0x012d5C099f8AE00009f40824317a18c3A342f622"
+              defaultParams={{ chainId: "4663" }} />
           </section>
 
           {/* ── GET /quote ── */}
@@ -618,6 +807,7 @@ console.log(\`Explorer: \${data.explorer}\`);` },
 
             <h3>Query Parameters</h3>
             <ParamTable params={[
+              CHAIN_QUERY_PARAM,
               { name: "tokenIn", type: "address", required: true, desc: "Input token address. Use 0x000...000 for native PC." },
               { name: "tokenOut", type: "address", required: true, desc: "Output token address" },
               { name: "amountIn", type: "string", required: true, desc: "Input amount in WEI (raw BigInt string)" },
@@ -652,6 +842,7 @@ if (quote.data.type === "multi_hop") {
 
             <h3>Try it</h3>
             <Playground method="GET" path="/api/v1/quote" defaultParams={{
+              chainId: "4663",
               tokenIn: "0x0000000000000000000000000000000000000000",
               tokenOut: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
               amountIn: "1000000000000000000",
@@ -667,6 +858,7 @@ if (quote.data.type === "multi_hop") {
 
             <h3>Request Body</h3>
             <ParamTable params={[
+              CHAIN_BODY_PARAM,
               { name: "tokenIn", type: "address", required: true, desc: "Input token address" },
               { name: "tokenOut", type: "address", required: true, desc: "Output token address" },
               { name: "amountIn", type: "string", required: true, desc: "Amount in WEI" },
@@ -684,6 +876,7 @@ if (quote.data.type === "multi_hop") {
 
             <h3>Try it</h3>
             <Playground method="POST" path="/api/v1/tx/swap" defaultBody={{
+              chainId: 4663,
               tokenIn: "0x0000000000000000000000000000000000000000",
               tokenOut: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
               amountIn: "1000000000000000000",
@@ -696,11 +889,12 @@ if (quote.data.type === "multi_hop") {
           <section id="post-create-pool" data-section>
             <h2>Create Pool</h2>
             <EndpointHeader method="POST" path="/api/v1/tx/create-pool" />
-            <p>Build calldata to create a new pool on the Uniswap V3 Factory, initialize it with a starting price,
-              and optionally seed initial liquidity — all in one API call.</p>
+            <p>Build calldata to create a new pool on the v3-style factory and initialize it with a starting
+              price. Robinhood Chain only — see below.</p>
 
             <h3>Request Body</h3>
             <ParamTable params={[
+              CHAIN_BODY_PARAM,
               { name: "tokenA", type: "address", required: true, desc: "First token address" },
               { name: "tokenB", type: "address", required: true, desc: "Second token address (typically WETH)" },
               { name: "recipient", type: "address", required: true, desc: "Address to receive the LP position NFT" },
@@ -714,13 +908,27 @@ if (quote.data.type === "multi_hop") {
             ]} />
 
             <InfoCard icon="💡" title="Pool already exists?">
-              If the pool already exists, the API skips the createPool and initialize steps and returns only the
-              liquidity provision transactions. The response <code>type</code> field will be <code>add_liquidity_existing</code> instead
-              of <code>create_pool</code>.
+              If the pool already exists the API builds nothing and returns its address, with{" "}
+              <code>type: "pool_exists"</code> instead of <code>type: "create_pool"</code>.
+            </InfoCard>
+
+            <InfoCard icon="🌱" title="Seeding is not part of this call">
+              Seeding a brand-new pool needs a NonfungiblePositionManager, and neither chain has one deployed. The
+              response therefore contains only the steps that will actually execute — <code>createPool</code>,
+              then <code>initialize</code> if you passed a price — and <code>seedNote</code> points you at the vault for
+              liquidity. Returning a mint step against a contract that is not there would hand you calldata that
+              reverts on send.
+            </InfoCard>
+
+            <InfoCard icon="⛔" title="Arc has no factory to create against">
+              <code>chainId=5042</code> is refused with a <code>400</code>. Arc carries the Uniswap v4 singleton but
+              no v3 factory and no Uniswap periphery — there is no <code>createPool</code> to encode. MoleSwap's Arc
+              pool is a v4 pool bound to MoleHook; add liquidity to it through <code>POST /tx/add-liquidity</code>.
             </InfoCard>
 
             <h3>Try it</h3>
             <Playground method="POST" path="/api/v1/tx/create-pool" defaultBody={{
+              chainId: 4663,
               tokenA: "0x5861f56A556c990358cc9cccd8B5baa3767982A8",
               tokenB: "0xE17DD2E0509f99E9ee9469Cf6634048Ec5a3ADe9",
               fee: 500,
@@ -735,11 +943,13 @@ if (quote.data.type === "multi_hop") {
           <section id="post-add-liquidity" data-section>
             <h2>Add Liquidity</h2>
             <EndpointHeader method="POST" path="/api/v1/tx/add-liquidity" />
-            <p>Build calldata to add liquidity to an existing pool via the NonfungiblePositionManager.
-              Returns wrap, approve, and mint steps.</p>
+            <p>Build calldata to deposit into the Uniswap-v4 pool the MoleSwap vault runs on the chain you name —
+              WETH/USDG on Robinhood Chain, USDC/Architects on Arc. Returns approve steps and the{" "}
+              <code>MolePositions.open</code> that mints the position.</p>
 
             <h3>Request Body</h3>
             <ParamTable params={[
+              CHAIN_BODY_PARAM,
               { name: "token0", type: "address", required: true, desc: "First token address" },
               { name: "token1", type: "address", required: true, desc: "Second token address" },
               { name: "amount0Desired", type: "string", required: true, desc: "Amount of token0 in WEI" },
@@ -751,8 +961,17 @@ if (quote.data.type === "multi_hop") {
               { name: "slippageBps", type: "number", required: false, desc: "Slippage. Default: 50 (0.5%)" },
             ]} />
 
+            <InfoCard icon="🏦" title="One whitelisted pool per chain, and the position is vault-custodied">
+              The vault mints through <code>MolePositions.open</code>, not a position NFT — there is no
+              NonfungiblePositionManager on either chain, and the position is read back with{" "}
+              <code>positionsOf(owner)</code>. Pass the pool's own currencies: a pair the vault has not whitelisted
+              is refused with the real pair named, so a wrong chain reads as a wrong chain rather than as a
+              missing pool. On Arc there is no wrapped native, so <code>0x000…000</code> is not a leg of anything.
+            </InfoCard>
+
             <h3>Try it</h3>
             <Playground method="POST" path="/api/v1/tx/add-liquidity" defaultBody={{
+              chainId: 4663,
               token0: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
               token1: "0xE17DD2E0509f99E9ee9469Cf6634048Ec5a3ADe9",
               amount0Desired: "500000000000000000",
@@ -907,45 +1126,73 @@ mole.getExplorerUrl("0xTX_HASH");
           {/* ── CONTRACTS ── */}
           <section id="contracts" data-section>
             <h2>Contract Addresses</h2>
-            <p>All contracts are deployed on Robinhood Chain (Chain ID: 4663).</p>
+            <p>
+              Rendered from the same registry the API resolves addresses from, so this table and{" "}
+              <code>GET /api/v1/tokens?chainId=…</code> can never disagree. Approve and call these, and
+              nothing else.
+            </p>
 
-            <div className="docs-contracts-table">
-              <table>
-                <thead><tr><th>Contract</th><th>Address</th><th>Description</th></tr></thead>
-                <tbody>
-                  {[
-                    ["Factory", "0x81b8Bca02580C7d6b636051FDb7baAC436bFb454", "Creates new pools, stores pool registry"],
-                    ["SwapRouter", "0x5D548bB9E305AAe0d6dc6e6fdc3ab419f6aC0037", "Executes swaps (exactInputSingle, exactOutputSingle)"],
-                    ["QuoterV2", "0x83316275f7C2F79BC4E26f089333e88E89093037", "Off-chain swap quotes (no gas cost)"],
-                    ["PositionManager", "0xf9b3ac66aed14A2C7D9AA7696841aB6B27a6231e", "Manages liquidity positions (mint, collect, burn)"],
-                    ["WETH", "0xE17DD2E0509f99E9ee9469Cf6634048Ec5a3ADe9", "Wrapped Robinhood Chain (WETH9 equivalent)"],
-                    ["TickLens", "0xb64113Fc16055AfE606f25658812EE245Aa41dDC", "Read tick data for pools"],
-                    ["Multicall", "0xa8c00017955c8654bfFbb6d5179c99f5aB8B7849", "Batch multiple calls in one transaction"],
-                  ].map(([name, addr, desc]) => (
-                    <tr key={name}>
-                      <td><strong>{name}</strong></td>
-                      <td><a href={`https://robinhoodchain.blockscout.com/address/${addr}`} target="_blank" rel="noopener noreferrer"><code>{addr}</code></a></td>
-                      <td>{desc}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {SUPPORTED_CHAINS.map(chain => {
+              const c = contractsFor(chain.id);
+              return (
+                <div key={chain.id}>
+                  <h3>{chain.name} — chainId {chain.id}</h3>
+                  <div className="docs-contracts-table">
+                    <table>
+                      <thead><tr><th>Contract</th><th>Address</th><th>Description</th></tr></thead>
+                      <tbody>
+                        {CONTRACT_ROWS.map(row => {
+                          const addr = c[row.key];
+                          const deployed = addr && addr !== ZERO_ADDRESS;
+                          return (
+                            <tr key={row.label}>
+                              <td><strong>{row.label}</strong></td>
+                              <td>
+                                {deployed
+                                  ? <a href={`${chain.explorerUrl}/address/${addr}`} target="_blank" rel="noopener noreferrer"><code>{addr}</code></a>
+                                  : <span className="docs-opt">not deployed on {chain.shortName}</span>}
+                              </td>
+                              <td>{row.desc}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+
+            <InfoCard icon="🕳️" title="Not deployed means absent, not zero">
+              Where a chain has no such contract the cell says so. It is never filled with{" "}
+              <code>0x000…000</code>, and neither is the API's <code>contracts</code> block: a zero
+              address reads as an address somebody will send to, and on Arc a transfer to it reverts.
+              Arc's <code>WETH</code> row is the one that matters — there is no wrapped native there at all.
+            </InfoCard>
 
             <h3>Network Details</h3>
-            <CodeTabs tabs={[
-              { label: "Network Config", lang: "json", code: `{
-  "chainId": 4663,
-  "chainName": "Robinhood Chain",
-  "rpcUrl": "https://rpc.mainnet.chain.robinhood.com/",
-  "explorer": "https://robinhoodchain.blockscout.com",
-  "nativeCurrency": {
-    "name": "Robinhood Chain",
-    "symbol": "PC",
-    "decimals": 18
-  }
-}` },
-            ]} />
+            <CodeTabs tabs={SUPPORTED_CHAINS.map(chain => ({
+              label: chain.name,
+              lang: "json",
+              code: JSON.stringify({
+                chainId: chain.id,
+                chainName: chain.name,
+                rpcUrl: chain.rpcUrl,
+                explorer: chain.explorerUrl,
+                nativeCurrency: {
+                  name: chain.nativeSymbol,
+                  symbol: chain.nativeSymbol,
+                  decimals: chain.nativeDecimals,
+                },
+              }, null, 2),
+            }))} />
+
+            <InfoCard icon="⛽" title="Arc's native decimals are the wallet's, not the pool's">
+              The <code>18</code> above is what a wallet divides <code>eth_getBalance</code> by on Arc. The
+              ERC-20 view of that identical balance is 6-decimal. Read the{" "}
+              <code>nativeCurrency</code> block of <code>GET /api/v1/tokens?chainId=5042</code> for both
+              numbers together rather than picking one here.
+            </InfoCard>
           </section>
 
           {/* ── FOOTER ── */}

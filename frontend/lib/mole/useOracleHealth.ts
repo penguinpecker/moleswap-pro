@@ -11,9 +11,11 @@
  */
 import { useEffect, useState } from "react";
 import type { Hex } from "./chain";
-import { LIVE_POOL_ID } from "./chain";
+import { LIVE_POOL_ID, QUEUE_CONFIG } from "./chain";
+import { RH_CHAIN } from "@/lib/chain/chains";
 import {
   oracleClient,
+  oracleHookFor,
   oracleStaleness,
   readLivePoolCrossCheck,
   readOracleHealth,
@@ -30,25 +32,40 @@ export interface OracleHealthView {
   readonly cross: CrossCheck | null;
 }
 
-export function useOracleHealth(opts: { poolId?: Hex; enabled?: boolean; crossCheck?: boolean } = {}): OracleHealthView {
+export function useOracleHealth(
+  opts: { poolId?: Hex; chainId?: number; enabled?: boolean; crossCheck?: boolean } = {},
+): OracleHealthView {
   const poolId = opts.poolId ?? (LIVE_POOL_ID as Hex);
+  // Omitting the chain keeps the Robinhood reading every screen had before the ALM shipped on Arc. A
+  // screen that resolves its own chain (the vault card) passes it, so the badge speaks about the pool
+  // on screen rather than about Robinhood's.
+  const chainId = opts.chainId ?? RH_CHAIN.id;
   const enabled = opts.enabled ?? true;
-  const wantCross = (opts.crossCheck ?? false) && poolId.toLowerCase() === LIVE_POOL_ID.toLowerCase();
+  // The Chainlink reference is an ETH/USD feed deployed on Robinhood; there is no equivalent on Arc,
+  // and a cross-check run against a chain that has no feed would compare a price to nothing. Gated on
+  // the pool AND the chain, not on the pool alone — ids are per-chain, so pool identity is not enough.
+  const wantCross =
+    (opts.crossCheck ?? false) &&
+    chainId === RH_CHAIN.id &&
+    poolId.toLowerCase() === LIVE_POOL_ID.toLowerCase();
   const [read, setRead] = useState<OracleHealth | null>(null);
   const [cross, setCross] = useState<CrossCheck | null>(null);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
   useEffect(() => {
     // A different pool is a different series: never carry one pool's reading or cross-check to another.
+    // The same goes for a different chain — the pool id alone does not identify the ring it came from.
     setRead(null);
     setCross(null);
     if (!enabled) return;
     let cancelled = false;
     const load = async () => {
       try {
-        const c = oracleClient();
+        // Reader and hook are resolved from the SAME chain id, together, so they cannot drift apart.
+        const c = oracleClient(chainId);
+        const hook = oracleHookFor(chainId);
         const nowSec = Math.floor(Date.now() / 1000);
-        const h = await readOracleHealth(c, poolId, nowSec);
+        const h = await readOracleHealth(c, poolId, nowSec, QUEUE_CONFIG.twapWindow, hook);
         if (cancelled) return;
         setRead(h);
         if (wantCross && h.mid !== null) {
@@ -71,7 +88,7 @@ export function useOracleHealth(opts: { poolId?: Hex; enabled?: boolean; crossCh
       clearInterval(p);
       clearInterval(t);
     };
-  }, [poolId, enabled, wantCross]);
+  }, [poolId, chainId, enabled, wantCross]);
 
   // Age keeps counting between polls; staleness flips on the boundary without waiting for a refresh.
   const oracle = read ? { ...read, ...oracleStaleness(read.observedAt, now) } : null;

@@ -1,11 +1,8 @@
 import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import {
-  CONTRACTS, POOLS, RH_RPC_URL,
-  POOL_ABI, ERC20_ABI,
-  getTokenByAddress,
-} from "@/lib/chain/contracts";
+import { POOLS, POOL_ABI, ERC20_ABI } from "@/lib/chain/contracts";
+import { resolveApiChain, chainParamFrom, tokenIn } from "@/lib/api/chain-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,6 +11,18 @@ export async function OPTIONS() {
   return corsPreflightResponse();
 }
 
+/**
+ * GET /api/v1/pool/:address — one v3-style pool contract, read live.
+ *
+ * `?chainId=` picks the chain and defaults to Robinhood (4663). It is not cosmetic: the same address
+ * can hold an entirely different contract on another chain, and reading it over the wrong RPC either
+ * reverts or — worse — succeeds against something that merely answers `slot0()`. Token metadata and
+ * the explorer link come from the same scope as the RPC, so a response can never pair one chain's
+ * price with another chain's symbols.
+ *
+ * v4 pools are NOT addressable this way — they are keys hashed into the PoolManager singleton. Use
+ * /api/v1/pools, which reports them by PoolId.
+ */
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ address: string }> }
@@ -22,12 +31,16 @@ export async function GET(
   if (blocked) return blocked;
 
   try {
+    const resolved = resolveApiChain(chainParamFrom(req.nextUrl.searchParams));
+    if (!resolved.ok) return apiError(resolved.error, 400);
+    const scope = resolved.scope;
+
     const { address } = await params;
     if (!ethers.isAddress(address)) {
       return apiError("Invalid pool address", 400);
     }
 
-    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
+    const provider = new ethers.JsonRpcProvider(scope.rpcUrl);
     const contract = new ethers.Contract(address, POOL_ABI, provider);
 
     const [slot0, liquidity, token0Addr, token1Addr, fee] = await Promise.all([
@@ -38,8 +51,10 @@ export async function GET(
       contract.fee(),
     ]);
 
-    const token0Info = getTokenByAddress(token0Addr);
-    const token1Info = getTokenByAddress(token1Addr);
+    const token0Info = tokenIn(scope, token0Addr);
+    const token1Info = tokenIn(scope, token1Addr);
+    // The named-pool registry is Robinhood's PancakeSwap tier list; on any other chain there simply is
+    // no curated name, and the symbol pair below is the answer.
     const poolInfo = POOLS.find(
       (p) => p.address.toLowerCase() === address.toLowerCase()
     );
@@ -69,6 +84,8 @@ export async function GET(
 
     return apiResponse({
       address,
+      chainId: scope.chainId,
+      chain: scope.meta.name,
       name: poolInfo?.name || `${token0Info?.symbol || "???"}/${token1Info?.symbol || "???"}`,
       fee: Number(fee),
       feeTier: `${Number(fee) / 10000}%`,
@@ -91,7 +108,7 @@ export async function GET(
       liquidity: liquidity.toString(),
       hasLiquidity: BigInt(liquidity.toString()) > 0n,
       price,
-      explorer: `https://robinhoodchain.blockscout.com/address/${address}`,
+      explorer: scope.explorerUrl ? `${scope.explorerUrl}/address/${address}` : null,
     });
   } catch (err: any) {
     return apiError(err.message || "Failed to fetch pool", 500);

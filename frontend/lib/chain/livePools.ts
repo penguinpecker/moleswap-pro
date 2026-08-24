@@ -24,8 +24,56 @@ import { createClient } from "@supabase/supabase-js";
 import { CONTRACTS, type TokenInfo, type PoolInfo } from "./contracts";
 
 const USDG_ADDRESS = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+/** The v4 StateView. Uniswap's deployment, at the SAME address on Robinhood and on Arc (verified). */
 const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b";
-const POSITIONS = CONTRACTS.MOLE_POSITIONS;
+
+/**
+ * WHICH CHAIN'S POOLS TO LOAD.
+ *
+ * This module was written when MoleSwap ran one chain, so every address in it was a module constant.
+ * The ALM now runs on Arc too, and the numbers here — the vault to enumerate positions from, which
+ * leg prices the pool, what a token's `sourceChain` says — are all chain-specific. They move into a
+ * scope so a caller names the chain instead of inheriting Robinhood's by accident. Callers who pass
+ * nothing get exactly the Robinhood behaviour they had before.
+ */
+export interface LivePoolScope {
+  chainId: number;
+  /** MolePositions on this chain — the vault whose open positions ARE the pool's reserves. */
+  positions: string;
+  /** What a token's `sourceChain` reports. */
+  sourceChain: string;
+  /** The stable leg that prices a pool in dollars directly. */
+  hubStable: string;
+  /** Wrapped native, priced through the stable/native pool. null where the chain has none (Arc). */
+  hubNative: string | null;
+  /**
+   * Pools to list when the registry has no rows for this chain, as code.
+   *
+   * The indexer writes every `mp_pools` row with chain_id 4663 — Arc's live pool is simply not in the
+   * table. Filtering by chain_id and stopping there would report `count: 0` for a pool holding real
+   * money, which is the same class of lie as reporting Robinhood's. Each entry's key was verified to
+   * keccak-hash to exactly its id, so these are on-chain identities, not a cache. Same discipline as
+   * the aggregator's degraded-mode rows.
+   */
+  staticPools?: {
+    id: string;
+    token0: string;
+    token1: string;
+    fee: number;
+    tick_spacing: number;
+    hooks: string;
+  }[];
+  /** Token metadata for chains `mp_tokens` does not index. Looked up by address, never by symbol. */
+  staticTokens?: TokenInfo[];
+}
+
+const RH_SCOPE: LivePoolScope = {
+  chainId: 4663,
+  positions: CONTRACTS.MOLE_POSITIONS,
+  sourceChain: "Robinhood Chain",
+  hubStable: USDG_ADDRESS,
+  hubNative: CONTRACTS.WETH,
+};
 
 /** Asset class of a pool, derived from its non-hub leg. Drives the category filter on /pools. */
 export type AssetCategory = "mains" | "stables" | "stocks" | "memes";
@@ -48,7 +96,8 @@ export interface LivePool {
   reserve1: number;
   tvlUsd: number;
   category: AssetCategory;
-  /** Which leg is the pricing hub. */
+  /** Which ROLE priced this pool: "usdg" = the chain's stable hub, "weth" = its wrapped native. The
+   *  two labels are Robinhood's token symbols for historical reasons; on Arc the stable hub is USDC. */
   hub: "weth" | "usdg";
 }
 
@@ -106,18 +155,22 @@ function sb() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-let _cache: { at: number; rows: LivePool[] } | null = null;
+/** Keyed by chain: one chain's answer must never be served as another's. */
+const _cache = new Map<number, { at: number; rows: LivePool[] }>();
 
 export async function loadLivePools(
   provider: ethers.Provider,
   _limit = 24,
   ttlMs = 60_000,
+  scope: LivePoolScope = RH_SCOPE,
 ): Promise<LivePool[]> {
   const now = Date.now();
-  if (_cache && now - _cache.at < ttlMs) return _cache.rows;
+  const cached = _cache.get(scope.chainId);
+  if (cached && now - cached.at < ttlMs) return cached.rows;
+  const stale = () => cached?.rows ?? [];
 
   const client = sb();
-  if (!client) return _cache?.rows ?? [];
+  if (!client) return stale();
 
   // NOT gated on `active`. That column answers the AGGREGATOR's question — "may the router build a
   // path through this pool" — and the indexer sets it from `routable`, which is false for any v4 pool
@@ -141,7 +194,10 @@ export async function loadLivePools(
     const res = await client
       .from("mp_pools")
       .select("id,token0,token1,fee,tick_spacing,hooks")
-      .eq("venue", "mole_v4");
+      .eq("venue", "mole_v4")
+      // Scoped to the chain, so a chain the indexer does not cover reads as EMPTY rather than as
+      // Robinhood's pools wearing another chain's label.
+      .eq("chain_id", scope.chainId);
     poolRows = res.data as any[] | null;
     error = res.error;
     if (!error) break;
@@ -151,11 +207,18 @@ export async function loadLivePools(
   // no pools", which is exactly how /pools sat empty without anyone seeing a reason.
   if (error) {
     console.error("loadLivePools: mp_pools query failed:", error.message || error);
-    return _cache?.rows ?? [];
+    if (!scope.staticPools?.length) return stale();
+    poolRows = null;
   }
   if (!poolRows?.length) {
-    console.warn("loadLivePools: no mole_v4 pools registered in mp_pools");
-    return _cache?.rows ?? [];
+    // The registry has nothing for this chain. Where the chain's pools are pinned as code, list those
+    // — a live pool that the indexer has not reached is still a live pool.
+    if (scope.staticPools?.length) {
+      poolRows = scope.staticPools.map((p) => ({ ...p }));
+    } else {
+      console.warn(`loadLivePools: no mole_v4 pools registered in mp_pools for chain ${scope.chainId}`);
+      return stale();
+    }
   }
 
   // Token metadata for every leg in one round trip.
@@ -168,22 +231,34 @@ export async function loadLivePools(
     .in("address", addrs);
   const metaOf = new Map<string, any>((tokenRows || []).map((t: any) => [String(t.address).toLowerCase(), t]));
 
+  // Metadata the registry does not carry, pinned per chain. Consulted only where mp_tokens is silent,
+  // so the indexer stays authoritative wherever it has actually indexed the token.
+  const pinned = new Map<string, TokenInfo>(
+    (scope.staticTokens || []).map((t) => [t.address.toLowerCase(), t]),
+  );
+
   const toToken = (addr: string): TokenInfo => {
     const m = metaOf.get(addr.toLowerCase());
+    const p = pinned.get(addr.toLowerCase());
+    // DECIMALS ARE NEVER GUESSED WHERE THEY ARE KNOWN. Arc's USDC leg is 6-decimal through the ERC-20
+    // view; defaulting it to 18 would misreport that pool's reserves by a factor of a trillion.
+    const decimals = m?.decimals !== undefined && m?.decimals !== null
+      ? Number(m.decimals)
+      : p?.decimals ?? 18;
     return {
       address: ethers.getAddress(addr),
-      symbol: m?.symbol || "???",
-      name: m?.name || m?.symbol || "Unknown",
-      decimals: Number(m?.decimals ?? 18),
-      sourceChain: "Robinhood Chain",
-      logoURI: m?.logo_url || "",
+      symbol: m?.symbol || p?.symbol || "???",
+      name: m?.name || m?.symbol || p?.name || "Unknown",
+      decimals,
+      sourceChain: scope.sourceChain,
+      logoURI: m?.logo_url || p?.logoURI || "",
       swappable: true,
-      ...(m?.is_stable ? { isStable: true } : {}),
+      ...(m?.is_stable || (p as any)?.isStable ? { isStable: true } : {}),
     } as TokenInfo;
   };
 
   const sv = new ethers.Contract(STATE_VIEW, stateViewAbi, provider);
-  const pm = new ethers.Contract(POSITIONS, positionsAbi, provider);
+  const pm = new ethers.Contract(scope.positions, positionsAbi, provider);
 
   // All open positions once, then bucketed by pool — one pass instead of a scan per pool.
   const byPool = new Map<string, { lower: number; upper: number; L: bigint }[]>();
@@ -235,8 +310,10 @@ export async function loadLivePools(
       const raw = Number((sqr * 10n ** 18n) / (1n << 192n)) / 1e18;
       const price = raw * 10 ** (token0.decimals - token1.decimals);
 
-      const usdgLc = USDG_ADDRESS.toLowerCase();
-      const wethLc = CONTRACTS.WETH.toLowerCase();
+      const usdgLc = scope.hubStable.toLowerCase();
+      // A chain with no wrapped native (Arc) has no native hub to compare against; the sentinel below
+      // can never equal a real leg, so every pool there prices off the stable hub alone.
+      const wethLc = scope.hubNative ? scope.hubNative.toLowerCase() : "\u0000";
       const legs = [token0.address.toLowerCase(), token1.address.toLowerCase()];
       const hub: "weth" | "usdg" = legs.includes(usdgLc) ? "usdg" : "weth";
       const isHubPair = legs.includes(usdgLc) && legs.includes(wethLc);
@@ -273,11 +350,11 @@ export async function loadLivePools(
     .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
     .map((r) => r.value)
     .filter(Boolean);
-  if (!rows.length) return _cache?.rows ?? [];
+  if (!rows.length) return stale();
 
-  // ETH price from our own deepest WETH/USDG pool, so the page agrees with the swap engine.
-  const wethLc = CONTRACTS.WETH.toLowerCase();
-  const usdgLc = USDG_ADDRESS.toLowerCase();
+  // ETH price from our own deepest native/stable pool, so the page agrees with the swap engine.
+  const wethLc = scope.hubNative ? scope.hubNative.toLowerCase() : "\u0000";
+  const usdgLc = scope.hubStable.toLowerCase();
   const ethRow = rows
     .filter((r: any) => {
       const l = [r.token0.address.toLowerCase(), r.token1.address.toLowerCase()];
@@ -311,7 +388,7 @@ export async function loadLivePools(
   });
 
   priced.sort((a, b) => b.tvlUsd - a.tvlUsd);
-  _cache = { at: now, rows: priced };
+  _cache.set(scope.chainId, { at: now, rows: priced });
   return priced;
 }
 

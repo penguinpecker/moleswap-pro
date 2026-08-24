@@ -1,8 +1,13 @@
 import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import { RH_RPC_URL, RH_PUBLIC_RPC_URL } from "@/lib/chain/contracts";
-import { loadLivePools } from "@/lib/chain/livePools";
+import { loadLivePools, type LivePoolScope } from "@/lib/chain/livePools";
+import {
+  resolveApiChain,
+  chainParamFrom,
+  vaultUnavailable,
+  type ApiChainScope,
+} from "@/lib/api/chain-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,11 +17,47 @@ export async function OPTIONS() {
 }
 
 /**
+ * The pool loader's view of a chain, derived from the API scope so the two can never disagree about
+ * which vault's positions are being summed.
+ *
+ * The static pool + token pins matter on Arc and nowhere else: the indexer stamps every `mp_pools`
+ * row with chain_id 4663, so a chain-scoped query finds nothing for Arc even though the pool holds
+ * real money. Listing it from its verified key is the honest answer; reporting `count: 0` would not be.
+ */
+function poolScopeFor(scope: ApiChainScope): LivePoolScope {
+  const vault = scope.vaultPool;
+  return {
+    chainId: scope.chainId,
+    positions: scope.contracts.MOLE_POSITIONS,
+    sourceChain: scope.meta.name,
+    hubStable: vault?.stable.address ?? "",
+    hubNative: scope.wrappedNative,
+    staticPools: vault
+      ? [
+          {
+            id: vault.id,
+            token0: vault.key.currency0,
+            token1: vault.key.currency1,
+            fee: vault.key.fee,
+            tick_spacing: vault.key.tickSpacing,
+            hooks: vault.key.hooks,
+          },
+        ]
+      : undefined,
+    staticTokens: scope.tokens,
+  };
+}
+
+/**
  * MoleSwap's own pools — the Uniswap-v4 pools bound to MoleHook that were created on this platform.
  *
  * Deliberately NOT a list of every venue on the chain. The aggregator routes across six external
  * factories to get the best price, but that is the router's business; this endpoint answers "what
  * pools does MoleSwap run", which is what the pools page is about.
+ *
+ * `?chainId=` picks the chain and defaults to Robinhood (4663). A chain with no vault is refused by
+ * name rather than answered with another chain's pools: a pool list is a list of places to put money,
+ * and the one thing worse than an empty one is a confident one pointing at the wrong chain.
  *
  * `?category=` filters by asset class (mains | stables | stocks | memes).
  */
@@ -25,11 +66,18 @@ export async function GET(req: NextRequest) {
   if (blocked) return blocked;
 
   try {
-    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
+    const resolved = resolveApiChain(chainParamFrom(req.nextUrl.searchParams));
+    if (!resolved.ok) return apiError(resolved.error, 400);
+    const scope = resolved.scope;
+
+    const unavailable = vaultUnavailable(scope);
+    if (unavailable) return apiError(unavailable, 400);
+
+    const provider = new ethers.JsonRpcProvider(scope.rpcUrl);
     const includeEmpty = req.nextUrl.searchParams.get("includeEmpty") === "true";
     const category = (req.nextUrl.searchParams.get("category") || "").toLowerCase();
 
-    let pools = await loadLivePools(provider);
+    let pools = await loadLivePools(provider, 24, 60_000, poolScopeFor(scope));
 
     if (category && category !== "all") {
       pools = pools.filter((p) => p.category === category);
@@ -44,8 +92,9 @@ export async function GET(req: NextRequest) {
 
     return apiResponse({
       count: pools.length,
-      chainId: 4663,
-      rpc: RH_PUBLIC_RPC_URL,
+      chainId: scope.chainId,
+      chain: scope.meta.name,
+      rpc: scope.publicRpcUrl,
       categories: counts,
       totalTvlUsd: pools.reduce((s, p) => s + p.tvlUsd, 0),
       pools: pools.map((p) => ({

@@ -2,12 +2,17 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import {
-  CONTRACTS, RH_RPC_URL, RH_PUBLIC_RPC_URL, RH_CHAIN_ID,
   POSITION_MANAGER_ABI, LIQUIDITY_PROXY_ABI, ERC20_ABI,
   TICK_SPACINGS, MIN_TICK, MAX_TICK,
-  getTokenByAddress,
 } from "@/lib/chain/contracts";
 import { assertValidDecimals, formatUnitsDisplay } from "@/lib/mole/format";
+import {
+  resolveApiChain,
+  chainFieldFrom,
+  chainParamFrom,
+  tokenIn as tokenInScope,
+  type ApiChainScope,
+} from "@/lib/api/chain-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,8 +26,12 @@ export const dynamic = "force-dynamic";
  * real pool's price by twelve orders of magnitude. An unknown token is asked on-chain; a token that
  * will not answer `decimals()` is an ERROR, never a guess.
  */
-async function resolveDecimals(provider: ethers.Provider, address: string): Promise<number> {
-  const known = getTokenByAddress(address);
+async function resolveDecimals(
+  scope: ApiChainScope,
+  provider: ethers.Provider,
+  address: string,
+): Promise<number> {
+  const known = tokenInScope(scope, address);
   if (known) {
     assertValidDecimals(known.decimals);
     return known.decimals;
@@ -67,6 +76,29 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
+
+    const resolved = resolveApiChain(
+      chainFieldFrom(body) ?? chainParamFrom(req.nextUrl.searchParams),
+    );
+    if (!resolved.ok) return apiError(resolved.error, 400);
+    const scope = resolved.scope;
+
+    // A v3-style `createPool(tokenA, tokenB, fee)` needs a v3 factory, and only Robinhood has one of
+    // ours. Arc carries the Uniswap v4 singleton and StateView but NO Uniswap periphery at all — do
+    // not infer a factory from the singleton's presence. Saying so is the whole point: encoding a
+    // createPool call against a chain that has no factory produces calldata that reverts on send.
+    if (!scope.v3Factory) {
+      return apiError(
+        `Pool creation is not available on ${scope.meta.name} (chainId ${scope.chainId}): there is no ` +
+          "v3 factory deployed there, so there is no createPool to encode. MoleSwap's pool on that " +
+          `chain is a Uniswap-v4 pool bound to MoleHook (${scope.contracts.MOLE_HOOK})` +
+          (scope.vaultPool ? `, poolId ${scope.vaultPool.id}` : "") +
+          "; add liquidity to it through /api/v1/tx/add-liquidity.",
+        400,
+      );
+    }
+    const factoryAddress = scope.v3Factory;
+
     const {
       tokenA,
       tokenB,
@@ -104,36 +136,44 @@ export async function POST(req: NextRequest) {
       return apiError(`Invalid fee tier. Must be one of: ${validFees.join(", ")}`, 400);
     }
 
+    // 0x0 means "native", which only becomes a pool currency through its wrapped form.
+    if ((tokenA === ethers.ZeroAddress || tokenB === ethers.ZeroAddress) && !scope.wrappedNative) {
+      return apiError(
+        `${scope.meta.name} has no wrapped native token, so 0x0 cannot be a pool currency there. ` +
+          (scope.nativeCurrency.note ?? ""),
+        400,
+      );
+    }
     const actualA =
-      tokenA === ethers.ZeroAddress ? CONTRACTS.WETH : tokenA;
+      tokenA === ethers.ZeroAddress ? (scope.wrappedNative as string) : tokenA;
     const actualB =
-      tokenB === ethers.ZeroAddress ? CONTRACTS.WETH : tokenB;
+      tokenB === ethers.ZeroAddress ? (scope.wrappedNative as string) : tokenB;
 
     const [token0, token1] =
       actualA.toLowerCase() < actualB.toLowerCase()
         ? [actualA, actualB]
         : [actualB, actualA];
 
-    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
+    const provider = new ethers.JsonRpcProvider(scope.rpcUrl);
 
     // Metadata is looked up by the SORTED addresses, never by the caller's tokenA/tokenB order: pass
     // (USDG, WETH) and WETH still sorts to token0, so keying off tokenA would have paired token0=WETH
     // with USDG's 6 decimals and inverted the 10^12 scale inside priceToSqrtPriceX96.
-    const token0Info = getTokenByAddress(token0);
-    const token1Info = getTokenByAddress(token1);
+    const token0Info = tokenInScope(scope, token0);
+    const token1Info = tokenInScope(scope, token1);
 
     let dec0: number;
     let dec1: number;
     try {
       [dec0, dec1] = await Promise.all([
-        resolveDecimals(provider, token0),
-        resolveDecimals(provider, token1),
+        resolveDecimals(scope, provider, token0),
+        resolveDecimals(scope, provider, token1),
       ]);
     } catch (e: any) {
       return apiError(
         "Could not determine token decimals on-chain, and this API never assumes 18 — a 6-decimal token " +
           "priced as an 18-decimal one mis-initializes the pool by 10^12. Verify both addresses are " +
-          `ERC-20s on Robinhood Chain (chain ${RH_CHAIN_ID}) that answer decimals(). Underlying error: ` +
+          `ERC-20s on ${scope.meta.name} (chain ${scope.chainId}) that answer decimals(). Underlying error: ` +
           (e?.shortMessage || e?.message || "unknown"),
         422,
       );
@@ -142,7 +182,7 @@ export async function POST(req: NextRequest) {
     const txDeadline = deadline || Math.floor(Date.now() / 1000) + 3600;
     const transactions: any[] = [];
 
-    const factory = new ethers.Contract(CONTRACTS.FACTORY, FACTORY_ABI, provider);
+    const factory = new ethers.Contract(factoryAddress, FACTORY_ABI, provider);
     let existingPool: string;
     try {
       existingPool = await factory.getPool(token0, token1, fee);
@@ -156,7 +196,7 @@ export async function POST(req: NextRequest) {
     if (!poolExists) {
       const factoryIface = new ethers.Interface(FACTORY_ABI);
       transactions.push({
-        to: CONTRACTS.FACTORY,
+        to: factoryAddress,
         value: "0",
         data: factoryIface.encodeFunctionData("createPool", [
           token0,
@@ -180,14 +220,15 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Seeding a freshly-created pool needs a NonfungiblePositionManager, which is NOT deployed on
-    // Robinhood Chain (the old code encoded `mint` against an empty ABI and 500'd). We therefore return
-    // only the real, executable steps: createPool [+ initialize]. For the canonical WETH/USDG pool,
-    // liquidity is added single-sided through the ALM vault (MolePositions.zapOpen) — see /vault.
+    // Seeding a freshly-created pool needs a NonfungiblePositionManager, which is deployed on NEITHER
+    // chain (the old code encoded `mint` against an empty ABI and 500'd). We therefore return only the
+    // real, executable steps: createPool [+ initialize]. For the canonical vault pool, liquidity is
+    // added single-sided through the ALM vault (MolePositions.zapOpen) — see /vault.
     const seedNote =
       amount0Desired && amount1Desired
         ? "Seeding liquidity into a new pool is not supported on this chain (no position manager). " +
-          `Provide liquidity to the canonical WETH/USDG pool via the ALM vault (MolePositions ${CONTRACTS.MOLE_POSITIONS}, zapOpen) at /vault.`
+          `Provide liquidity to the canonical ${scope.vaultPool?.label ?? "vault"} pool via the ALM vault ` +
+          `(MolePositions ${scope.contracts.MOLE_POSITIONS}, zapOpen) at /vault.`
         : undefined;
 
     // Echo the requested seed amounts back in HUMAN units, using the decimals resolved above, so a
@@ -238,8 +279,9 @@ export async function POST(req: NextRequest) {
       fee,
       feeTier: `${fee / 10000}%`,
       transactions,
-      chainId: RH_CHAIN_ID,
-      rpc: RH_PUBLIC_RPC_URL,
+      chainId: scope.chainId,
+      chain: scope.meta.name,
+      rpc: scope.publicRpcUrl,
       note: "Sign and send transactions sequentially. Wait for each to confirm before sending the next. For new pools, the pool address from createPool must be used in the initialize step.",
     });
   } catch (err: any) {

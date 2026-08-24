@@ -28,6 +28,9 @@ import {
   ROBINHOOD_RPC_URL,
   robinhoodChain,
 } from "./chain";
+// The multi-chain registry, for the one thing this module now needs per chain: which hook holds the
+// series and which RPC reaches it. Nothing else about a chain is decided here.
+import { RH_CHAIN, chainMetaFor, contractsFor } from "@/lib/chain/chains";
 
 /* -------------------------------------------------------------------- constants */
 
@@ -122,9 +125,47 @@ export interface OracleReader {
   readContract: (args: any) => Promise<any>;
 }
 
-export function oracleClient(): OracleReader {
-  const rpc = (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) || ROBINHOOD_RPC_URL;
-  return createPublicClient({ chain: robinhoodChain, transport: http(rpc) });
+/**
+ * A read-only client for one chain's MoleHook. Omitting `chainId` keeps the historical answer —
+ * Robinhood, through the same env override it always used — so every existing caller is unchanged.
+ *
+ * IT TAKES A CHAIN BECAUSE THE HOOK IS ON TWO OF THEM NOW. The ALM is live on Arc as well as
+ * Robinhood, and a staleness badge is a claim about the pool the user is looking at. Reading
+ * Robinhood's ring while the wallet is on Arc would render one chain's health under another chain's
+ * pool — the same class of mistake as pricing a deposit against the wrong pool, minus the money.
+ *
+ * An unrecognised chain id THROWS rather than falling back: `contractsFor()` deliberately answers
+ * Robinhood for an unknown chain, which is right for callers that have already validated the id and
+ * wrong here, where the fallback would be a confidently mislabelled reading.
+ */
+export function oracleClient(chainId?: number): OracleReader {
+  if (chainId === undefined || chainId === RH_CHAIN.id) {
+    const rpc = (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) || ROBINHOOD_RPC_URL;
+    return createPublicClient({ chain: robinhoodChain, transport: http(rpc) });
+  }
+  const meta = chainMetaFor(chainId);
+  if (!meta) throw new Error(`no MoleHook oracle on chain ${chainId}`);
+  // Built here rather than imported from lib/mole/vaultChain, which is a "use client" module: this one
+  // is also reached from the aggregator's server paths, and a client-only import would poison those.
+  const chain = {
+    id: meta.id,
+    name: meta.name,
+    nativeCurrency: { name: meta.nativeSymbol, symbol: meta.nativeSymbol, decimals: meta.nativeDecimals },
+    rpcUrls: { default: { http: [meta.rpcUrl] as readonly string[] } },
+  };
+  return createPublicClient({ chain: chain as any, transport: http(meta.rpcUrl) });
+}
+
+/**
+ * The hook whose ring holds a chain's series. Same defaulting rule as `oracleClient`, and the same
+ * refusal: a chain with no MoleHook has no series to be fresh or stale about.
+ */
+export function oracleHookFor(chainId?: number): Address {
+  if (chainId === undefined || chainId === RH_CHAIN.id) return MOLE_ADDRESSES.moleHook;
+  if (!chainMetaFor(chainId)) throw new Error(`no MoleHook oracle on chain ${chainId}`);
+  const hook = contractsFor(chainId).MOLE_HOOK as Address;
+  if (!hook || /^0x0{40}$/i.test(hook)) throw new Error(`no MoleHook deployed on chain ${chainId}`);
+  return hook;
 }
 
 /* -------------------------------------------------------------------- staleness */
@@ -154,14 +195,18 @@ export function oracleStaleness(observedAt: number, nowSeconds: number): { ageSe
  * yields `mid: null` and is NOT an error: the age is still known and still governs. A failed
  * `poolStates` read throws — the caller decides whether to keep its prior value; an unknown age must
  * never be rendered as a fresh one.
+ *
+ * `hook` defaults to Robinhood's, which is where every caller read before the ALM shipped on Arc. A
+ * chain-aware caller passes `oracleHookFor(chainId)` together with a reader built for the SAME chain —
+ * a hook from one chain queried through another's RPC reads an address that holds someone else's code.
  */
 export async function readOracleHealth(
   reader: OracleReader,
   poolId: Hex,
   nowSeconds: number,
   windowSec: number = QUEUE_CONFIG.twapWindow,
+  hook: Address = MOLE_ADDRESSES.moleHook,
 ): Promise<OracleHealth> {
-  const hook = MOLE_ADDRESSES.moleHook;
   const [state, mid] = await Promise.all([
     reader.readContract({ address: hook, abi: moleHookOracleAbi, functionName: "poolStates", args: [poolId] }) as Promise<
       readonly [number, number, number, number, bigint, boolean]

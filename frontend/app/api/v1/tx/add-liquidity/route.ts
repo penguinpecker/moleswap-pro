@@ -1,15 +1,16 @@
 import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import { CONTRACTS, RH_CHAIN_ID, RH_RPC_URL, RH_PUBLIC_RPC_URL } from "@/lib/chain/contracts";
+import { DYNAMIC_FEE_FLAG, type TokenMeta } from "@/lib/mole/chain";
+// WHICH CHAIN'S VAULT. Every address, pool key and decimals count below used to be a Robinhood
+// module constant; the ALM runs on Arc too now, so they are resolved per request instead. See
+// lib/api/chain-scope.ts for why an unrecognised chain is refused rather than answered.
 import {
-  LIVE_POOL_KEY,
-  LIVE_POOL_ID,
-  DYNAMIC_FEE_FLAG,
-  WETH,
-  USDG,
-  type TokenMeta,
-} from "@/lib/mole/chain";
+  resolveApiChain,
+  chainFieldFrom,
+  chainParamFrom,
+  vaultUnavailable,
+} from "@/lib/api/chain-scope";
 import {
   assertValidDecimals,
   applySlippageFloor,
@@ -87,8 +88,6 @@ export const dynamic = "force-dynamic";
  * lib/mole/priceAnchor.ts.
  */
 
-const VAULT = CONTRACTS.MOLE_POSITIONS;
-
 // v4 StateView — the read-only window onto the PoolManager's slot0 (same address the vault UI reads).
 const STATE_VIEW = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b";
 const STATE_VIEW_ABI = [
@@ -113,7 +112,6 @@ const ERC20_APPROVE_ABI = ["function approve(address spender, uint256 amount) re
 const WETH_DEPOSIT_ABI = ["function deposit() payable"];
 
 const ZERO = ethers.ZeroAddress.toLowerCase();
-const TICK_SPACING = LIVE_POOL_KEY.tickSpacing;
 /** Half-width of the default deposit range, in ticks — the same 15 000 the vault deposit card uses. */
 const DEFAULT_RANGE_HALF_WIDTH = 15_000;
 /** Fallbacks used only if the on-chain bound read fails; the live values are 120 / 60000. */
@@ -148,11 +146,12 @@ function getLiquidityForAmounts(
   return l0 < l1 ? l0 : l1;
 }
 
-/** Snap to the pool's tick spacing, staying strictly inside the representable tick range. */
-function snapToSpacing(tick: number): number {
-  const rounded = Math.round(tick / TICK_SPACING) * TICK_SPACING;
-  const floor = Math.ceil(MIN_TICK / TICK_SPACING) * TICK_SPACING;
-  const ceil = Math.floor(MAX_TICK / TICK_SPACING) * TICK_SPACING;
+/** Snap to the pool's tick spacing, staying strictly inside the representable tick range. The spacing
+ *  is passed in because it belongs to the POOL, and the pool depends on the chain. */
+function snapToSpacingBy(tick: number, spacing: number): number {
+  const rounded = Math.round(tick / spacing) * spacing;
+  const floor = Math.ceil(MIN_TICK / spacing) * spacing;
+  const ceil = Math.floor(MAX_TICK / spacing) * spacing;
   if (rounded < floor) return floor;
   if (rounded > ceil) return ceil;
   return rounded;
@@ -203,6 +202,26 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json().catch(() => ({}));
+
+    const resolved = resolveApiChain(
+      chainFieldFrom(body) ?? chainParamFrom(req.nextUrl.searchParams),
+    );
+    if (!resolved.ok) return apiError(resolved.error, 400);
+    const scope = resolved.scope;
+    const unavailable = vaultUnavailable(scope);
+    if (unavailable) return apiError(unavailable, 400);
+
+    // Bound once, used everywhere below. `vaultUnavailable` has already proven `vaultPool` is there.
+    const pool = scope.vaultPool!;
+    const VAULT = scope.contracts.MOLE_POSITIONS;
+    const LIVE_POOL_KEY = pool.key;
+    const LIVE_POOL_ID = pool.id;
+    const TICK_SPACING = LIVE_POOL_KEY.tickSpacing;
+    const snapToSpacing = (tick: number) => snapToSpacingBy(tick, TICK_SPACING);
+    // Wrapped native, or null on a chain that has none. A null here is not a missing address to fill
+    // in — Arc genuinely has no WETH, and a native leg there must be refused, never wrapped.
+    const wrappedNative = scope.wrappedNative;
+
     const {
       token0,
       token1,
@@ -279,18 +298,29 @@ export async function POST(req: NextRequest) {
     const acceptedFeeLabels = [500, DYNAMIC_FEE_FLAG];
     if (!acceptedFeeLabels.includes(feeNum)) {
       return apiError(
-        `Fee tier ${String(fee)} does not exist on Robinhood Chain. The only whitelisted pool is the ` +
-          `Uniswap-v4 WETH/USDG pool whose key carries the dynamic-fee flag 0x800000 (${DYNAMIC_FEE_FLAG}) ` +
+        `Fee tier ${String(fee)} does not exist on ${scope.meta.name}. The only whitelisted pool is the ` +
+          `Uniswap-v4 ${pool.label} pool whose key carries the dynamic-fee flag 0x800000 (${DYNAMIC_FEE_FLAG}) ` +
           "— MoleHook sets the LP fee per swap. Omit `fee`, or pass 500 (the documented default) or 8388608.",
         400,
       );
     }
 
-    // Native ETH is not a currency of this pool (currency0 is WETH), so a native leg is wrapped first.
+    // Native is not a currency of a v4 pool whose legs are ERC-20s, so a native leg is wrapped first —
+    // WHERE THE CHAIN HAS A WRAPPED FORM. On Arc it has none: gas is USDC, the ERC-20 view of that same
+    // balance is the pool's currency, and there is nothing to wrap. Refuse rather than invent a step.
     const nativeAsToken0 = token0.toLowerCase() === ZERO;
     const nativeAsToken1 = token1.toLowerCase() === ZERO;
-    const addr0 = nativeAsToken0 ? WETH.address : ethers.getAddress(token0);
-    const addr1 = nativeAsToken1 ? WETH.address : ethers.getAddress(token1);
+    if ((nativeAsToken0 || nativeAsToken1) && !wrappedNative) {
+      return apiError(
+        `${scope.meta.name} has no wrapped native token, so 0x0 is not a leg of any pool there and ` +
+          `there is nothing to wrap it into. Pass the pool's own currencies: ${pool.meta0.symbol} ` +
+          `${pool.meta0.address} and ${pool.meta1.symbol} ${pool.meta1.address}. ` +
+          (scope.nativeCurrency.note ?? ""),
+        400,
+      );
+    }
+    const addr0 = nativeAsToken0 ? (wrappedNative as string) : ethers.getAddress(token0);
+    const addr1 = nativeAsToken1 ? (wrappedNative as string) : ethers.getAddress(token1);
 
     if (addr0.toLowerCase() === addr1.toLowerCase()) {
       return apiError("token0 and token1 must be different tokens", 400);
@@ -308,16 +338,19 @@ export async function POST(req: NextRequest) {
     const leg1 = legs.find((l) => l.address.toLowerCase() === currency1);
     if (!leg0 || !leg1) {
       return apiError(
-        `Unsupported pair. The only pool whitelisted by the MoleSwap vault (${VAULT}) is ` +
-          `WETH ${WETH.address} / USDG ${USDG.address} on Uniswap v4. Native ETH (0x0) is accepted for the ` +
-          "WETH leg and wrapped for you.",
+        `Unsupported pair. The only pool whitelisted by the MoleSwap vault (${VAULT}) on ` +
+          `${scope.meta.name} is ${pool.meta0.symbol} ${pool.meta0.address} / ${pool.meta1.symbol} ` +
+          `${pool.meta1.address} on Uniswap v4.` +
+          (wrappedNative
+            ? ` Native (0x0) is accepted for the ${pool.meta0.symbol} leg and wrapped for you.`
+            : ` ${scope.meta.name} has no wrapped native, so 0x0 is not accepted for either leg.`),
         400,
       );
     }
 
     // Decimals come from the pinned registry and are asserted — never defaulted to 18.
-    const meta0: TokenMeta = WETH;
-    const meta1: TokenMeta = USDG;
+    const meta0: TokenMeta = pool.meta0;
+    const meta1: TokenMeta = pool.meta1;
     assertValidDecimals(meta0.decimals);
     assertValidDecimals(meta1.decimals);
 
@@ -327,7 +360,7 @@ export async function POST(req: NextRequest) {
 
     /* ───────────────────────────────── live chain state ───────────────────────────────── */
 
-    const provider = new ethers.JsonRpcProvider(RH_RPC_URL);
+    const provider = new ethers.JsonRpcProvider(scope.rpcUrl);
     const vault = new ethers.Contract(VAULT, VAULT_ABI, provider);
     const stateView = new ethers.Contract(STATE_VIEW, STATE_VIEW_ABI, provider);
 
@@ -365,7 +398,7 @@ export async function POST(req: NextRequest) {
 
     if (!whitelisted) {
       return apiError(
-        `The WETH/USDG v4 pool (${LIVE_POOL_ID}) is not whitelisted by the vault right now — open() would revert.`,
+        `The ${pool.label} v4 pool (${LIVE_POOL_ID}) is not whitelisted by the vault right now — open() would revert.`,
         409,
       );
     }
@@ -515,11 +548,16 @@ export async function POST(req: NextRequest) {
       // 1. wrap — only when the deposit leg was handed to us as native ETH. Wrap the CAP, not the
       //    stated amount, so the +1 wei of round-up headroom is funded too.
       if (onLeg.wasNative) {
+        // The wrapped token IS the on-side leg here — `wasNative` was only set for the leg whose
+        // address resolved to `wrappedNative` — so its own symbol and decimals name the step, rather
+        // than a hard-coded ETH/WETH pair that is wrong the moment a second chain has a wrapper.
         osTxs.push({
-          to: WETH.address,
+          to: wrappedNative as string,
           value: onSideMax.toString(),
           data: osWethIface.encodeFunctionData("deposit"),
-          description: `Wrap ${formatUnitsDisplay(onSideMax, WETH.decimals, 6)} ETH → WETH (1:1)`,
+          description:
+            `Wrap ${formatUnitsDisplay(onSideMax, onMeta.decimals, 6)} native ` +
+            `${scope.nativeCurrency.symbol} → ${onMeta.symbol} (1:1)`,
         });
       }
 
@@ -599,17 +637,17 @@ export async function POST(req: NextRequest) {
         type: "add_liquidity",
         depositMode: "one-sided",
         side,
-        description: `Add ONE-SIDED ${onMeta.symbol} liquidity to the WETH/USDG v4 pool via MolePositions.open`,
+        description: `Add ONE-SIDED ${onMeta.symbol} liquidity to the ${pool.label} v4 pool via MolePositions.open`,
         venue: {
           protocol: "Uniswap v4 (MoleSwap ALM)",
           vault: VAULT,
-          poolManager: CONTRACTS.POOL_MANAGER,
+          poolManager: scope.contracts.POOL_MANAGER,
           hook: LIVE_POOL_KEY.hooks,
           poolId: LIVE_POOL_ID,
           positionManager: null,
           positionManagerNote:
-            "No NonfungiblePositionManager is deployed on Robinhood Chain. The position is vault-custodied " +
-            "(not an ERC-721) and is read back with positionsOf(owner) / getPosition(id).",
+            `No NonfungiblePositionManager is deployed on ${scope.meta.name}. The position is ` +
+            "vault-custodied (not an ERC-721) and is read back with positionsOf(owner) / getPosition(id).",
         },
         positionOwner: recipient,
         depositToken: {
@@ -637,8 +675,9 @@ export async function POST(req: NextRequest) {
         deadline: txDeadline,
         parameterNotes: osParameterNotes,
         transactions: osTxs,
-        chainId: RH_CHAIN_ID,
-        rpc: RH_PUBLIC_RPC_URL,
+        chainId: scope.chainId,
+        chain: scope.meta.name,
+        rpc: scope.publicRpcUrl,
         note:
           "Send the transactions sequentially from the recipient address, waiting for each to confirm. " +
           "Skip the approval if the existing allowance to MolePositions already covers the cap. " +
@@ -723,11 +762,17 @@ export async function POST(req: NextRequest) {
     // 1. wrap — only when a leg was handed to us as native ETH.
     const nativeLeg = [leg0, leg1].find((l) => l.wasNative);
     if (nativeLeg) {
+      // Format against the leg the wrapper actually IS, not against meta0: on a chain whose wrapped
+      // native sorts to currency1 the two decimals counts differ, and the pool that made meta0 the
+      // safe guess is one deployment, not a law.
+      const nativeMeta = nativeLeg === leg0 ? meta0 : meta1;
       transactions.push({
-        to: WETH.address,
+        to: wrappedNative as string,
         value: nativeLeg.amount.toString(),
         data: wethIface.encodeFunctionData("deposit"),
-        description: `Wrap ${formatUnitsDisplay(nativeLeg.amount, meta0.decimals, 6)} ETH → WETH (1:1)`,
+        description:
+          `Wrap ${formatUnitsDisplay(nativeLeg.amount, nativeMeta.decimals, 6)} native ` +
+          `${scope.nativeCurrency.symbol} → ${nativeMeta.symbol} (1:1)`,
       });
     }
 
@@ -808,17 +853,17 @@ export async function POST(req: NextRequest) {
 
     return apiResponse({
       type: "add_liquidity",
-      description: `Add two-sided liquidity to the WETH/USDG v4 pool via MolePositions.open`,
+      description: `Add two-sided liquidity to the ${pool.label} v4 pool via MolePositions.open`,
       venue: {
         protocol: "Uniswap v4 (MoleSwap ALM)",
         vault: VAULT,
-        poolManager: CONTRACTS.POOL_MANAGER,
+        poolManager: scope.contracts.POOL_MANAGER,
         hook: LIVE_POOL_KEY.hooks,
         poolId: LIVE_POOL_ID,
         positionManager: null,
         positionManagerNote:
-          "No NonfungiblePositionManager is deployed on Robinhood Chain. The position is vault-custodied " +
-          "(not an ERC-721) and is read back with positionsOf(owner) / getPosition(id).",
+          `No NonfungiblePositionManager is deployed on ${scope.meta.name}. The position is ` +
+          "vault-custodied (not an ERC-721) and is read back with positionsOf(owner) / getPosition(id).",
       },
       positionOwner: recipient,
       token0: {
@@ -856,8 +901,9 @@ export async function POST(req: NextRequest) {
       deadline: txDeadline,
       parameterNotes,
       transactions,
-      chainId: RH_CHAIN_ID,
-      rpc: RH_PUBLIC_RPC_URL,
+      chainId: scope.chainId,
+      chain: scope.meta.name,
+      rpc: scope.publicRpcUrl,
       note:
         "Send the transactions sequentially from the recipient address, waiting for each to confirm. " +
         "Skip an approval if the existing allowance to MolePositions already covers the cap. " +

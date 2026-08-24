@@ -2,11 +2,18 @@ import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { encodeFunctionData } from "viem";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import { CONTRACTS, RH_CHAIN_ID, RH_RPC_URL, RH_PUBLIC_RPC_URL, getTokenByAddress } from "@/lib/chain/contracts";
 import { quoteSwap } from "@/lib/aggregator/client";
 import { moleRouterAbi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { loadPoolRowsServer } from "@/lib/aggregator/serverPools";
 import { getAggFeeBps } from "@/lib/mole/aggFee";
+import {
+  resolveApiChain,
+  chainFieldFrom,
+  chainParamFrom,
+  productUnavailable,
+  quotingUnavailable,
+  tokenIn as tokenInScope,
+} from "@/lib/api/chain-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,6 +22,11 @@ export const dynamic = "force-dynamic";
 // The router wraps/unwraps native at the route edges, so there is no manual wrap step for an aggregator
 // swap — native input rides along as msg.value. The prior version encoded a `swapExactInputSingle` that
 // does not exist in the router ABI, so every real swap 500'd.
+//
+// `chainId` in the body (or the query string) picks the chain and defaults to Robinhood (4663). The
+// approval target this route hands back is a standing ERC-20 allowance to MoleRouter — naming the
+// wrong chain's router there is precisely how an approval lands somewhere the user never meant, so the
+// chain is resolved before a single address is emitted, and an unrecognised one is refused.
 
 const ZERO = ethers.ZeroAddress.toLowerCase();
 const toAgg = (a: string) => (a.toLowerCase() === ZERO || a.toLowerCase() === "native" ? NATIVE_SENTINEL : a);
@@ -30,6 +42,18 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
+
+    const resolved = resolveApiChain(
+      chainFieldFrom(body) ?? chainParamFrom(req.nextUrl.searchParams),
+    );
+    if (!resolved.ok) return apiError(resolved.error, 400);
+    const scope = resolved.scope;
+
+    const swapUnavailable = productUnavailable(scope, "swap");
+    if (swapUnavailable) return apiError(swapUnavailable, 400);
+    const notQuotable = quotingUnavailable(scope);
+    if (notQuotable) return apiError(notQuotable, 501);
+
     const { tokenIn, tokenOut, amountIn, recipient, slippageBps = 50 } = body;
 
     if (!tokenIn || !tokenOut || !amountIn || !recipient) {
@@ -50,26 +74,40 @@ export async function POST(req: NextRequest) {
     const bps = Math.max(0, Math.min(5000, Number(slippageBps) || 0));
     const isNativeIn = tokenIn.toLowerCase() === ZERO;
     const isNativeOut = tokenOut.toLowerCase() === ZERO;
-    const actualIn = isNativeIn ? CONTRACTS.WETH : tokenIn;
-    const actualOut = isNativeOut ? CONTRACTS.WETH : tokenOut;
+
+    // A chain with no wrapped native has no wrap step to build and no native leg to route. Refuse the
+    // whole native path rather than encode a deposit() against an address that is not a WETH.
+    const weth = scope.wrappedNative;
+    if ((isNativeIn || isNativeOut) && !weth) {
+      return apiError(
+        `${scope.meta.name} has no wrapped native token, so 0x0 (native) is not a routable currency ` +
+          `there and there is nothing to wrap. ${scope.nativeCurrency.note ?? ""}`.trim(),
+        400,
+      );
+    }
+
+    const actualIn = isNativeIn ? (weth as string) : tokenIn;
+    const actualOut = isNativeOut ? (weth as string) : tokenOut;
+    // The wrapped token's own symbol, so the description names what the caller will actually hold.
+    const wethSymbol = weth ? tokenInScope(scope, weth)?.symbol ?? "wrapped native" : "wrapped native";
 
     // native <-> WETH is a pure 1:1 wrap/unwrap — no router, no route.
-    if (isNativeIn && actualOut.toLowerCase() === CONTRACTS.WETH.toLowerCase()) {
+    if (isNativeIn && actualOut.toLowerCase() === (weth as string).toLowerCase()) {
       const wethIface = new ethers.Interface(["function deposit() payable"]);
       return apiResponse({
         type: "wrap",
-        description: "Wrap native ETH → WETH (1:1)",
-        transactions: [{ to: CONTRACTS.WETH, value: amountIn, data: wethIface.encodeFunctionData("deposit"), description: "deposit()" }],
-        chainId: RH_CHAIN_ID,
+        description: `Wrap native ${scope.nativeCurrency.symbol} → ${wethSymbol} (1:1)`,
+        transactions: [{ to: weth, value: amountIn, data: wethIface.encodeFunctionData("deposit"), description: "deposit()" }],
+        chainId: scope.chainId,
       });
     }
-    if (actualIn.toLowerCase() === CONTRACTS.WETH.toLowerCase() && isNativeOut) {
+    if (actualIn.toLowerCase() === (weth as string).toLowerCase() && isNativeOut) {
       const wethIface = new ethers.Interface(["function withdraw(uint256 wad)"]);
       return apiResponse({
         type: "unwrap",
-        description: "Unwrap WETH → native ETH (1:1)",
-        transactions: [{ to: CONTRACTS.WETH, value: "0", data: wethIface.encodeFunctionData("withdraw", [amountInBig]), description: "withdraw()" }],
-        chainId: RH_CHAIN_ID,
+        description: `Unwrap ${wethSymbol} → native ${scope.nativeCurrency.symbol} (1:1)`,
+        transactions: [{ to: weth, value: "0", data: wethIface.encodeFunctionData("withdraw", [amountInBig]), description: "withdraw()" }],
+        chainId: scope.chainId,
       });
     }
 
@@ -78,7 +116,7 @@ export async function POST(req: NextRequest) {
     const rows = await loadPoolRowsServer(Date.now(), {
       tokenIn: toAgg(tokenIn),
       tokenOut: toAgg(tokenOut),
-      weth: CONTRACTS.WETH,
+      weth: weth as string,
     });
     if (rows.length === 0) return apiError("Pool registry unavailable — try again shortly", 503);
 
@@ -89,10 +127,11 @@ export async function POST(req: NextRequest) {
       recipient,
       slippageBps: bps,
       feeBps: await getAggFeeBps(Date.now()),
-      weth: CONTRACTS.WETH,
+      weth: weth as string,
     });
     if (!q) return apiError("No liquidity route found for this pair", 404);
 
+    const router = scope.contracts.MOLE_ROUTER;
     const transactions: any[] = [];
 
     // ERC-20 input needs a standing allowance to MoleRouter; native input rides as msg.value.
@@ -101,14 +140,14 @@ export async function POST(req: NextRequest) {
       transactions.push({
         to: actualIn,
         value: "0",
-        data: approveIface.encodeFunctionData("approve", [CONTRACTS.MOLE_ROUTER, MAX_UINT]),
-        description: "Approve MoleRouter (skip if allowance already covers amountIn)",
+        data: approveIface.encodeFunctionData("approve", [router, MAX_UINT]),
+        description: `Approve MoleRouter on ${scope.meta.name} (skip if allowance already covers amountIn)`,
       });
     }
 
     const swapData = encodeFunctionData({ abi: moleRouterAbi as any, functionName: "swap", args: [q.encoded as any] });
     transactions.push({
-      to: CONTRACTS.MOLE_ROUTER,
+      to: router,
       value: q.value.toString(),
       data: swapData,
       description: "MoleRouter.swap — executes the routed plan",
@@ -116,15 +155,16 @@ export async function POST(req: NextRequest) {
 
     return apiResponse({
       type: "swap",
-      description: `Swap ${getTokenByAddress(tokenIn)?.symbol || tokenIn.slice(0, 8)} → ${getTokenByAddress(tokenOut)?.symbol || tokenOut.slice(0, 8)}`,
+      description: `Swap ${tokenInScope(scope, tokenIn)?.symbol || tokenIn.slice(0, 8)} → ${tokenInScope(scope, tokenOut)?.symbol || tokenOut.slice(0, 8)}`,
       amountOut: q.quote.netAmountOut.toString(),
       aggregatorFeeBps: q.quote.feeBps,
       minReceived: q.quote.minAmountOut.toString(),
       route: q.quote.routeDescriptions.join(" + "),
       slippageBps: bps,
       transactions,
-      chainId: RH_CHAIN_ID,
-      rpc: RH_PUBLIC_RPC_URL,
+      chainId: scope.chainId,
+      chain: scope.meta.name,
+      rpc: scope.publicRpcUrl,
       note: "Send the approval (if present) first and wait for it to confirm, then send the swap.",
     });
   } catch (err: any) {

@@ -1,11 +1,17 @@
 import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import { CONTRACTS, getTokenByAddress } from "@/lib/chain/contracts";
 import { quoteSwap } from "@/lib/aggregator/client";
 import { NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { loadPoolRowsServer } from "@/lib/aggregator/serverPools";
 import { getAggFeeBps } from "@/lib/mole/aggFee";
+import {
+  resolveApiChain,
+  chainParamFrom,
+  productUnavailable,
+  quotingUnavailable,
+  tokenIn as tokenInScope,
+} from "@/lib/api/chain-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +19,10 @@ export const dynamic = "force-dynamic";
 // The app never quotes against an on-chain QuoterV2 (CONTRACTS.QUOTER_V2 is the zero address by design);
 // pricing is off-chain, to the wei, via the same aggregator the swap executor uses. This route mirrors
 // that exactly so a developer's quote matches what MoleRouter.swap would actually return.
+//
+// `?chainId=` picks the chain and defaults to Robinhood (4663). A chain whose liquidity the pricing
+// engine cannot see is REFUSED rather than priced — see `quotingUnavailable`. Pricing Arc addresses
+// against Robinhood pools would return a number that looks exactly like a real quote and is not one.
 
 const ZERO = ethers.ZeroAddress.toLowerCase();
 const toAgg = (a: string) => (a.toLowerCase() === ZERO || a.toLowerCase() === "native" ? NATIVE_SENTINEL : a);
@@ -26,6 +36,15 @@ export async function GET(req: NextRequest) {
   if (blocked) return blocked;
 
   try {
+    const resolved = resolveApiChain(chainParamFrom(req.nextUrl.searchParams));
+    if (!resolved.ok) return apiError(resolved.error, 400);
+    const scope = resolved.scope;
+
+    const swapUnavailable = productUnavailable(scope, "swap");
+    if (swapUnavailable) return apiError(swapUnavailable, 400);
+    const notQuotable = quotingUnavailable(scope);
+    if (notQuotable) return apiError(notQuotable, 501);
+
     const tokenIn = req.nextUrl.searchParams.get("tokenIn");
     const tokenOut = req.nextUrl.searchParams.get("tokenOut");
     const amountIn = req.nextUrl.searchParams.get("amountIn");
@@ -51,8 +70,20 @@ export async function GET(req: NextRequest) {
 
     const slippageBps = slippageParam != null ? Math.max(0, Math.min(5000, parseInt(slippageParam) || 0)) : 50;
 
-    const actualIn = tokenIn.toLowerCase() === ZERO ? CONTRACTS.WETH : tokenIn;
-    const actualOut = tokenOut.toLowerCase() === ZERO ? CONTRACTS.WETH : tokenOut;
+    // 0x0 means "native", and native only routes where there is a wrapped form to route THROUGH. On a
+    // chain with none, the whole native path fails closed rather than silently pricing something else.
+    const weth = scope.wrappedNative;
+    const wantsNative = tokenIn.toLowerCase() === ZERO || tokenOut.toLowerCase() === ZERO;
+    if (wantsNative && !weth) {
+      return apiError(
+        `${scope.meta.name} has no wrapped native token, so 0x0 (native) is not a routable currency ` +
+          `there. ${scope.nativeCurrency.note ?? ""}`.trim(),
+        400,
+      );
+    }
+
+    const actualIn = tokenIn.toLowerCase() === ZERO ? (weth as string) : tokenIn;
+    const actualOut = tokenOut.toLowerCase() === ZERO ? (weth as string) : tokenOut;
 
     // Same-asset (native <-> WETH) is a 1:1 wrap/unwrap, no route needed.
     if (actualIn.toLowerCase() === actualOut.toLowerCase()) {
@@ -66,6 +97,7 @@ export async function GET(req: NextRequest) {
         type: "wrap_unwrap",
         priceImpactBps: 0,
         route: "direct",
+        chainId: scope.chainId,
       });
     }
 
@@ -75,7 +107,7 @@ export async function GET(req: NextRequest) {
     const rows = await loadPoolRowsServer(Date.now(), {
       tokenIn: toAgg(tokenIn),
       tokenOut: toAgg(tokenOut),
-      weth: CONTRACTS.WETH,
+      weth: weth as string,
     });
     if (rows.length === 0) return apiError("Pool registry unavailable — try again shortly", 503);
 
@@ -87,17 +119,19 @@ export async function GET(req: NextRequest) {
       recipient: "0x0000000000000000000000000000000000000001", // quote-only; recipient does not affect price
       slippageBps,
       feeBps,
-      weth: CONTRACTS.WETH,
+      weth: weth as string,
     });
     if (!q) return apiError("No liquidity route found for this pair", 404);
 
-    const tokenInInfo = getTokenByAddress(tokenIn);
-    const tokenOutInfo = getTokenByAddress(tokenOut);
+    const tokenInInfo = tokenInScope(scope, tokenIn);
+    const tokenOutInfo = tokenInScope(scope, tokenOut);
     const decIn = tokenInInfo?.decimals ?? 18;
     const decOut = tokenOutInfo?.decimals ?? 18;
     const humanOut = Number(q.quote.netAmountOut) / 10 ** decOut;
 
     return apiResponse({
+      chainId: scope.chainId,
+      chain: scope.meta.name,
       tokenIn,
       tokenOut,
       amountIn,

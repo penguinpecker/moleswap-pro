@@ -281,15 +281,35 @@ export interface ContractReader {
 }
 
 /**
- * The browser's wiring: MoleHook for the TWAP, StateView for spot, MolePositions for the band.
- * `poolId` defaults to the live WETH/USDG pool, which is the only pool the vault whitelists today.
+ * The two contracts an anchor is read from, so a caller on a chain other than Robinhood can name its own.
+ *
+ * They travel together for a reason: the TWAP and the band that judges it must come from the SAME
+ * deployment as the vault the transaction is going to. Reading Robinhood's band while depositing into
+ * Arc's vault would enforce a limit no contract on the receiving end is ever going to check.
  */
-export function viemAnchorReads(client: ContractReader, poolId: Hex = LIVE_POOL_ID): AnchorReads {
+export interface AnchorContracts {
+  readonly moleHook: Address;
+  readonly molePositions: Address;
+}
+
+/**
+ * The browser's wiring: MoleHook for the TWAP, StateView for spot, MolePositions for the band.
+ *
+ * The defaults are Robinhood's live WETH/USDG pool and Robinhood's contracts — the historical answer, kept
+ * so existing callers read the same. A chain-aware caller passes both: `lib/mole/vaultChain` resolves them
+ * from whichever chain the wallet is actually on. StateView is not a parameter because the v4 deployment is
+ * the same CREATE2 artifact at the same address on both chains (read back on Arc, 2026-08-23).
+ */
+export function viemAnchorReads(
+  client: ContractReader,
+  poolId: Hex = LIVE_POOL_ID,
+  contracts: AnchorContracts = MOLE_ADDRESSES,
+): AnchorReads {
   return {
     twapTick: async (windowSeconds: number) =>
       Number(
         await client.readContract({
-          address: MOLE_ADDRESSES.moleHook,
+          address: contracts.moleHook,
           abi: moleHookConsultAbi,
           functionName: "consult",
           args: [poolId, windowSeconds],
@@ -307,13 +327,13 @@ export function viemAnchorReads(client: ContractReader, poolId: Hex = LIVE_POOL_
     bounds: async () => {
       const [dev, win] = await Promise.all([
         client.readContract({
-          address: MOLE_ADDRESSES.molePositions,
+          address: contracts.molePositions,
           abi: molePositionsAnchorAbi,
           functionName: "maxTwapDeviationTicks",
           args: [],
         }),
         client.readContract({
-          address: MOLE_ADDRESSES.molePositions,
+          address: contracts.molePositions,
           abi: molePositionsAnchorAbi,
           functionName: "twapWindow",
           args: [],

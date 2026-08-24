@@ -87,6 +87,22 @@ export const molePositionsAbi = [
     outputs: [],
   },
   {
+    // The exit WITH a floor. Not an overload of `withdraw` — the contract gave it its own name so that
+    // `withdraw.selector` stays unambiguous for integrators, so the name here must match exactly or the
+    // call encodes to a selector that exists nowhere. Passing (0, 0) makes it identical to `withdraw`;
+    // the numbers that make it worth calling come from ./withdrawPlan.
+    type: "function",
+    name: "withdrawWithMinimums",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "id", type: "uint256" },
+      { name: "liquidityToRemove", type: "uint128" },
+      { name: "amount0Min", type: "uint256" },
+      { name: "amount1Min", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
     type: "function",
     name: "setKeeperRevoked",
     stateMutability: "nonpayable",
