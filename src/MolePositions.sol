@@ -545,11 +545,17 @@ contract MolePositions is IUnlockCallback, Initializable, UUPSUpgradeable {
     ///      already reaches, and every position owner keeps `setKeeperRevoked` regardless.
     function setKeeper(address to) external {
         if (msg.sender != upgradeAdmin) revert NotUpgradeAdmin();
-        emit KeeperSet(keeper, to);
+        emit KeeperSet(to);
         keeper = to;
     }
 
-    event KeeperSet(address indexed from, address indexed to);
+    /// @dev ONE PARAMETER, NOT THE USUAL from/to PAIR, and the reason is the EIP-170 ceiling rather than
+    ///      taste. This contract compiles to 24,563 bytes against a 24,576 limit; the two-argument form
+    ///      costs 60 of those and would not fit. The previous keeper is still recoverable — it is the
+    ///      subject of the preceding KeeperSet, or the initializer — so what is lost is convenience, not
+    ///      the audit trail. THE VAULT IS 13 BYTES FROM ITS CEILING: the next thing added here does not
+    ///      fit, and the way out is moving logic into ZapLogic, not shaving events.
+    event KeeperSet(address indexed to);
 
     event PositionSizeBandSet(uint128 minLiquidity, uint128 maxLiquidity);
     event KeeperRevoked(uint256 indexed id, address indexed owner, bool revoked);
