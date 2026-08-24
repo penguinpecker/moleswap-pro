@@ -185,30 +185,33 @@ function err(e: any): TxResult {
 }
 
 /**
- * DEPOSITS ARE CLOSED. Set by hand on 2026-08-23, and this is the one gate in the app that exists to
- * stop a stranger losing money rather than to shape a product.
+ * DEPOSITS ARE OPEN AGAIN as of 2026-08-24, and the reason is recorded here rather than in a commit
+ * nobody will read, because this flag was set to false on 2026-08-23 for a specific reason.
  *
- * MoleQueue is the only contract in this system with the shape that drained Arrakis Finance V1 on
- * the same day: ONE SHARED ESCROW POT, and a settlement price whose freshness guard the settler
- * composes inside their own transaction. `settle` anchors on `consult()` but validates it against
- * `StateLibrary.getSlot0`, and a same-block swap contributes exactly zero to the TWAP (the hook
- * advances the accumulator by `elapsed * lastTick`, and `elapsed` is 0) while moving spot freely.
- * So the settler pushes spot toward the stale anchor, the drift check passes, and the whole epoch
- * crosses at a price the market has already left. Orders cannot be cancelled after the freeze.
- * Measured cost in AUDIT-2026-08-23.md: 8.75%-10% of epoch notional for about $50 of LP fees.
+ * WHAT WAS WRONG. MoleQueue is the one contract in this system shaped like the Arrakis V1 vault that
+ * was drained the day before: a single shared escrow pot, and a settlement price whose freshness guard
+ * the settler composed inside their own transaction. `settle` anchored on `consult()` but validated it
+ * against `getSlot0` spot, and a same-block swap contributes exactly zero seconds to the TWAP while
+ * moving spot freely — so the settler pushed spot toward the stale anchor, the drift check passed, and
+ * the whole epoch crossed at a price the market had already left. 8.75-10% of epoch notional for about
+ * $50 of LP fees, and orders cannot be cancelled after the freeze.
  *
- * The escrow is empty today, but `freeze()` is permissionless, so anyone can roll a fresh epoch and
- * reopen deposits. The /queue route still returns HTTP 200 and still renders its controls, and
- * removing it from the navigation did NOT close this door — so the door is closed here, at the one
- * function every UI path funnels through, rather than in a component someone can route around.
+ * WHAT CLOSED IT. The freshness reference is now a SECOND, SHORT TWAP read (`effectiveShortTwapWindow`,
+ * live at 60s) instead of spot. The settler's own swap sets the hook's `lastTimestamp` to now, which
+ * forces `consult` onto the bracketed ring path, so their manipulation contributes zero seconds to the
+ * number that judges them — the same-transaction reversal is dead rather than merely expensive.
+ * Alongside it: a depth floor (`minSettleLiquidity`), a max-jump bound against the last clearing
+ * (`maxClearingJumpTicks`), an oracle-staleness bound, and an upper bound on the settle window so a
+ * settler cannot wait for whichever hour pays them best.
  *
- * TO RE-OPEN: delete this block. Do that only once MoleQueue's settle path carries a spot-vs-TWAP
- * gate that the settler cannot compose, plus the depth, max-jump and observation-count guards that
- * test/attack/AttackQueueFailClosed.t.sol asserts and that are red today. Withdrawals are
- * deliberately NOT gated — `cancel` and `claim` below stay open, because trapping funds is its own
- * incident.
+ * ALL OF IT IS LIVE AND CARRIES REAL VALUES, not the zero-storage defaults an upgrade leaves behind —
+ * the derived default for the depth floor was ONE WEI of liquidity, which is not a depth floor. On
+ * Robinhood Chain 4663 the queue reads shortTwapWindow 60, maxOracleStaleness 3600, maxClearingJump
+ * 1200, minSettleLiquidity 1,475,685,058,350 (25% of the pool's in-range liquidity).
+ *
+ * IF YOU ARE CLOSING THIS AGAIN, set the flag to false rather than deleting the machinery, and say why.
  */
-const QUEUE_DEPOSITS_OPEN = false;
+const QUEUE_DEPOSITS_OPEN = true;
 
 /** Place a batch-auction order. zeroForOne = selling WETH for USDG. amountIn in escrow-token wei. */
 export async function placeOrder(zeroForOne: boolean, amountIn: bigint): Promise<TxResult> {
