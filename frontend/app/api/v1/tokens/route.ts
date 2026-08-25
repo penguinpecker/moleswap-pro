@@ -42,6 +42,17 @@ export async function GET(req: NextRequest) {
       sourceChain: t.sourceChain,
       logoURI: t.logoURI,
       isNative: t.address === "0x0000000000000000000000000000000000000000",
+      /**
+       * Whether this token should be OFFERED FOR SWAPPING. Not every listed token should be: USDe
+       * is a real, holdable asset with a real lending use, but its only DEX pool is thin enough
+       * that a $246 swap costs 24% and $2,465 finds no route at all (measured 2026-08-25).
+       *
+       * The token is still published, because hiding it would also hide it from consumers that
+       * legitimately need it. What is published alongside it is the truth about trading it — a
+       * consumer building a swap UI from this endpoint must be able to tell the difference, and
+       * before this field they could not.
+       */
+      swappable: t.swappable !== false,
       // Null-safe on purpose: Arc has no wrapped native at all, so nothing can be it.
       isWrappedNative:
         scope.wrappedNative !== null &&

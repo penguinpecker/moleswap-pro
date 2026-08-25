@@ -113,3 +113,4 @@ describe("the registry's shape", () => {
     expect(bySymbol("NVDA")!.isStable).toBeUndefined();
   });
 });
+
