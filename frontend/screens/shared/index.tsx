@@ -64,6 +64,7 @@ export const NavBar = () => {
   const LEFT = [
     { href: "/dapp", label: "Swap" },
     { href: "/pools", label: "Pools" },
+    { href: "/lend", label: "Lend" },
   ];
   const RIGHT = [
     { href: "/quests", label: "Quests" },

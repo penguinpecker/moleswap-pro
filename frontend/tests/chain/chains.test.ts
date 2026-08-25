@@ -68,11 +68,12 @@ describe("chain registry", () => {
   it("reports availability conservatively — a product is live only where it is deployed", () => {
     expect(isAvailable("swap", 4663)).toBe(true);
     expect(isAvailable("swap", 5042)).toBe(true);
-    // The ALM is Robinhood-only today, and lending is not deployed anywhere yet.
+    // The ALM is Robinhood-only, and lending went live on Robinhood 2026-08-25 — Aave v3.7,
+    // Pool 0xb819FD2D…. Arc still has no lending deployment at all.
     expect(isAvailable("pools", 4663)).toBe(true);
     // Arc LP went live 2026-08-23 (hook 0xfFDCBf2f.., vault 0x8e6bB60d..).
     expect(isAvailable("pools", 5042)).toBe(true);
-    expect(isAvailable("lending", 4663)).toBe(false);
+    expect(isAvailable("lending", 4663)).toBe(true);
     expect(isAvailable("lending", 5042)).toBe(false);
   });
 
@@ -88,7 +89,9 @@ describe("chain registry", () => {
   it("can name the chains a product is live on, for the 'switch to X' prompt", () => {
     expect(chainsWith("pools").map((c) => c.id)).toEqual([RH_CHAIN.id, ARC_CHAIN.id]);
     expect(chainsWith("swap").map((c) => c.id)).toEqual([RH_CHAIN.id, ARC_CHAIN.id]);
-    expect(chainsWith("lending")).toEqual([]);
+    // Robinhood only. If this ever returns Arc, a lending UI would offer a market that does not
+    // exist there and every read would silently resolve to Robinhood's pool.
+    expect(chainsWith("lending").map((c) => c.id)).toEqual([4663]);
   });
 
   it("carries Arc's gas token as USDC with the NATIVE 18-decimal convention", () => {

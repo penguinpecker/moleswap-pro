@@ -181,14 +181,18 @@ describe("availability refusals read from chains.ts, not from a second opinion",
     }
   });
 
-  it("lending is refused on both chains and says it is nowhere yet", () => {
-    for (const c of SUPPORTED_CHAINS) {
-      const r = resolveApiChain(c.id);
-      if (!r.ok) throw new Error("scope missing");
-      const refusal = productUnavailable(r.scope, "lending");
-      expect(refusal).toBeTruthy();
-      expect(refusal).toMatch(/not deployed on any chain/i);
-    }
+  it("lending is live on Robinhood and refused on Arc, naming where it does run", () => {
+    // Went live 2026-08-25. The Arc half is the half that matters: a refusal that did not fire
+    // there would let an Arc caller read Robinhood's market and be told it was their own.
+    const rh = resolveApiChain(RH_CHAIN.id);
+    const arc = resolveApiChain(ARC_CHAIN.id);
+    if (!rh.ok || !arc.ok) throw new Error("scope missing");
+
+    expect(productUnavailable(rh.scope, "lending")).toBeNull();
+
+    const refusal = productUnavailable(arc.scope, "lending");
+    expect(refusal).toBeTruthy();
+    expect(refusal).toMatch(/Robinhood/i);
   });
 
   it("the queue is Robinhood-only, and the refusal names where it does run", () => {

@@ -102,7 +102,7 @@ const RH_CONTRACTS: ChainContracts = {
   MOLE_HOOK: "0xb2c9A0af48dF8858F3765385E733Cd8776a138C4",
   MOLE_POSITIONS: "0x674625B6E6a2614ef6e247aF099BEA2e65e1536A",
   MOLE_QUEUE: "0x3dCb2494cBC9604f270177E38160ae4CA76CDEbd",
-  LENDING_POOL: ZERO,
+  LENDING_POOL: "0xb819FD2DabF86dB45911Cd57D4588E9440E485dD",
 };
 
 const ARC_CONTRACTS: ChainContracts = {
@@ -142,7 +142,10 @@ export const contractsFor = (chainId: number | undefined): ChainContracts =>
 export const AVAILABILITY: Record<ProductKey, Record<number, boolean>> = {
   swap: { [RH_CHAIN.id]: true, [ARC_CHAIN.id]: true },
   pools: { [RH_CHAIN.id]: true, [ARC_CHAIN.id]: true },
-  lending: { [RH_CHAIN.id]: false, [ARC_CHAIN.id]: false },
+  // Robinhood: LIVE since 2026-08-25 (Aave v3.7 — Pool 0xb819FD2D…). Arc has no lending
+  // deployment at all, and `false` is what makes the UI say "not on this chain yet" instead of
+  // reading Robinhood's market for an Arc user.
+  lending: { [RH_CHAIN.id]: true, [ARC_CHAIN.id]: false },
 };
 
 export const isAvailable = (product: ProductKey, chainId: number | undefined): boolean =>
