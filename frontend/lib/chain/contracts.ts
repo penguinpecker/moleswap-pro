@@ -74,6 +74,8 @@ export function getPoolDisplayInfo(token: TokenInfo): { symbol: string; subtitle
 const ETH_LOGO = "/tokens/eth.svg";
 const WETH_LOGO = "/tokens/weth.svg";
 const USDG_LOGO = "/tokens/usdg.svg";
+/** No first-party mark shipped for these yet; the chain glyph is the honest placeholder. */
+const RH_TOKEN_LOGO = "/tokens/rh.svg";
 
 // The full indexed token universe on Robinhood Chain: native ETH, its wrapped form, and USDG.
 export const TOKENS: TokenInfo[] = [
@@ -113,6 +115,97 @@ export const TOKENS: TokenInfo[] = [
     originSymbol: "USDG",
     displaySymbol: "USDG",
     displaySubtitle: "Global Dollar",
+  } as TokenInfo,
+  /* ──────────────────────────────────────────────────────────────────────────
+   * Added 2026-08-25. EVERY ADDRESS BELOW WAS RESOLVED FROM A FIRST-PARTY SOURCE
+   * AND VERIFIED ON CHAIN (name, decimals, total supply, holders, market data).
+   *
+   * This matters more on Robinhood Chain than almost anywhere: tickers here are NOT
+   * identities. 39 tokens use the `USDC` symbol and 13 of them are named exactly
+   * "USD Coin"; the token carrying `BTC` is a memecoin called "Beat Coin"; `cbBTC`
+   * hides U+200B and U+2060 inside its name; `WBTC` has 18 decimals where the real
+   * one has 8. Circle and Tether both confirm no deployment on this chain, so there
+   * is no canonical USDC or USDT to list at all.
+   *
+   * The discriminator used: the explorer carries market cap and 24h volume for
+   * RECOGNISED assets and nothing for impostors, regardless of holder count —
+   * holders are farmable by airdrop (the fake WBTC has 43,063 of them).
+   *
+   * NOTE: these have NO MoleSwap pool yet, so the aggregator will report "no route"
+   * until liquidity exists. They are listed so pools CAN be created against them.
+   * ────────────────────────────────────────────────────────────────────────── */
+  {
+    address: "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+    symbol: "USDe",
+    name: "Ethena USDe",
+    decimals: 18,
+    sourceChain: "Robinhood Chain",
+    logoURI: RH_TOKEN_LOGO,
+    swappable: true,
+    isStable: true,
+    originSymbol: "USDe",
+    displaySymbol: "USDe",
+    displaySubtitle: "Ethena USDe",
+  } as TokenInfo,
+  {
+    address: "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    symbol: "NVDA",
+    name: "NVIDIA \u00b7 Robinhood Token",
+    decimals: 18,
+    sourceChain: "Robinhood Chain",
+    logoURI: RH_TOKEN_LOGO,
+    swappable: true,
+    originSymbol: "NVDA",
+    displaySymbol: "NVDA",
+    displaySubtitle: "NVIDIA",
+  } as TokenInfo,
+  {
+    address: "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C",
+    symbol: "SPY",
+    name: "SPDR S&P 500 ETF Trust \u00b7 Robinhood Token",
+    decimals: 18,
+    sourceChain: "Robinhood Chain",
+    logoURI: RH_TOKEN_LOGO,
+    swappable: true,
+    originSymbol: "SPY",
+    displaySymbol: "SPY",
+    displaySubtitle: "S&P 500 ETF",
+  } as TokenInfo,
+  {
+    address: "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+    symbol: "TSLA",
+    name: "Tesla \u00b7 Robinhood Token",
+    decimals: 18,
+    sourceChain: "Robinhood Chain",
+    logoURI: RH_TOKEN_LOGO,
+    swappable: true,
+    originSymbol: "TSLA",
+    displaySymbol: "TSLA",
+    displaySubtitle: "Tesla",
+  } as TokenInfo,
+  {
+    address: "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+    symbol: "AAPL",
+    name: "Apple \u00b7 Robinhood Token",
+    decimals: 18,
+    sourceChain: "Robinhood Chain",
+    logoURI: RH_TOKEN_LOGO,
+    swappable: true,
+    originSymbol: "AAPL",
+    displaySymbol: "AAPL",
+    displaySubtitle: "Apple",
+  } as TokenInfo,
+  {
+    address: "0xe93237C50D904957Cf27E7B1133b510C669c2e74",
+    symbol: "MSFT",
+    name: "Microsoft \u00b7 Robinhood Token",
+    decimals: 18,
+    sourceChain: "Robinhood Chain",
+    logoURI: RH_TOKEN_LOGO,
+    swappable: true,
+    originSymbol: "MSFT",
+    displaySymbol: "MSFT",
+    displaySubtitle: "Microsoft",
   } as TokenInfo,
 ];
 
