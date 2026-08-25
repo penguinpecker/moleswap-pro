@@ -23,28 +23,30 @@ import { supply, withdraw, borrow, repay } from "@/lib/lending/actions";
 
 const LEND_CSS = `
 .lend-grid { display: grid; gap: 18px; }
+.lend-row, .lend-head { min-width: 0; }
+.lend-row > * { min-width: 0; }
+/* The action cell holds an input plus two buttons side by side. At 132px they overflowed the
+   panel and WITHDRAW/REPAY were clipped — measured on the live page. 210px is what two
+   uppercase labels at 11px plus their padding and gap actually need. */
 .lend-head, .lend-row {
-  display: grid; grid-template-columns: minmax(120px,1.4fr) 1fr 1fr 1fr 132px;
+  display: grid; grid-template-columns: minmax(110px,1.3fr) 0.8fr 0.8fr 0.8fr 210px;
   gap: 12px; align-items: center; padding: 14px 18px; }
-.lend-head { font-size: 10.5px; font-weight: 800; letter-spacing: .1em;
-  text-transform: uppercase; color: var(--ink-3); border-bottom: 1px solid rgba(120,72,32,.16); }
-.lend-row + .lend-row { border-top: 1px solid rgba(120,72,32,.10); }
+.lend-head { font-size: 11px; font-weight: 800; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3); border-bottom: 1px solid rgba(44,26,12,.10); }
+.lend-row + .lend-row { border-top: 1px solid rgba(44,26,12,.07); }
 .lend-asset { display: flex; align-items: center; gap: 10px; }
-.lend-asset b { font-size: 14.5px; color: var(--clay); }
-.lend-asset span { display: block; font-size: 11.5px; color: var(--ink-3); }
-.lend-num { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 15px;
-  font-weight: 800; color: var(--clay); margin-top: 6px; }
-.lend-apy { font-weight: 800; }
-.lend-apy.sup { color: #3f7d20; }
-.lend-apy.bor { color: #b4531c; }
-.lend-acts { display: flex; gap: 6px; justify-content: flex-end; }
-.lend-mini { font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
-  padding: 7px 10px; border-radius: 10px; border: 0; cursor: pointer; color: #fff;
+.lend-asset b { font-size: 14.5px; font-weight: 800; color: var(--ink); letter-spacing: -.01em; }
+.lend-asset span { font-size: 11.5px; color: var(--ink-3); }
+/* the table's figures use the site's own .num / .apy — nothing bespoke here */
+.lend-row .num, .lend-row .apy { justify-self: start; text-align: left; }
+.lend-acts { display: flex; gap: 6px; }
+.lend-acts .lend-mini { flex: 1 1 0; min-width: 0; }
+.lend-mini { font-size: 10.5px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase;
+  padding: 7px 8px; border-radius: 10px; border: 0; cursor: pointer; color: #fff; white-space: nowrap;
   background: linear-gradient(180deg, #43a06a, var(--moss)); box-shadow: 0 2px 0 #1e5837; }
 .lend-mini.alt { background: linear-gradient(180deg, #d98c3f, #b4671c); box-shadow: 0 2px 0 #7d4310; }
 .lend-mini:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
-.hf { font-family: var(--font-num); font-weight: 800; }
-.hf.safe { color: #3f7d20; } .hf.warn { color: #b4801c; } .hf.danger { color: #b4341c; }
+.hf.safe { color: var(--moss); } .hf.warn { color: #b4801c; } .hf.danger { color: var(--rust); }
 .hf.none { color: var(--ink-3); }
 .lend-warn { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px;
   border-radius: 12px; background: rgba(180,52,28,.10); border: 1px solid rgba(180,52,28,.28);
@@ -191,32 +193,34 @@ function LendMarket() {
 
       {onRightChain && (
         <>
-          {/* position */}
-          <div className="panel" style={{ padding: 18, marginBottom: 18 }}>
-            <div className="stats" style={{ marginBottom: 0 }}>
-              <div className="statline">
-                <span className="sm-lbl">Collateral</span>
-                <div className="lend-num">{pos ? formatUsd(pos.totalCollateralBase) : "—"}</div>
-              </div>
-              <div className="statline">
-                <span className="sm-lbl">Borrowed</span>
-                <div className="lend-num">{pos ? formatUsd(pos.totalDebtBase) : "—"}</div>
-              </div>
-              <div className="statline">
-                <span className="sm-lbl">Available to borrow</span>
-                <div className="lend-num">{pos ? formatUsd(pos.availableBorrowsBase) : "—"}</div>
-              </div>
-              <div className="statline">
-                <span className="sm-lbl">Health factor</span>
-                <div className={`hf ${band}`}>
-                  {pos?.healthFactor == null
-                    ? pos
-                      ? "No debt"
-                      : "—"
-                    : (Number(pos.healthFactor) / 1e18).toFixed(2)}
-                </div>
+          {/* Position, in the site's own stat tiles — same component the pools page uses, so the
+              type scale and the tunnel motif carry across instead of this page inventing its own. */}
+          <div className="stats">
+            <div className="chamber">
+              <div className="label">Collateral</div>
+              <div className="value mono">{pos ? formatUsd(pos.totalCollateralBase) : "…"}</div>
+            </div>
+            <div className="chamber">
+              <div className="label">Borrowed</div>
+              <div className="value mono">{pos ? formatUsd(pos.totalDebtBase) : "…"}</div>
+            </div>
+            <div className="chamber">
+              <div className="label">Available to borrow</div>
+              <div className="value mono">{pos ? formatUsd(pos.availableBorrowsBase) : "…"}</div>
+            </div>
+            <div className="chamber">
+              <div className="label">Health factor</div>
+              <div className={`value mono hf ${band}`}>
+                {pos?.healthFactor == null
+                  ? pos
+                    ? "∞"
+                    : "…"
+                  : (Number(pos.healthFactor) / 1e18).toFixed(2)}
               </div>
             </div>
+          </div>
+
+          <div style={{ marginBottom: 18 }}>
 
             {band === "danger" && (
               <div className="lend-warn" style={{ marginTop: 14 }}>
@@ -344,9 +348,9 @@ function ReserveRow({
         </span>
       </div>
 
-      <div className="lend-num">{formatUsd(r.priceBase)}</div>
-      <div className={`lend-num lend-apy sup`}>{(r.supplyApy * 100).toFixed(2)}%</div>
-      <div className={`lend-num lend-apy bor`}>
+      <div className="num">{formatUsd(r.priceBase)}</div>
+      <div className="apy">{(r.supplyApy * 100).toFixed(2)}%</div>
+      <div className="apy" style={{ color: "var(--rust)" }}>
         {r.borrowable ? `${(r.borrowApy * 100).toFixed(2)}%` : "—"}
       </div>
 
