@@ -46,6 +46,7 @@ const LEND_CSS = `
   background: linear-gradient(180deg, #43a06a, var(--moss)); box-shadow: 0 2px 0 #1e5837; }
 .lend-mini.alt { background: linear-gradient(180deg, #d98c3f, #b4671c); box-shadow: 0 2px 0 #7d4310; }
 .lend-mini:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+.lend-why { font-size: 11px; line-height: 1.3; color: var(--rust); opacity: .85; }
 .hf.safe { color: var(--moss); } .hf.warn { color: #b4801c; } .hf.danger { color: var(--rust); }
 .hf.none { color: var(--ink-3); }
 .lend-warn { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px;
@@ -340,6 +341,55 @@ function riskBands(reserves: ReserveSnapshot[]) {
     }));
 }
 
+/**
+ * The lend table shipped with no token marks at all — every row was a bare ticker, while the pools
+ * page and the swap card both draw an icon. Same treatment here, including the same fallback: if a
+ * mark is missing or the file fails to load, draw a coloured chip from the ticker rather than a
+ * broken image. An icon that 404s is worse than one that was never promised.
+ */
+const LOGOS: Record<string, string> = {
+  ETH: "/tokens/eth.svg",
+  USDG: "/tokens/usdg.svg",
+  NVDA: "/tokens/nvda.svg",
+  SPY: "/tokens/spy.svg",
+  TSLA: "/tokens/tsla.svg",
+  AAPL: "/tokens/aapl.svg",
+  MSFT: "/tokens/msft.svg",
+  USDe: "/tokens/usde.svg",
+};
+
+function chipColor(sym: string): string {
+  let h = 0;
+  for (let i = 0; i < sym.length; i++) h = (h * 31 + sym.charCodeAt(i)) % 360;
+  return `hsl(${h} 45% 62%)`;
+}
+
+function TokenIcon({ symbol, logoURI, size = 26 }: { symbol: string; logoURI?: string; size?: number }) {
+  const [err, setErr] = useState(false);
+  const box = { width: size, height: size, borderRadius: "50%", flex: "0 0 auto" } as const;
+  if (err || !logoURI) {
+    return (
+      <span
+        aria-hidden
+        style={{
+          ...box, background: chipColor(symbol), color: "#fff", display: "inline-flex",
+          alignItems: "center", justifyContent: "center", fontSize: Math.round(size * 0.34),
+          fontWeight: 700, letterSpacing: -0.3,
+        }}
+      >
+        {symbol.slice(0, 2).toUpperCase()}
+      </span>
+    );
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={logoURI} alt="" width={size} height={size} onError={() => setErr(true)}
+      style={{ ...box, objectFit: "cover", background: "#fff" }}
+    />
+  );
+}
+
 function ReserveRow({
   r,
   pos,
@@ -370,18 +420,37 @@ function ReserveRow({
     }
   }, [amount, r.decimals]);
 
+  const held = pos?.walletBalance[r.symbol] ?? 0n;
   const disabled = !connected || parsed === 0n || !!busy;
+
+  /**
+   * Why Supply is refused, in words, or null when it is fine.
+   *
+   * The button used to enable on any non-zero amount, so on the six reserves this wallet holds none
+   * of it looked available, the transaction reverted in the wallet, and the page never said why.
+   * A control that can only fail should say so before it is pressed.
+   */
+  const supplyBlocked =
+    !connected ? null
+    : held === 0n ? `You hold no ${r.symbol}`
+    : parsed > held ? `More than your ${formatUnits(held, r.decimals)} ${r.symbol}`
+    : null;
+  const withdrawBlocked = connected && supplied === 0n ? `You have no ${r.symbol} supplied` : null;
 
   return (
     <div className="lend-row">
-      <div className="lend-asset">
-        <b>{r.symbol}</b>
-        <span>
-          {supplied > 0n && `supplied ${formatUnits(supplied, r.decimals)}`}
-          {supplied > 0n && borrowed > 0n && " · "}
-          {borrowed > 0n && `borrowed ${formatUnits(borrowed, r.decimals)}`}
-          {supplied === 0n && borrowed === 0n && (r.borrowable ? "collateral + borrowable" : "collateral only")}
-        </span>
+      <div className="lend-asset" style={{ display: "flex", alignItems: "center", gap: 9 }}>
+        <TokenIcon symbol={r.symbol} logoURI={LOGOS[r.symbol]} />
+        <div style={{ minWidth: 0 }}>
+          <b>{r.symbol}</b>
+          <span>
+            {supplied > 0n && `supplied ${formatUnits(supplied, r.decimals)}`}
+            {supplied > 0n && borrowed > 0n && " · "}
+            {borrowed > 0n && `borrowed ${formatUnits(borrowed, r.decimals)}`}
+            {supplied === 0n && borrowed === 0n && (r.borrowable ? "collateral + borrowable" : "collateral only")}
+            {connected && ` · you hold ${formatUnits(held, r.decimals)}`}
+          </span>
+        </div>
       </div>
 
       <div className="num">{formatUsd(r.priceBase)}</div>
@@ -399,13 +468,20 @@ function ReserveRow({
           onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
           style={{ width: "100%", padding: "7px 9px", fontSize: 12.5 }}
         />
+        {supplyBlocked && <div className="lend-why">{supplyBlocked}</div>}
         <div className="lend-acts">
-          <button className="lend-mini" disabled={disabled} onClick={() => onAct("supply", parsed)}>
+          <button
+            className="lend-mini"
+            disabled={disabled || !!supplyBlocked}
+            title={supplyBlocked ?? undefined}
+            onClick={() => onAct("supply", parsed)}
+          >
             Supply
           </button>
           <button
             className="lend-mini alt"
-            disabled={disabled || supplied === 0n}
+            disabled={disabled || !!withdrawBlocked}
+            title={withdrawBlocked ?? undefined}
             onClick={() => onAct("withdraw", parsed)}
           >
             Withdraw

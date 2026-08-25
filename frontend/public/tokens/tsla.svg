@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="#ffe8ec">
+  <defs>
+    <linearGradient id="gtsla" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#E31937"/>
+      <stop offset="1" stop-color="#8f0f22"/>
+    </linearGradient>
+  </defs>
+  <rect width="48" height="48" rx="10" fill="#33090d"/>
+  <rect x="3" y="3" width="42" height="42" rx="8" fill="url(#gtsla)"/>
+  <text x="24" y="24" text-anchor="middle" dominant-baseline="central"
+        font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+        font-weight="700" font-size="11" letter-spacing="-0.5" fill="TSLA">#ffe8ec</text>
+</svg>

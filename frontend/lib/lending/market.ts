@@ -406,6 +406,13 @@ export interface UserPosition {
   healthFactor: bigint | null;
   supplied: Record<string, bigint>;
   borrowed: Record<string, bigint>;
+  /**
+   * What the wallet actually HOLDS of each underlying, which is a different question from what it
+   * has supplied and is the one that decides whether a supply can succeed at all. Without it the
+   * UI offered a Supply button on six reserves the wallet held none of: the button enabled, the
+   * transaction reverted in the wallet, and nothing on the page had said why.
+   */
+  walletBalance: Record<string, bigint>;
 }
 
 export async function readUserPosition(user: Address, chainId?: number): Promise<UserPosition | null> {
@@ -417,15 +424,18 @@ export async function readUserPosition(user: Address, chainId?: number): Promise
     ...LENDING_ASSETS.flatMap((a) => [
       c.readContract({ address: a.aToken, abi: erc20Abi, functionName: "balanceOf", args: [user] }),
       c.readContract({ address: a.variableDebtToken, abi: erc20Abi, functionName: "balanceOf", args: [user] }),
+      c.readContract({ address: a.address, abi: erc20Abi, functionName: "balanceOf", args: [user] }),
     ]),
   ]);
 
   const v = acct as readonly bigint[];
   const supplied: Record<string, bigint> = {};
   const borrowed: Record<string, bigint> = {};
+  const walletBalance: Record<string, bigint> = {};
   LENDING_ASSETS.forEach((a, i) => {
-    supplied[a.symbol] = balances[i * 2] as bigint;
-    borrowed[a.symbol] = balances[i * 2 + 1] as bigint;
+    supplied[a.symbol] = balances[i * 3] as bigint;
+    borrowed[a.symbol] = balances[i * 3 + 1] as bigint;
+    walletBalance[a.symbol] = balances[i * 3 + 2] as bigint;
   });
 
   // Aave returns type(uint256).max for "no debt". Rendering that as a number produces 1.15e59 on
@@ -440,6 +450,7 @@ export async function readUserPosition(user: Address, chainId?: number): Promise
     healthFactor: v[5] >= HF_NO_DEBT ? null : v[5],
     supplied,
     borrowed,
+    walletBalance,
   };
 }
 

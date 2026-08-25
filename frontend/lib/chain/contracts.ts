@@ -77,8 +77,27 @@ export function getPoolDisplayInfo(token: TokenInfo): { symbol: string; subtitle
 const ETH_LOGO = "/tokens/eth.svg";
 const WETH_LOGO = "/tokens/weth.svg";
 const USDG_LOGO = "/tokens/usdg.svg";
-/** No first-party mark shipped for these yet; the chain glyph is the honest placeholder. */
+/**
+ * The chain glyph, kept as the fallback for any Robinhood token without its own mark.
+ *
+ * It is NOT the right mark for a token that has one: for a stretch every equity and USDe rendered
+ * this same icon, so five different stocks were visually identical in the pools list and the lend
+ * table, and an Ethena stablecoin wore Robinhood's logo. The images loaded fine — they just carried
+ * no information, which is the failure mode a 404 at least makes obvious.
+ */
 const RH_TOKEN_LOGO = "/tokens/rh.svg";
+
+/**
+ * Per-ticker marks. Deliberately LETTERFORMS in brand-adjacent colours rather than the companies'
+ * actual logos — these are tokenised equities we do not issue, and shipping Apple's or NVIDIA's
+ * trademark into our own asset list is not ours to do. The ticker is what the user is trading.
+ */
+const NVDA_LOGO = "/tokens/nvda.svg";
+const SPY_LOGO = "/tokens/spy.svg";
+const TSLA_LOGO = "/tokens/tsla.svg";
+const AAPL_LOGO = "/tokens/aapl.svg";
+const MSFT_LOGO = "/tokens/msft.svg";
+const USDE_LOGO = "/tokens/usde.svg";
 
 // The full indexed token universe on Robinhood Chain: native ETH, its wrapped form, and USDG.
 export const TOKENS: TokenInfo[] = [
@@ -143,7 +162,7 @@ export const TOKENS: TokenInfo[] = [
     name: "Ethena USDe",
     decimals: 18,
     sourceChain: "Robinhood Chain",
-    logoURI: RH_TOKEN_LOGO,
+    logoURI: USDE_LOGO,
     /**
      * NOT SWAPPABLE, measured 2026-08-25 — and this reverses my own earlier recommendation.
      *
@@ -173,7 +192,7 @@ export const TOKENS: TokenInfo[] = [
     name: "NVIDIA \u00b7 Robinhood Token",
     decimals: 18,
     sourceChain: "Robinhood Chain",
-    logoURI: RH_TOKEN_LOGO,
+    logoURI: NVDA_LOGO,
     swappable: true,
     originSymbol: "NVDA",
     displaySymbol: "NVDA",
@@ -185,7 +204,7 @@ export const TOKENS: TokenInfo[] = [
     name: "SPDR S&P 500 ETF Trust \u00b7 Robinhood Token",
     decimals: 18,
     sourceChain: "Robinhood Chain",
-    logoURI: RH_TOKEN_LOGO,
+    logoURI: SPY_LOGO,
     swappable: true,
     originSymbol: "SPY",
     displaySymbol: "SPY",
@@ -197,7 +216,7 @@ export const TOKENS: TokenInfo[] = [
     name: "Tesla \u00b7 Robinhood Token",
     decimals: 18,
     sourceChain: "Robinhood Chain",
-    logoURI: RH_TOKEN_LOGO,
+    logoURI: TSLA_LOGO,
     swappable: true,
     originSymbol: "TSLA",
     displaySymbol: "TSLA",
@@ -209,7 +228,7 @@ export const TOKENS: TokenInfo[] = [
     name: "Apple \u00b7 Robinhood Token",
     decimals: 18,
     sourceChain: "Robinhood Chain",
-    logoURI: RH_TOKEN_LOGO,
+    logoURI: AAPL_LOGO,
     swappable: true,
     originSymbol: "AAPL",
     displaySymbol: "AAPL",
@@ -221,7 +240,7 @@ export const TOKENS: TokenInfo[] = [
     name: "Microsoft \u00b7 Robinhood Token",
     decimals: 18,
     sourceChain: "Robinhood Chain",
-    logoURI: RH_TOKEN_LOGO,
+    logoURI: MSFT_LOGO,
     swappable: true,
     originSymbol: "MSFT",
     displaySymbol: "MSFT",
