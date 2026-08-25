@@ -12,6 +12,7 @@ import {
   quotingUnavailable,
   tokenIn as tokenInScope,
 } from "@/lib/api/chain-scope";
+import { checkAgainstReference } from "@/lib/aggregator/referencePrice";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -129,6 +130,21 @@ export async function GET(req: NextRequest) {
     const decOut = tokenOutInfo?.decimals ?? 18;
     const humanOut = Number(q.quote.netAmountOut) / 10 ** decOut;
 
+    /**
+     * Judge the route against an INDEPENDENT reference (Chainlink), because the pool being quoted
+     * cannot be the yardstick for itself. Measured 2026-08-25: ETH -> USDe quoted -24.06% against
+     * the oracle and this response carried no impact field at all, so the card showed a confident
+     * number and warned nobody. Additive: every pre-existing field keeps its exact shape.
+     */
+    const ref = await checkAgainstReference({
+      tokenIn,
+      tokenOut,
+      amountIn: BigInt(amountIn),
+      amountOut: q.quote.netAmountOut,
+      decimalsIn: decIn,
+      decimalsOut: decOut,
+    });
+
     return apiResponse({
       chainId: scope.chainId,
       chain: scope.meta.name,
@@ -156,6 +172,13 @@ export async function GET(req: NextRequest) {
       route: q.quote.routeDescriptions.join(" + "),
       routeDescriptions: q.quote.routeDescriptions,
       nativeValue: q.value.toString(),
+      /** How far below the independent reference this route lands, in bps. Null when either leg
+       *  has no feed or a stale one — `priceImpactReason` says which, so a consumer can tell
+       *  "no impact" apart from "could not measure". Those must never look the same. */
+      priceImpactBps: ref.priceImpactBps,
+      priceImpactReason: ref.reason,
+      referenceValueInUsd: ref.valueInUsd,
+      referenceValueOutUsd: ref.valueOutUsd,
     });
   } catch (err: any) {
     return apiError(err.message || "Quote failed", 500);

@@ -55,6 +55,9 @@ export interface TokenInfo {
   displaySymbol?: string;
   displaySubtitle?: string;
   hidden?: boolean;
+  /** A dollar-denominated asset. Was already being set on USDG via an `as TokenInfo` cast and read
+   *  by the token list's default-pair logic; declaring it removes the cast's blind spot. */
+  isStable?: boolean;
 }
 
 export function getDisplayInfo(token: TokenInfo): { symbol: string; subtitle: string } {
