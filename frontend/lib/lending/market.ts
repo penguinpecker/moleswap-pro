@@ -41,7 +41,10 @@ export interface LendingAsset {
   readonly decimals: number;
   readonly aToken: Address;
   readonly variableDebtToken: Address;
-  /** WETH is listed collateral-only: borrowing is deliberately disabled on it. */
+  /**
+   * False for the collateral-only reserves. WETH and the five equities are all listed this way:
+   * they can be supplied and borrowed AGAINST, but no debt can be opened IN them.
+   */
   readonly borrowable: boolean;
   /** True for the reserve the native-ETH gateway wraps into. */
   readonly isWrappedNative: boolean;
@@ -63,6 +66,60 @@ export const LENDING_ASSETS: readonly LendingAsset[] = [
     decimals: 6,
     aToken: "0xE341A4Ab92C682285458442446C8dDE6181e3aA1",
     variableDebtToken: "0x517dB9052026Ad62B68184Da4A313CD11cBa5822",
+    borrowable: true,
+    isWrappedNative: false,
+  },
+  {
+    symbol: "NVDA",
+    address: "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    decimals: 18,
+    aToken: "0xecD6c71Ad8928566f7cBDA9c56E21Cef247aCF1c",
+    variableDebtToken: "0xDD50bE0d63eb79A6cCB4752865e811f8bF7A5606",
+    borrowable: false,
+    isWrappedNative: false,
+  },
+  {
+    symbol: "SPY",
+    address: "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C",
+    decimals: 18,
+    aToken: "0x582511243F73D612370A557344cCf0dd18a8C9eB",
+    variableDebtToken: "0x5f5e5117EbEf1BD7220e05b657a2051cBf465085",
+    borrowable: false,
+    isWrappedNative: false,
+  },
+  {
+    symbol: "TSLA",
+    address: "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+    decimals: 18,
+    aToken: "0xC865caa46BcBA3CF9916a28178491f2BA6CF1848",
+    variableDebtToken: "0x226De3FC9d437667686729125871e4d33a8574CE",
+    borrowable: false,
+    isWrappedNative: false,
+  },
+  {
+    symbol: "AAPL",
+    address: "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+    decimals: 18,
+    aToken: "0xBE0a6fa0db5D28644D327f97FfBB1196C80Fb8Fc",
+    variableDebtToken: "0x4DbAD2f27803673Fe4ecd24E9362AE615e3fC6b7",
+    borrowable: false,
+    isWrappedNative: false,
+  },
+  {
+    symbol: "MSFT",
+    address: "0xe93237C50D904957Cf27E7B1133b510C669c2e74",
+    decimals: 18,
+    aToken: "0x215a1A54C9206009B7857a9f8135fB38a567d4aC",
+    variableDebtToken: "0x56AB3493CDe382917f18d58fD107f37c758Ee0F8",
+    borrowable: false,
+    isWrappedNative: false,
+  },
+  {
+    symbol: "USDe",
+    address: "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+    decimals: 18,
+    aToken: "0xa7992F0a0C0f399B8e11bDB08383Ca65e31B18e7",
+    variableDebtToken: "0x35D22AE3c9884f1132dd6fCA633bED54547BA2f7",
     borrowable: true,
     isWrappedNative: false,
   },

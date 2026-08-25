@@ -372,24 +372,54 @@ export async function loadLivePools(
     const t1IsUsdg = r.token1.address.toLowerCase() === usdgLc;
     const t0IsWeth = r.token0.address.toLowerCase() === wethLc;
     const t1IsWeth = r.token1.address.toLowerCase() === wethLc;
-    // Value the hub leg directly and double it: a two-sided position holds matched value on each
-    // side at spot, and the non-hub leg has no independent dollar price on this chain.
-    let hubValue = 0;
-    if (t0IsUsdg) hubValue = r.reserve0;
-    else if (t1IsUsdg) hubValue = r.reserve1;
-    else if (t0IsWeth) hubValue = r.reserve0 * ethUsd;
-    else if (t1IsWeth) hubValue = r.reserve1 * ethUsd;
-    const isHubPair = (t0IsWeth && t1IsUsdg) || (t0IsUsdg && t1IsWeth);
-    const tvlUsd = isHubPair
-      ? (t0IsUsdg ? r.reserve0 : r.reserve1) + (t0IsWeth ? r.reserve0 : r.reserve1) * ethUsd
-      : hubValue * 2;
+    const tvl = poolTvlUsd({
+      reserve0: r.reserve0, reserve1: r.reserve1, price: r._price,
+      t0IsUsdg, t1IsUsdg, t0IsWeth, t1IsWeth, ethUsd,
+    });
     const { _price, ...rest } = r;
-    return { ...rest, tvlUsd: Number.isFinite(tvlUsd) && tvlUsd > 0 ? tvlUsd : 0 } as LivePool;
+    return { ...rest, tvlUsd: Number.isFinite(tvl) && tvl > 0 ? tvl : 0 } as LivePool;
   });
 
   priced.sort((a, b) => b.tvlUsd - a.tvlUsd);
   _cache.set(scope.chainId, { at: now, rows: priced });
   return priced;
+}
+
+/**
+ * The dollar value of ONE pool's reserves, given which legs are the chain's hubs.
+ *
+ * Extracted so the DECISION is testable, not only the arithmetic. `tvlUsd` below was always correct;
+ * the bug was that this caller did not use it. It valued the hub leg and DOUBLED it, on the reasoning
+ * that a two-sided position holds matched value on each side at spot — true of a position straddling
+ * spot, false of one parked entirely to one side, which holds a single token. Every single-sided pool
+ * therefore reported exactly twice its real TVL, and a pool holding ONLY the non-hub token reported
+ * zero. Live proof, 2026-08-25: NVDA/USDG held 0.999999 USDG and 0 NVDA and was published as $2.00.
+ *
+ * USDG is preferred as the denominator whenever it is a leg, so WETH/USDG is valued in dollars
+ * directly rather than converted through an ETH price derived from that same pool.
+ *
+ * DISPLAY ONLY, AND THAT IS A CONSTRAINT RATHER THAN AN OBSERVATION. The non-hub leg is valued at
+ * the pool's OWN spot, which on a thin pool is a number a third party can move for very little — so
+ * this figure is inflatable by whoever wants the pool to look bigger. That is acceptable for a TVL
+ * label and is not acceptable anywhere a decision is made. Today the only consumers are the /pools
+ * page and /api/v1/pools. The one path with teeth is `screens/pools/index.tsx`'s `feeApy`, which
+ * divides 24h fees by this number; it is gated behind APY_MIN_TVL_USD = 1000 and every live pool is
+ * under $2, so nothing is published from it right now. Before wiring this into a cap, a headroom
+ * figure, a router preference or any signed value, price the non-hub leg against an independent
+ * reference (lib/aggregator/referencePrice.ts) instead of the pool being measured.
+ */
+export function poolTvlUsd(a: {
+  reserve0: number; reserve1: number; price: number;
+  t0IsUsdg: boolean; t1IsUsdg: boolean; t0IsWeth: boolean; t1IsWeth: boolean;
+  ethUsd: number;
+}): number {
+  const hubIsUsdg = a.t0IsUsdg || a.t1IsUsdg;
+  if (!hubIsUsdg && !a.t0IsWeth && !a.t1IsWeth) return 0; // neither leg is a hub: no dollar price exists
+  const hubIsToken0 = hubIsUsdg ? a.t0IsUsdg : a.t0IsWeth;
+  return tvlUsd({
+    reserve0: a.reserve0, reserve1: a.reserve1, price: a.price,
+    hubIsToken0, hubIsUsdg, ethUsd: a.ethUsd,
+  });
 }
 
 /** Kept for the API route, which prices external fallbacks in hub terms. */

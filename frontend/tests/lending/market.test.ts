@@ -118,23 +118,36 @@ describe("the market definition matches what is deployed", () => {
     expect(contractsFor(RH_CHAIN.id).LENDING_POOL.toLowerCase()).toBe(LENDING.pool.toLowerCase());
   });
 
-  it("lists exactly the two live reserves, with the right decimals and roles", () => {
-    expect(LENDING_ASSETS).toHaveLength(2);
+  it("lists exactly the eight live reserves, with the right decimals and roles", () => {
+    // Two on 2026-08-24; six more listed 2026-08-25 — five tokenised equities as collateral-only,
+    // and USDe as a second borrowable stable. See rh-lending records 2026-08-25 (r).
+    // NOTE ON WHAT THIS CAN AND CANNOT PROVE. Asserting the array against a literal list is asserting
+    // a constant against a second copy of itself — it detects an accidental edit, never a divergence
+    // from what is actually deployed. The drift that matters (a reserve listed, removed or reordered
+    // on chain) is caught by scripts/verify-lending-literals.mjs, which reads getReservesList() and
+    // both derived-token getters off the Pool and requires equality with this file. Run it before any
+    // release that touches this list; it was that read, not this test, that caught USDG's real LTV.
+    expect(LENDING_ASSETS).toHaveLength(8);
+    expect(LENDING_ASSETS.map((a) => a.symbol)).toEqual([
+      "ETH", "USDG", "NVDA", "SPY", "TSLA", "AAPL", "MSFT", "USDe",
+    ]);
 
-    const eth = LENDING_ASSETS.find((a) => a.symbol === "ETH")!;
-    const usdg = LENDING_ASSETS.find((a) => a.symbol === "USDG")!;
+    const by = (s: string) => LENDING_ASSETS.find((a) => a.symbol === s)!;
 
-    // decimals are NOT cosmetic: USDG is 6 and WETH is 18, and swapping them misprices by 1e12
-    expect(eth.decimals).toBe(18);
-    expect(usdg.decimals).toBe(6);
+    // decimals are NOT cosmetic: USDG is 6 and everything else is 18, and swapping them misprices by 1e12
+    expect(by("USDG").decimals).toBe(6);
+    for (const s of ["ETH", "NVDA", "SPY", "TSLA", "AAPL", "MSFT", "USDe"]) {
+      expect(by(s).decimals, `${s} decimals`).toBe(18);
+    }
 
-    // WETH is collateral-only on this market; offering a borrow button for it would revert
-    expect(eth.borrowable).toBe(false);
-    expect(usdg.borrowable).toBe(true);
+    // ONLY the stablecoins are borrowable. Offering a borrow button for a collateral-only reserve
+    // renders a control whose transaction reverts — the equities are listed with borrowing disabled
+    // precisely because their feeds stop updating when the US market closes.
+    const borrowable = LENDING_ASSETS.filter((a) => a.borrowable).map((a) => a.symbol);
+    expect(borrowable).toEqual(["USDG", "USDe"]);
 
-    // only the wrapped-native reserve may route through the gateway
-    expect(eth.isWrappedNative).toBe(true);
-    expect(usdg.isWrappedNative).toBe(false);
+    // exactly one wrapped-native reserve may route through the gateway
+    expect(LENDING_ASSETS.filter((a) => a.isWrappedNative).map((a) => a.symbol)).toEqual(["ETH"]);
   });
 
   it("every address is distinct — a copy-paste would alias a token to its own aToken", () => {

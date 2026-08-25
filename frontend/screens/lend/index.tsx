@@ -165,8 +165,8 @@ function LendMarket() {
       <header className="hero">
         <h1>Lend &amp; borrow.</h1>
         <p className="sub">
-          Supply ETH as collateral and borrow USDG against it. Aave v3.7, with a first-party oracle
-          and a read-time borrow veto.
+          Supply ETH, USDG or a tokenised equity as collateral and borrow stablecoins against it.
+          Aave v3.7, with a first-party oracle and a read-time borrow veto.
         </p>
         <MoleMascot />
       </header>
@@ -286,8 +286,15 @@ function LendMarket() {
           )}
 
           <p className="lend-note" style={{ marginTop: 18 }}>
-            ETH is collateral only — borrowing it is disabled. $100 of ETH collateral supports $75
-            of borrowing (75% LTV); liquidation begins at 80%.{" "}
+            Only the stablecoins can be borrowed; everything marked{" "}
+            <em>collateral only</em> can be supplied and borrowed against, never borrowed.{" "}
+            {riskBands(reserves).map((b) => (
+              <span key={b.key}>
+                {b.symbols} — ${b.ltv} of borrowing per $100 supplied, liquidated at {b.threshold}%.{" "}
+              </span>
+            ))}
+            The equities are held lower because their price feeds stop updating when the US market
+            closes.{" "}
             <button className="linkish" onClick={load} style={{ background: "none", border: 0, cursor: "pointer" }}>
               <RefreshCw size={12} /> Refresh
             </button>
@@ -302,6 +309,35 @@ function LendMarket() {
       )}
     </div>
   );
+}
+
+/**
+ * The risk numbers, GROUPED FROM THE LIVE READ rather than written into the sentence.
+ *
+ * These were hardcoded for one release and were already wrong: the prose said ETH and USDG both
+ * lend at 75% and liquidate at 80%, while USDG has been configured 72%/77% on chain the whole time.
+ * A risk number a user acts on must have exactly one source, and it has to be the one the protocol
+ * will actually enforce — the table above already reads `ltvBps` / `liquidationThresholdBps` per
+ * reserve, so the footnote reads the same values instead of a second copy that drifts silently on
+ * the next PoolConfigurator change.
+ */
+function riskBands(reserves: ReserveSnapshot[]) {
+  const groups = new Map<string, { ltv: number; threshold: number; symbols: string[] }>();
+  for (const r of reserves) {
+    if (r.ltvBps === 0) continue; // not usable as collateral at all — "$0 per $100" helps nobody
+    const key = `${r.ltvBps}:${r.liquidationThresholdBps}`;
+    const g = groups.get(key);
+    if (g) g.symbols.push(r.symbol);
+    else groups.set(key, { ltv: r.ltvBps, threshold: r.liquidationThresholdBps, symbols: [r.symbol] });
+  }
+  return [...groups.entries()]
+    .sort((a, b) => b[1].ltv - a[1].ltv)
+    .map(([key, g]) => ({
+      key,
+      symbols: g.symbols.join(", "),
+      ltv: g.ltv / 100,
+      threshold: g.threshold / 100,
+    }));
 }
 
 function ReserveRow({
