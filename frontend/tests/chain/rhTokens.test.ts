@@ -93,6 +93,20 @@ describe("the registry's shape", () => {
     }
   });
 
+  it("keeps USDe OUT of the swap picker until it has depth", () => {
+    // Measured 2026-08-25: a $246 swap costs -24.06% and $2,465 finds no route at all, while the
+    // equities hold a flat -0.60% to $2,465. The quote API returns no priceImpact, so nothing
+    // would warn the user. If this ever flips back to swappable, re-measure first.
+    const usde = bySymbol("USDe");
+    expect(usde).toBeTruthy();
+    expect(usde!.swappable).toBe(false);
+
+    // the equities DO have depth and must stay tradeable
+    for (const s of ["NVDA", "SPY", "TSLA", "AAPL", "MSFT"]) {
+      expect(bySymbol(s)!.swappable, `${s} should be swappable`).toBe(true);
+    }
+  });
+
   it("marks exactly the dollar assets as stable", () => {
     expect(bySymbol("USDG")!.isStable).toBe(true);
     expect(bySymbol("USDe")!.isStable).toBe(true);

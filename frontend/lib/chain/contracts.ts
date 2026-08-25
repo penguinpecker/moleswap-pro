@@ -141,7 +141,24 @@ export const TOKENS: TokenInfo[] = [
     decimals: 18,
     sourceChain: "Robinhood Chain",
     logoURI: RH_TOKEN_LOGO,
-    swappable: true,
+    /**
+     * NOT SWAPPABLE, measured 2026-08-25 — and this reverses my own earlier recommendation.
+     *
+     * USDe was proposed as the strongest next listing because Morpho runs a large USDe market on
+     * this chain. That reasoning was wrong: a LENDING market's TVL is not DEX depth, and the two
+     * were conflated. The only DEX liquidity is a thin WETH/USDe pool at 0.05%, and it collapses
+     * with size:
+     *        $2.47  ->  -7.51%
+     *       $24.65  ->  -9.31%
+     *      $246.52  -> -24.06%
+     *      $2,465   ->  NO ROUTE AT ALL
+     * For comparison the equities hold a FLAT -0.60% all the way to $2,465.
+     *
+     * The quote API returns no priceImpact, so the swap card would not warn a user before they
+     * lost a quarter of a $250 trade. Until real depth exists this stays out of the swap picker.
+     * It remains in the registry so pools can be created against it and so lending can list it.
+     */
+    swappable: false,
     isStable: true,
     originSymbol: "USDe",
     displaySymbol: "USDe",
