@@ -1030,7 +1030,13 @@ contract ExitPathStaticTest is SourceReader {
         // `_phase`, `_push`, `_rawTransfer` or `_requireMovableCurrency`, which the total identifier
         // allowlists above prove rather than assert. They bind the SETTLER, and a settler that refuses is
         // exactly what `timeout` exists to survive.
-        string[] memory want = new string[](17);
+        // PIN UPDATED AGAIN, same day, with the ONE view the clearing-anchor fix added. `clearingJumpAllowance`
+        // takes no argument and no address, so it cannot name a payee; it reads `maxClearingJumpTicks`,
+        // `lastClearingAt` and `maxEpochLife` and returns a number, and it appears in `settle`'s guard and
+        // nowhere on any exit — which the total identifier allowlists for `cancel`, `claim`, `timeout`,
+        // `_phase`, `_push`, `_rawTransfer` and `_requireMovableCurrency` above prove rather than assert.
+        // It exists because a refusal a settler cannot explain is a refusal nobody can act on.
+        string[] memory want = new string[](18);
         want[0] =
             "initialize(IPoolManager _poolManager, IMoleOracle _oracle, PoolKey memory _key, uint32 _epochDuration, uint32 _freezeDuration, uint32 _maxEpochLife, uint32 _twapWindow, int24 _maxTwapDeviationTicks, uint16 _maxResidualSlippageBps, address _upgradeAdmin)";
         want[1] = "transferUpgradeAdmin(address to)";
@@ -1050,9 +1056,10 @@ contract ExitPathStaticTest is SourceReader {
         want[14] = "effectiveMaxOracleStaleness()";
         want[15] = "effectiveMaxClearingJumpTicks()";
         want[16] = "effectiveMinSettleLiquidity()";
+        want[17] = "clearingJumpAllowance()";
         _assertSurfaceIs(src, want, "the queue");
 
-        // Same non-vacuity check as the vault's surface: exactly two of the queue's seventeen entry points
+        // Same non-vacuity check as the vault's surface: exactly two of the queue's eighteen entry points
         // spell `address`, both of them admin plumbing, and the count is pinned so a third cannot arrive
         // quietly. No payout leg has ever taken one and none can be added that does.
         uint256 withAddress;

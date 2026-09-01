@@ -792,6 +792,122 @@ contract MoleHook is IHooks, Initializable, UUPSUpgradeable {
         arithmeticMeanTick = int24((cumNow - cumAtTarget) / int56(int256(uint256(secondsAgo))));
     }
 
+
+    /// @notice THE EVIDENCE BEHIND `consult(id, secondsAgo)`: how much of that answer rests on time in
+    ///         which this pool recorded no trade at all. Additive, view-only, and it reads nothing the
+    ///         oracle did not already store — no new state, no new write, no change to `_write` or to any
+    ///         swap's gas.
+    ///
+    /// @dev WHY A SECOND NUMBER IS NEEDED AT ALL. `consult` is CORRECT and this does not second-guess it.
+    ///      On a pool that has not traded inside the window the tick was constant across the whole window,
+    ///      so `lastTick` IS the arithmetic mean and the quiet-tail path returns the true answer. The
+    ///      trouble is downstream: every consumer of `consult` is a GUARD, and a guard needs to know
+    ///      whether the number it was handed is OLD as well as whether it is RIGHT. Those are different
+    ///      questions and `consult`'s return value cannot carry both — a fossil tick and a live tick are
+    ///      the same int24.
+    ///
+    ///      WHY `lastObsTimestamp` WAS THE WRONG CLOCK TO ASK, which is the whole reason this exists.
+    ///      MoleQueue measured freshness as `now - lastObsTimestamp`, i.e. seconds since the last RING
+    ///      WRITE. `_write` stamps that on ANY swap past `minObservationInterval`, whatever its size and
+    ///      whether or not the tick moved — so ONE RAW UNIT resets it to zero. The cumulative that same
+    ///      swap records advances by `elapsed * lastTick`: it carries the fossil tick forward and adds no
+    ///      information whatsoever. A heartbeat anybody can fake for a dust swap's gas is not a freshness
+    ///      measurement; it is a liveness LED wired to the attacker's finger.
+    ///
+    ///      WHAT THIS MEASURES INSTEAD. `quietSpan` is the LONGEST STRETCH OF DEAD AIR the answer leans
+    ///      on — the widest interval between two consecutive moments this pool actually recorded, across
+    ///      the window and across the bracket its left edge is interpolated over. It is deliberately NOT
+    ///      clipped to the window: when the left edge is interpolated between an observation from a month
+    ///      ago and one from this block, the line is drawn over a month, and a month is the honest length
+    ///      of that line however little of it falls inside the window.
+    ///
+    ///      A dust swap cannot shrink this. It can add ONE recorded point at `now`; the stretch behind it
+    ///      is still empty, and the empty stretch is what gets reported. Making `quietSpan` small requires
+    ///      the pool to have traded REPEATEDLY, spread across the whole window, before the settler needed
+    ///      it — which is a cost paid in advance, in public, over time, rather than a byte appended to the
+    ///      exploit transaction.
+    ///
+    ///      READ THE HONEST LIMIT OF IT PLAINLY: this measures that trades HAPPENED, never that they were
+    ///      arm's length. A party willing to wash-trade its own pool on a schedule can hold `quietSpan`
+    ///      arbitrarily low at the fossil tick and nothing in this contract can tell that apart from a
+    ///      thin but genuine market. Closing THAT needs a price this pool does not produce; see
+    ///      `MoleQueue._requireAnchorIsFresh`.
+    ///
+    /// @param secondsAgo The same window the caller passed, or is about to pass, to `consult`. The answer
+    ///        describes THAT call: a different window is a different bracket and a different span.
+    /// @return quietSpan Seconds of the widest recorded-nothing stretch the answer rests on.
+    /// @return extrapolated True when `consult` took the QUIET-TAIL path — the window lies wholly after
+    ///         the last swap, so the answer is one tick held across the entire window and the pool quoted
+    ///         no price inside it. A caller whose premise is "the anchor is a TWAP, never spot" is being
+    ///         told here that the premise does not hold for this answer: every window, long or short,
+    ///         returns the same single number, so any check comparing two of them against each other is
+    ///         comparing a number with itself.
+    /// @dev Reverts exactly where `consult` reverts, with the same errors, so a caller cannot get an
+    ///      evidence reading for an answer that does not exist.
+    function consultEvidence(PoolId id, uint32 secondsAgo)
+        external
+        view
+        returns (uint32 quietSpan, bool extrapolated)
+    {
+        PoolState memory s = poolStates[id];
+        if (!s.initialized) revert PoolNotInitialized();
+        if (secondsAgo == 0) revert InsufficientObservations();
+
+        uint32 nowTs = uint32(block.timestamp);
+        if (secondsAgo > nowTs) revert InsufficientObservations();
+
+        uint32 target;
+        unchecked {
+            target = nowTs - secondsAgo;
+            // The tail counts on BOTH paths, and it is where the fossil hides. `consult` extends the
+            // cumulative from `lastTimestamp` to `now` with `lastTick`, and by construction nothing traded
+            // in that stretch — that is what makes the extension exact, and equally what makes it silent.
+            // Unchecked for the same reason `_write` is: uint32 subtraction is correct modulo 2^32 and a
+            // checked one would start reverting forever in 2106.
+            quietSpan = nowTs - s.lastTimestamp;
+        }
+
+        // PATH 1 mirrored: the window lies wholly after the last swap. There is one stretch and the whole
+        // answer is inside it, so there is nothing further to measure.
+        if (target >= s.lastTimestamp) return (quietSpan, true);
+
+        // PATH 2 mirrored: walk the SAME backward scan `consult` walks and take the widest step. Every
+        // step is a real gap between two recorded moments; `next` starts at `lastTimestamp` because the
+        // stretch from the newest ring entry to the last swap is likewise unrecorded (it is narrower than
+        // `minObservationInterval` by construction, so this costs nothing and never understates).
+        uint16 i = s.index;
+        bool haveNewer;
+        uint32 newerTs;
+        for (uint256 n = 0; n < CARDINALITY; n++) {
+            Observation memory o = observations[id][i];
+            if (!o.initialized) break;
+            uint32 next = haveNewer ? newerTs : s.lastTimestamp;
+            uint32 gap;
+            unchecked {
+                gap = next - o.blockTimestamp;
+            }
+            if (o.blockTimestamp <= target) {
+                // `consult` refuses to invent a right-hand bracket end, so this refuses with it: without a
+                // newer observation the only exact answer is the one that lands ON the observation.
+                if (o.blockTimestamp != target && !haveNewer) revert InsufficientObservations();
+                // THE BRACKET'S OWN SPAN, IN FULL AND UNCLIPPED. This is the step the dust swap cannot
+                // shrink: `next` is the attacker's fresh observation, `o` is the fossil one behind it, and
+                // the distance between them is how far the interpolated left edge was guessed across.
+                if (gap > quietSpan) quietSpan = gap;
+                return (quietSpan, false);
+            }
+            // A gap that falls INSIDE the window counts too. Both of its ends being recorded does not make
+            // the silence between them informative — it only makes it measurable.
+            if (gap > quietSpan) quietSpan = gap;
+            haveNewer = true;
+            newerTs = o.blockTimestamp;
+            i = i == 0 ? uint16(CARDINALITY - 1) : i - 1;
+        }
+        // PATH 3 mirrored: the window reaches past the oldest entry the ring still holds. `consult` fails
+        // closed here and so does this.
+        revert InsufficientObservations();
+    }
+
     /// @notice The fee every pool on this hook charges. Kept as a function rather than deleted in favour
     ///         of the public `lpFeePips` getter because integrations read it, but note the PoolId argument
     ///         is ignored: the fee is one immutable, not per-pool state.

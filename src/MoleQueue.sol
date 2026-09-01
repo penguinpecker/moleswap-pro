@@ -15,17 +15,36 @@ import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {FixedPoint96} from "v4-core/libraries/FixedPoint96.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TickBitmap} from "v4-core/libraries/TickBitmap.sol";
+import {BitMath} from "v4-core/libraries/BitMath.sol";
+import {LiquidityMath} from "v4-core/libraries/LiquidityMath.sol";
 
 interface IMoleOracle {
     function consult(PoolId id, uint32 secondsAgo) external view returns (int24 arithmeticMeanTick);
 
-    /// @notice The oracle's own bookkeeping for a pool, read so a consumer can tell a LIVE anchor from a
-    ///         fossil one. `consult` answers by extending the cumulative past the newest ring entry with
-    ///         the tick in force since it, which is exactly right for a pool that trades and exactly wrong
-    ///         for one that has not traded in a month: the answer is confident, well-formed, and made
-    ///         entirely of extrapolation from a single seeding observation. Nothing in `consult`'s return
-    ///         value distinguishes the two, so the freshness question has to be asked separately.
-    /// @dev Matches MoleHook's public `poolStates` getter field-for-field.
+    /// @notice HOW MUCH DEAD AIR THE ANCHOR RESTS ON. `consult` answers by extending the cumulative past
+    ///         the newest ring entry with the tick in force since it, which is exactly right for a pool
+    ///         that trades and exactly USELESS for one that has not traded in a month: the answer is
+    ///         confident, well-formed and made entirely of extrapolation from a fossil. Nothing in
+    ///         `consult`'s return value distinguishes the two, so the freshness question is asked
+    ///         separately — and it must be asked of something an attacker cannot answer for free.
+    ///         `quietSpan` is the widest stretch of recorded-nothing behind the answer; `extrapolated`
+    ///         says the window contained no trade at all. See `_requireAnchorIsFresh`.
+    /// @dev Matches MoleHook's `consultEvidence` field-for-field.
+    function consultEvidence(PoolId id, uint32 secondsAgo)
+        external
+        view
+        returns (uint32 quietSpan, bool extrapolated);
+
+    /// @notice The oracle's own bookkeeping for a pool.
+    /// @dev DELIBERATELY NO LONGER THE FRESHNESS INSTRUMENT, and that is this declaration's remaining job:
+    ///      to say so where the next reader will look. `lastObsTimestamp` is the last RING WRITE, which
+    ///      MoleHook stamps on ANY swap past `minObservationInterval` regardless of size and regardless of
+    ///      whether the tick moved — so one raw unit resets it to zero while the cumulative it writes
+    ///      merely carries the fossil tick forward. Gating settlement on it gated settlement on a number
+    ///      the attacker sets in the same transaction that settles. Kept declared because it is a genuine
+    ///      part of the oracle's surface and integrations read it; NOT read by any guard here.
+    ///      Matches MoleHook's public `poolStates` getter field-for-field.
     function poolStates(PoolId id)
         external
         view
@@ -316,6 +335,28 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
     int24 public lastClearingTick;
     bool public clearingTickSet;
 
+    /// @notice WHEN that clearing tick was recorded.
+    /// @dev THE ANCHOR IS EVIDENCE WITH A SHELF LIFE, AND UNTIL THIS EXISTED NOTHING RECORDED THE DATE.
+    ///      `lastClearingTick` had exactly one writer, and it sat DOWNSTREAM of the check that reads it —
+    ///      so the reachable clearing ticks were a chain of at-most-one-band steps, and each step needed a
+    ///      settleable epoch to exist at the moment the TWAP sat on that intermediate tick. A market that
+    ///      drifted past the band while no batch happened to settle left every later `settle` reverting
+    ///      `ClearingJumpTooLarge` for ever: the guard was an ABSORBING STATE, escapable only by the root
+    ///      key, and this queue's normal state is exactly the one that reaches it (one settlement in three
+    ///      weeks). `setSettlementGuards` writes the other four guard variables and not this one, so there
+    ///      was no re-anchor path at all. See `clearingJumpAllowance` for the fix and its defence.
+    ///
+    ///      APPEND-ONLY, AND THIS IS THE PART TO GET RIGHT: the live proxy has written slots 0..11 and
+    ///      nothing else. `clearingTickSet` ends slot 11 with ONE spare byte, a uint64 does not fit in it,
+    ///      so this opens slot 12 — a slot the live queue has never written — and nothing above moves,
+    ///      resizes or disappears. The `forge inspect storage-layout` diff is the proof.
+    ///
+    ///      ZERO IS A LEGITIMATE VALUE and it means "age unknown", which is the state a queue upgraded
+    ///      into this code is in if it had already cleared an epoch. Unknown age reads as ANCIENT rather
+    ///      than as fresh: the age is genuinely not known, and the four other settlement guards do not
+    ///      depend on it.
+    uint64 public lastClearingAt;
+
     event SettlementGuardsSet(
         uint32 shortTwapWindow, uint32 maxOracleStaleness, int24 maxClearingJumpTicks, uint128 minSettleLiquidity
     );
@@ -365,6 +406,70 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
     function effectiveMinSettleLiquidity() public view returns (uint128) {
         uint128 m = minSettleLiquidity;
         return m == 0 ? 1 : m;
+    }
+
+    /// @notice How far this settlement's clearing tick may sit from the recorded anchor, RIGHT NOW.
+    ///
+    /// @dev THE BAND IS A DRIFT BUDGET, NOT A FENCE, AND A BUDGET HAS TO ACCRUE.
+    ///
+    ///      `effectiveMaxClearingJumpTicks` is calibrated for ONE batch: "the market does not move this
+    ///      far between two consecutive clearings". Applied to an anchor of any age it stops being that
+    ///      claim and becomes "the market has not moved this far since some unspecified day", which
+    ///      ordinary drift falsifies eventually — and, because the anchor can only advance through a
+    ///      settlement that itself passes this check, falsifying it once used to end settlement PERMANENTLY.
+    ///      A guard whose failure mode is "this queue never settles again" is not a safety property.
+    ///
+    ///      So the same band is spent per `_anchorGrace()` of silence: full band while the anchor is
+    ///      younger than one grace, two bands at one grace, three at two, and so on, until the allowance
+    ///      reaches the widest jump the tick range itself admits, at which point the anchor constrains
+    ///      nothing at all. That last state is the correct one for a price nobody has quoted in days: an
+    ///      anchor from three weeks ago says NOTHING about whether today's honest price was manufactured,
+    ///      and pretending otherwise is what bricked settlement.
+    ///
+    ///      WHY LINEAR AND NOT A CLIFF. A cliff ("ignore the anchor once it is older than X") answers the
+    ///      brick but leaves a discontinuity an attacker can sit just inside, and it throws away a
+    ///      one-hour-old anchor's real evidentiary value wholesale. Growing with elapsed time keeps the
+    ///      RATE the base band already asserts — this much movement per epoch life is normal — constant,
+    ///      which is the only thing the base number was ever evidence for.
+    ///
+    ///      WHAT IT STILL REFUSES. In normal operation (a batch every epoch) the allowance is one to two
+    ///      bands, so the 20,000-tick excursion the jump guard exists for is refused exactly as before,
+    ///      and `test_maxJumpGuard_refusesAClearingNineteenThousandNineHundredTicksFromTheLast` still
+    ///      proves it. The settler's remaining lever — waiting for a wider allowance — is bounded by
+    ///      `SettleWindowClosed` at `2 * maxEpochLife` past the cutoff, i.e. two extra bands, and every
+    ///      other settlement guard (short-TWAP drift, spot drift, depth, oracle staleness) binds at the
+    ///      moment they finally settle regardless.
+    ///
+    ///      NOT AN ADMIN RE-ANCHOR. Adding one would fix the brick and leave the root key as the recovery
+    ///      path for an ORDINARY MARKET MOVE, which is the wrong shape for a permissionless settlement
+    ///      that fails closed on real money: recovery from a market doing market things must not require a
+    ///      human. It would also hand the admin a lever to narrow the guard's evidence at will.
+    function clearingJumpAllowance() public view returns (int256) {
+        int256 base = effectiveMaxClearingJumpTicks();
+
+        // The widest jump the tick range can express. Beyond this the comparison is vacuous by
+        // construction, so saturating here is what makes "the anchor eventually stops binding" a fact
+        // about the arithmetic rather than a hope about the numbers.
+        int256 widest = int256(TickMath.MAX_TICK) - int256(TickMath.MIN_TICK);
+
+        uint256 stampedAt = uint256(lastClearingAt);
+        uint256 elapsed = block.timestamp > stampedAt ? block.timestamp - stampedAt : 0;
+
+        // `base` is non-negative (`setSettlementGuards` refuses a negative and the derived default is
+        // positive), it is at most MAX_TICK, and `elapsed` is a timestamp, so the product is nowhere near
+        // overflowing. `_anchorGrace()` is non-zero by `initialize`, so this cannot divide by zero.
+        uint256 allowance = uint256(base) + (uint256(base) * elapsed) / _anchorGrace();
+        return allowance >= uint256(widest) ? widest : int256(allowance);
+    }
+
+    /// @dev How long an anchor is worth one full band. `maxEpochLife` is this contract's existing answer to
+    ///      "how long is a batch relevant for" — it bounds the settle window and the timeout — so an anchor
+    ///      older than one of them is older than the entire lifetime of the batch it would constrain.
+    ///      Non-zero for every queue that can exist: `initialize` requires `maxEpochLife > freezeDuration`
+    ///      and `freezeDuration != 0`. Deliberately NOT a new admin knob: a knob here is a number nobody
+    ///      can calibrate whose wrong values are exactly the two failure modes this fix is about.
+    function _anchorGrace() private view returns (uint256) {
+        return uint256(maxEpochLife);
     }
 
     /* ------------------------------------------------------------------ entry */
@@ -504,9 +609,26 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
         // then hand that entire escrow to the currency0 side in exchange for NOTHING, and book it no
         // refund either, leaving it unreachable by every exit for ever. Nothing crossed, so nothing
         // crosses: the escrow stays a residual and takes the ordinary residual path.
-        uint128 crossed1 = uint256(ep.totalIn0) >= want0
-            ? (crossed0 == 0 ? 0 : ep.totalIn1)
-            : uint128(FullMath.mulDiv(crossed0, priceX96, FixedPoint96.Q96));
+        //
+        // AND THE SAME GUARD ON THE OTHER BRANCH, WHICH IS THE ONE THAT CAN ACTUALLY FIRE HERE. The
+        // `crossed0 == 0` test above is DEAD CODE on any pool where `priceX96 < Q96` — i.e. wherever
+        // currency1 is the dearer raw unit, which is the live WETH/USDG pool at tick -200461 — because
+        // `want0 = mulDiv(totalIn1, Q96, priceX96)` is then at least `totalIn1`, so it cannot floor to
+        // zero while side 1 holds anything at all. On exactly those pools the MIRRORED failure is
+        // reachable instead, and it was unguarded: in this branch `crossed0 == totalIn0`, so
+        // `residual0` is zero by construction, and when `crossed0 * price` floors away the whole of
+        // side 0's escrow crosses for NOTHING, is booked no refund, and is paid out to the currency1
+        // sellers as part of `out1`. `claim` then pays that owner zero and burns their one-shot flag —
+        // the "unreachable by every exit for ever" outcome named in the paragraph above, arrived at
+        // from the other side. The two branches are one property and they get one answer: nothing
+        // crossed, so nothing crosses, and the escrow takes the ordinary in-kind residual path.
+        uint128 crossed1;
+        if (uint256(ep.totalIn0) >= want0) {
+            crossed1 = crossed0 == 0 ? 0 : ep.totalIn1;
+        } else {
+            crossed1 = uint128(FullMath.mulDiv(crossed0, priceX96, FixedPoint96.Q96));
+            if (crossed1 == 0) crossed0 = 0;
+        }
 
         // Whatever did not cross goes through the pool as ONE aggregated swap. One swap for the whole
         // epoch is the other half of the saving: N users pay one lot of slippage between them, not N.
@@ -545,6 +667,12 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
 
         (uint128 swapOut1, uint128 swapOut0, bool refunded) = _settleResidual(swapIn0, swapIn1, priceX96, lenient);
 
+        // Did this batch reach the market at all? Answered here, while both residual legs are still in
+        // hand, and consumed at the very end by the anchor write. `_splitResidual` has already zeroed a
+        // leg that was dust, and `refunded` means the whole residual came back in kind at the deadline —
+        // so this is true exactly when real tokens changed hands in the pool at this tick.
+        bool tradedAtThePool = !refunded && (swapIn0 != 0 || swapIn1 != 0);
+
         // Two ways a residual comes back in kind, and they compose. `refunded` means the bound-breaching
         // fallback fired at the deadline and the WHOLE residual is coming back; otherwise only the dust
         // legs are, and the rest was swapped. Booking `dust` on the `refunded` path too would double
@@ -562,12 +690,36 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
         ep.out1 = crossed0 + swapOut0; // total currency0 owed to currency1 sellers
         ep.phase = Phase.Settled;
 
-        // The anchor this batch actually cleared at, recorded so the NEXT one can be measured against it.
+        // The anchor this batch actually cleared at, recorded so the NEXT one can be measured against it,
+        // TOGETHER WITH THE MOMENT it happened — the tick is only evidence for as long as the timestamp
+        // says it is, so recording one without the other is what made the guard un-ageable.
         // Written only once the epoch has resolved, so a settlement that reverted for any reason leaves
         // the chain of clearing prices untouched.
-        lastClearingTick = tick;
-        clearingTickSet = true;
-        emit EpochCleared(e, tick);
+        //
+        // AND ONLY IF THIS BATCH ACTUALLY TRANSACTED. Unconditionally, ONE RAW UNIT set the number every
+        // later batch is measured against: a single dust order crosses nothing, is refunded to itself in
+        // kind, never touches the pool — and still armed the guard, stamped it fresh, and (before the
+        // aging above) bought permanent denial of settlement for one wei plus gas. An anchor is a claim
+        // that this queue cleared a batch at this price; a batch that transacted nothing has no price to
+        // claim. So the write asks for the same thing the rest of settlement asks for: either the two
+        // sides crossed at least one meaningful unit against each other, or the residual reached the pool
+        // — `_dustFloor` is the same line `_splitResidual` already draws, so "material" means one thing in
+        // this contract rather than two.
+        //
+        // WHAT THIS DOES NOT CLAIM: the floor is the dust floor, not an economic bar. It stops the
+        // one-wei arming named above, not a funded adversary. What makes that acceptable is the aging: a
+        // deliberately-fresh anchor can only ever be written AT THE CURRENT HONEST TWAP (this settlement
+        // had to pass every other guard to get here), and the band it pins widens back out on its own
+        // within an epoch life. A notional floor would need a number nobody can calibrate, and set too
+        // high it would stop the anchor ever updating — the guard switched off in silence, which is worse
+        // than the thing it would fix.
+        uint256 floorUnits = _dustFloor();
+        if (tradedAtThePool || uint256(crossed0) >= floorUnits || uint256(crossed1) >= floorUnits) {
+            lastClearingTick = tick;
+            lastClearingAt = uint64(block.timestamp);
+            clearingTickSet = true;
+            emit EpochCleared(e, tick);
+        }
 
         emit EpochSettled(e, tick, crossed0, crossed1);
     }
@@ -600,18 +752,81 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
     ///      answers every window confidently with its seeding tick. Both TWAPs then agree perfectly, drift
     ///      reads zero, and the batch clears against a fossil. The two checks are one property: the
     ///      anchor must be recent AND corroborated.
+    ///
+    ///      ------------------------------------------------------------------------------------------
+    ///      THE QUIET POOL, AND WHY THREE GUARDS WERE ONE GUARD WEARING THREE HATS.
+    ///
+    ///      On a pool that has not traded inside the window, `consult` takes its quiet-tail path and
+    ///      returns EXACTLY `lastTick` for EVERY window. That is not a bug in `consult` — with the tick
+    ///      constant across the whole window `lastTick` IS the arithmetic mean — but it is fatal here,
+    ///      because settlement then reads ONE number through three different names:
+    ///        - `consult(twapWindow)`       -> lastTick   (the clearing anchor)
+    ///        - `consult(shortTwapWindow)`  -> lastTick   (the drift reference, below)
+    ///        - `slot0.tick`                -> lastTick   (the spot band, in `_requireTheMarketCanBackThisPrice`)
+    ///      so the short-vs-long drift and the spot-vs-long drift both compute ZERO BY CONSTRUCTION and
+    ///      cannot fire however old the price is. Two of the three guards are decoration on such a pool,
+    ///      and the whole defence collapses onto whatever measures AGE.
+    ///
+    ///      WHICH IS WHY THE AGE MEASUREMENT HAD TO CHANGE. It read `poolStates(id).lastObsTimestamp` —
+    ///      the last RING WRITE — and `MoleHook._write` stamps that on ANY swap past
+    ///      `minObservationInterval`, regardless of size and regardless of whether the tick moved. ONE RAW
+    ///      UNIT qualifies, and the cumulative it writes advances by `elapsed * lastTick`: it carries the
+    ///      fossil tick forward and adds no information at all. So the entire remaining defence was a
+    ///      heartbeat the attacker could restart from inside the settling transaction.
+    ///
+    ///      THE ATTACK THAT BOUGHT: queue on the side the fossil price favours; wait for the freeze, after
+    ///      which nobody can cancel BY DESIGN; then in ONE transaction swap one raw unit and call `settle`
+    ///      (permissionless). Every guard passed and the batch crossed at a price the pool had not quoted
+    ///      for days. If the fossil never favoured them they simply never settled — the epoch times out
+    ///      and they reclaim in kind at zero cost. A free option on the whole batch, exercised after
+    ///      seeing the market. `minSettleLiquidity` is no obstacle either: with `restrictedLiquidity`
+    ///      FALSE on the live RH hook the attacker mints the required depth at the target tick themselves.
+    ///
+    ///      WHAT IS ASKED NOW: `MoleHook.consultEvidence(id, twapWindow).quietSpan` — the widest stretch
+    ///      of time the anchor rests on in which this pool recorded NOTHING, measured across the window
+    ///      and across the bracket its left edge was interpolated over, unclipped. The dust swap adds one
+    ///      recorded point at `now` and leaves the month behind it exactly as empty; the month is what
+    ///      gets reported. The bound is the SAME dial, `maxOracleStaleness`, in the same units and with
+    ///      the same error — the dial was never wrong, it was pointed at the wrong clock.
+    ///
+    ///      ------------------------------------------------------------------------------------------
+    ///      THE RESIDUAL, STATED PLAINLY RATHER THAN PAPERED OVER.
+    ///
+    ///      THIS DOES NOT CLOSE THE HOLE. It prices it. `quietSpan` proves that trades HAPPENED; nothing
+    ///      in this pool can prove they were ARM'S LENGTH. A party willing to wash-trade its own pool on a
+    ///      schedule — one dust swap per `maxOracleStaleness` seconds, at the fossil tick, against its own
+    ///      liquidity — holds `quietSpan` arbitrarily low and every guard above still passes. What changed
+    ///      is the shape of the cost: from one byte appended to the exploit transaction, free and
+    ///      invisible until it lands, to a public commitment maintained across blocks for the whole life
+    ///      of the window, which an honest counterparty can watch and which the operator can make
+    ///      arbitrarily expensive by tightening `maxOracleStaleness`. That is a real change and it is not
+    ///      a fix.
+    ///
+    ///      THE ACTUAL FIX IS A PRICE THIS POOL DOES NOT PRODUCE. Every number reachable from here is
+    ///      derived from the same tick, so no arrangement of them can corroborate that tick; a pool nobody
+    ///      trades has no honest price and no amount of self-referential guarding invents one. Crossing a
+    ///      batch that its participants cannot cancel requires an INDEPENDENT anchor — a second venue, a
+    ///      signed feed, anything not written by the party who benefits — and until one exists the honest
+    ///      operating posture for a thin pool is a `maxOracleStaleness` short enough that the manufactured
+    ///      heartbeat costs more than the batch is worth, accepting that settlement then halts whenever
+    ///      the market is genuinely quiet. Halting is safe: the epoch times out and every deposit comes
+    ///      back in kind, at no loss, to everyone.
     function _requireAnchorIsFresh(int24 tick) private view {
         PoolId id = key.toId();
 
         // Only the AGE is asked here. Whether the oracle knows this pool at all was already settled by
         // the `consult` above, which reverts `PoolNotInitialized()` on an unseeded pool — a check here
         // would be one no test could ever turn red, and it would report the problem under a worse name.
-        (,, uint32 lastObsTs,,,) = oracle.poolStates(id);
-        uint256 nowTs = uint256(uint32(block.timestamp));
-        uint256 obsTs = uint256(lastObsTs);
-        // `nowTs < obsTs` can only mean the 2106 uint32 rollover; fail closed rather than read a
-        // negative age as a fresh one.
-        if (nowTs < obsTs || nowTs - obsTs > effectiveMaxOracleStaleness()) revert OracleTooStale();
+        //
+        // AND THE AGE IS MEASURED ON THE ANCHOR'S OWN WINDOW, NOT ON A HEARTBEAT. `quietSpan` is the
+        // widest stretch of time the answer to `consult(twapWindow)` rests on in which this pool recorded
+        // NOTHING — including, unclipped, the bracket its left edge was interpolated across. A dust swap
+        // adds one recorded point and leaves that stretch exactly as empty as it found it.
+        (uint32 quietSpan,) = oracle.consultEvidence(id, twapWindow);
+        // No rollover branch is needed or wanted here: `consultEvidence` does its subtraction in uint32
+        // exactly as `MoleHook._write` does, which is correct modulo 2^32 and cannot read a negative age
+        // as a fresh one. The old code needed the guard because it did the arithmetic itself.
+        if (uint256(quietSpan) > effectiveMaxOracleStaleness()) revert OracleTooStale();
 
         int24 refTick = oracle.consult(id, effectiveShortTwapWindow());
         int24 drift = refTick > tick ? refTick - tick : tick - refTick;
@@ -624,13 +839,54 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
     ///      "a pool has regions of ZERO liquidity where a dust swap moves spot arbitrarily far for almost
     ///      nothing". Walk spot into such a region, wait for the TWAP to follow, and the batch clears at a
     ///      price that no liquidity has ever stood behind — the crossed portion never touches the pool, so
-    ///      nothing else in settlement would notice. The depth reading is taken at the CURRENT tick and is
-    ///      only meaningful together with the spot band immediately below it: an attacker is free to put
-    ///      spot wherever they like, but satisfying both at once requires real liquidity to exist within
-    ///      `maxTwapDeviationTicks` of the price this batch is about to clear at, and no amount of
-    ///      ordering privilege manufactures liquidity that is not there. That pairing is why the slot0
-    ///      read survived F-04 at all: it is no longer the freshness check, it is the thing that pins the
-    ///      depth measurement near the clearing tick.
+    ///      nothing else in settlement would notice.
+    ///
+    ///      AND THE DEPTH MUST BE MEASURED WHERE THE BATCH WOULD CLEAR, NOT WHERE SPOT HAPPENS TO SIT.
+    ///      This read used to be `getLiquidity`, i.e. `pool.liquidity`, which is the liquidity active at
+    ///      the CURRENT tick and nowhere else, paired with the spot band above on the theory that the band
+    ///      pinned the measurement near the clearing tick. It does not, and the live book is the
+    ///      counter-example: RH 4663's queue pool has exactly two initialized ticks, -201060 and -200460,
+    ///      one position spanning them, spot resting at -200461 — ONE tick under the top. A one-for-zero
+    ///      swap of about 1,140 raw USDG crosses -200460; v4 subtracts that position's `liquidityNet` and
+    ///      `pool.liquidity` becomes exactly ZERO, while the clearing tick one tick below still has the
+    ///      whole book standing under it. Every later `settle` then reverted `InsufficientPoolDepth` — and
+    ///      the spot band could not see it, because a one-tick move is a drift of ONE against a band of
+    ///      six hundred, and the attacker's own swap wrote a ring observation at `now` so the short anchor
+    ///      followed it. Park the tick and walk away: every frozen epoch runs out its clock and resolves
+    ///      through timeout. Permissionless, repeatable, indefinite, for a fraction of a cent — including
+    ///      by a participant who has seen where the cross would land and wants out after the cutoff took
+    ///      cancellation away. No principal moves, so the whole loss is the product.
+    ///
+    ///      A guard that a one-wei move of a number the settler does not even have to own can turn into a
+    ///      permanent refusal is not a safety property; it is the kill switch wearing the safety
+    ///      property's name. So the question is asked at the tick this batch will actually cross at:
+    ///      `_liquidityActiveAt` starts from `pool.liquidity` and replays v4's OWN crossing arithmetic
+    ///      — `+liquidityNet` walking up, `-liquidityNet` walking down, over the initialized ticks between
+    ///      spot and the anchor — to produce the liquidity that would be in range AT the clearing tick.
+    ///      Moving spot moves the START of that walk and the ticks it crosses in exactly compensating
+    ///      amounts, so the answer is a function of the BOOK and the ANCHOR only. Neither is something the
+    ///      settler can move inside one transaction: the book is other people's capital, and the anchor is
+    ///      a TWAP that a same-block swap contributes exactly zero seconds to. The guard stops being
+    ///      satisfiable — or defeatable — by putting spot somewhere.
+    ///
+    ///      This is a REPLACEMENT, not an addition. One depth read became one better-aimed depth read:
+    ///      same dial (`minSettleLiquidity`), same revert, same fail-closed answer, no new state, no new
+    ///      entry point. It is also strictly STRONGER against the attack the guard was built for — walking
+    ///      the TWAP into a desert now fails because the DESERT is measured, where before an attacker who
+    ///      had walked the TWAP into a desert could have stepped spot back onto a live band inside the
+    ///      600-tick window and passed the old check with liquidity that stands nowhere near the price.
+    ///
+    ///      WHAT IT DOES NOT COVER, PLAINLY. It does not make anyone provide depth: if the market durably
+    ///      leaves the vault's range the anchor follows, the clearing tick genuinely has nothing under it,
+    ///      and settlement halts until liquidity exists there again — exactly as the old read halted, but
+    ///      now only for a sustained TWAP-scale move instead of a one-block nudge. It does not ask whether
+    ///      that depth is ARM'S LENGTH; on this pool one LP is the entire book, so "there is depth" means
+    ///      "the vault is in range", not "an independent market agrees". It says nothing about how far the
+    ///      residual swap pushes the price — that is `maxResidualSlippageBps`, inside the callback,
+    ///      untouched. And its cost grows with the number of initialized ticks between spot and the
+    ///      anchor, which the spot band above bounds to `maxTwapDeviationTicks / tickSpacing` BECAUSE it
+    ///      runs first: on the live pool that is at most ten, on a spacing-1 pool with a very wide band it
+    ///      would be hundreds, and an operator widening `maxTwapDeviationTicks` is widening this too.
     ///
     ///      JUMP. A clearing price twenty thousand ticks from the last one this queue cleared at is not a
     ///      market, it is an excursion — a manufactured one if someone stands to gain, a broken oracle if
@@ -643,14 +899,102 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
         int24 spotDrift = spotTick > tick ? spotTick - tick : tick - spotTick;
         if (spotDrift > maxTwapDeviationTicks) revert TwapTooFarFromSpot();
 
-        if (StateLibrary.getLiquidity(poolManager, id) < effectiveMinSettleLiquidity()) {
+        if (_liquidityActiveAt(id, spotTick, tick) < effectiveMinSettleLiquidity()) {
             revert InsufficientPoolDepth();
         }
 
         if (clearingTickSet) {
             int256 jump = int256(tick) - int256(lastClearingTick);
             if (jump < 0) jump = -jump;
-            if (jump > effectiveMaxClearingJumpTicks()) revert ClearingJumpTooLarge();
+            // AGAINST THE AGED BAND, NOT THE RAW ONE. "The price did not LEAP since the last batch" is
+            // evidence about manipulation only while "the last batch" was recent; an anchor from three
+            // weeks ago is evidence about nothing, and measuring today's honest price against it is how a
+            // guard that fails closed turns into a queue that never settles again. `clearingJumpAllowance`
+            // carries the full defence.
+            if (jump > clearingJumpAllowance()) revert ClearingJumpTooLarge();
+        }
+    }
+
+    /// @dev THE LIQUIDITY THAT WOULD BE IN RANGE AT `target`, computed from the pool's own book.
+    ///
+    ///      `pool.liquidity` answers only about the tick the pool is sitting on. To ask about a different
+    ///      tick there is exactly one honest method: replay what a swap to that tick would do to the
+    ///      number. v4's `Pool.swap` adds `liquidityNet` when it crosses an initialized tick moving UP and
+    ///      subtracts it moving DOWN, so the liquidity active at `target` is `pool.liquidity` plus the net
+    ///      of every initialized tick in `(spot, target]` (walking up) or minus the net of every
+    ///      initialized tick in `(target, spot]` (walking down). Those are the same half-open intervals
+    ///      v4 itself crosses, which is why this cannot disagree with the pool about where a position
+    ///      starts and stops: `tickUpper` is exclusive here for the same reason it is exclusive there.
+    ///
+    ///      THE WALK IS BOUNDED BY THE CHECK ABOVE IT, not by a cap of its own. `_requireTheMarketCanBack
+    ///      ThisPrice` has already refused unless `|spot - target| <= maxTwapDeviationTicks`, so the
+    ///      number of iterations cannot exceed that span divided by `tickSpacing`, and uninitialized
+    ///      stretches are skipped a whole bitmap word at a time. A cap here would be a second refusal
+    ///      reason for the same question and a second thing to get wrong; the ordering already carries it.
+    ///
+    ///      `addDelta` reverts on underflow, which is unreachable: a pool's active liquidity is
+    ///      non-negative at every tick by construction, and this replays the pool's own arithmetic over
+    ///      the pool's own ticks. Unreachable and fail-closed is the right way round for a settlement that
+    ///      can always resolve through `timeout`.
+    function _liquidityActiveAt(PoolId id, int24 spot, int24 target) private view returns (uint128 liq) {
+        liq = StateLibrary.getLiquidity(poolManager, id);
+        int24 spacing = key.tickSpacing;
+
+        // One loop, both directions, because they are one property read in a mirror. `target == spot` is
+        // the ordinary case and enters the loop zero times, so the common path costs exactly what the old
+        // `getLiquidity` read cost.
+        bool down = target < spot;
+        int24 t = spot;
+        while (down ? t > target : t < target) {
+            (int24 next, bool init) = _nextInitializedTick(id, t, spacing, down);
+            // Nothing initialized is left between here and `target`: `next` is either the nearest
+            // initialized tick in this direction or the edge of its word, and either way it has overshot.
+            if (down ? next <= target : next > target) break;
+            if (init) {
+                (, int128 net) = StateLibrary.getTickLiquidity(poolManager, id, next);
+                // Crossing downward is the mirror of crossing upward, exactly as `Pool.swap` writes it.
+                // `liquidityNet` cannot be `type(int128).min` — the per-tick liquidity cap is far below
+                // it — so the negation is not a reachable revert.
+                liq = LiquidityMath.addDelta(liq, down ? -net : net);
+            }
+            // Downward, v4 lands on `tickNext - 1`; upward it lands on `tickNext`. Same step, same reason:
+            // the tick just crossed must not be considered twice.
+            t = down ? next - 1 : next;
+        }
+    }
+
+    /// @dev `TickBitmap.nextInitializedTickWithinOneWord`, against a bitmap word that lives in the
+    ///      PoolManager rather than in this contract's storage. The bit arithmetic is copied from v4-core
+    ///      unchanged and deliberately so: a walk that indexed the book differently from the pool would
+    ///      answer a question about a book that does not exist. Only the word fetch differs — `extsload`
+    ///      through `StateLibrary` instead of a `mapping` this contract does not own.
+    function _nextInitializedTick(PoolId id, int24 tick, int24 spacing, bool lte)
+        private
+        view
+        returns (int24 next, bool initialized)
+    {
+        unchecked {
+            int24 compressed = TickBitmap.compress(tick, spacing);
+
+            if (lte) {
+                (int16 wordPos, uint8 bitPos) = TickBitmap.position(compressed);
+                uint256 mask = type(uint256).max >> (uint256(type(uint8).max) - bitPos);
+                uint256 masked = StateLibrary.getTickBitmap(poolManager, id, wordPos) & mask;
+
+                initialized = masked != 0;
+                next = initialized
+                    ? (compressed - int24(uint24(bitPos - BitMath.mostSignificantBit(masked)))) * spacing
+                    : (compressed - int24(uint24(bitPos))) * spacing;
+            } else {
+                (int16 wordPos, uint8 bitPos) = TickBitmap.position(++compressed);
+                uint256 mask = ~((1 << bitPos) - 1);
+                uint256 masked = StateLibrary.getTickBitmap(poolManager, id, wordPos) & mask;
+
+                initialized = masked != 0;
+                next = initialized
+                    ? (compressed + int24(uint24(BitMath.leastSignificantBit(masked) - bitPos))) * spacing
+                    : (compressed + int24(uint24(type(uint8).max - bitPos))) * spacing;
+            }
         }
     }
 
@@ -814,12 +1158,19 @@ contract MoleQueue is IUnlockCallback, Initializable, UUPSUpgradeable {
     ///      escrowed, and the matched part of the batch — which needed no pool at all — settles.
     function _splitResidual(uint128 amountIn, uint256 fairOut) private view returns (uint128 toSwap, uint128 toRefund) {
         if (amountIn == 0) return (0, 0);
-        // The least n with `n * maxResidualSlippageBps >= 10_000`. `maxResidualSlippageBps` is non-zero by
-        // `initialize`, so this cannot divide by zero.
-        uint256 bps = uint256(maxResidualSlippageBps);
-        uint256 floorUnits = (10_000 + bps - 1) / bps;
+        uint256 floorUnits = _dustFloor();
         if (uint256(amountIn) < floorUnits || fairOut < floorUnits) return (0, amountIn);
         return (amountIn, 0);
+    }
+
+    /// @dev The least amount this contract treats as an amount at all: the smallest `n` with
+    ///      `n * maxResidualSlippageBps >= 10_000`, i.e. the point below which a slippage bound rounds away
+    ///      to nothing. `_splitResidual` uses it to keep dust away from the pool and the anchor write uses
+    ///      it to keep dust away from the guard — one definition, not two.
+    ///      `maxResidualSlippageBps` is non-zero by `initialize`, so this cannot divide by zero.
+    function _dustFloor() private view returns (uint256) {
+        uint256 bps = uint256(maxResidualSlippageBps);
+        return (10_000 + bps - 1) / bps;
     }
 
     /// @dev Runs the aggregated residual swap, or reports that it could not be run within its bound.

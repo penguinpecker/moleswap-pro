@@ -732,6 +732,46 @@ contract AttackQueueCrossingMath is Test, Deployers {
         assertEq(t1.balanceOf(mallory), m1Before + 5, "mallory's escrow was crossed away for nothing");
     }
 
+    /// @notice THE SAME TRAP, IN THE OTHER DIRECTION — and this branch has no guard.
+    ///
+    ///         `settle`'s crossing has two branches. When side 1 is fully absorbed it takes the
+    ///         `crossed0 == 0 ? 0 : ep.totalIn1` branch, whose guard the test above proves. When side 0 is
+    ///         fully absorbed it takes `crossed1 = floor(crossed0 * priceX96 / Q96)` — and that floor
+    ///         reaches ZERO on exactly the mirrored condition: a currency0 escrow worth less than one raw
+    ///         unit of currency1. In this world one raw unit of currency1 costs ~7 raw units of currency0,
+    ///         so a currency0 escrow of 1..7 units buys NOTHING.
+    ///
+    ///         The consequence is the one the sibling guard exists to refuse, with the currencies swapped:
+    ///         `crossed0 = totalIn0` is credited to the currency1 side as `out1`, `crossed1 = 0` so the
+    ///         currency0 side is credited nothing, and `residual0 = totalIn0 - crossed0 = 0` so no in-kind
+    ///         refund is booked either. `claim` marks the order withdrawn and pays zero.
+    ///
+    ///         MUTATION: adding the mirrored guard (`crossed1 == 0 -> cross nothing`) turns this GREEN;
+    ///         removing it again turns it RED. It is the only test in the suite that reaches this branch.
+    function test_conservation_aSubUnitCurrencyZeroEscrowIsNotCrossedForNothing() public {
+        (uint256 priceX96,) = _twapPriceX96();
+        assertEq(
+            FullMath.mulDiv(uint256(7), priceX96, FixedPoint96.Q96), 0, "premise: seven units must buy nothing here"
+        );
+
+        uint256 iA = _place(alice, false, 300e18);
+        uint256 iM = _place(mallory, true, 7);
+
+        uint256 m0Before = t0.balanceOf(mallory);
+        _freezeAndSettleStrict(0);
+
+        (,,,, uint128 out0,, uint128 refund0,) = _epoch(0);
+        emit log_named_uint("out0    (currency1 owed to the currency0 side)", out0);
+        emit log_named_uint("refund0 (currency0 booked back in kind)      ", refund0);
+        assertEq(out0, 0, "premise: a sub-unit escrow cannot be credited with a cross it cannot buy");
+        assertEq(refund0, 7, "a sub-unit currency0 escrow was not returned in kind");
+        _assertConserved(0, "sub-unit side 0");
+
+        _claim(alice, 0, iA);
+        _claim(mallory, 0, iM);
+        assertEq(t0.balanceOf(mallory), m0Before + 7, "mallory's escrow was crossed away for nothing");
+    }
+
     /* ------------------------------------------------------------------ internals */
 
     function _sqrtNow() internal view returns (uint160 sqrtPriceX96) {
