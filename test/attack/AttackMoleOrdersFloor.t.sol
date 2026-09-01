@@ -5,10 +5,9 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
-import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
-import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {MoleRouter} from "../../src/MoleRouter.sol";
 import {MoleOrders} from "../../src/MoleOrders.sol";
+import {MockAggregator} from "../helpers/MockAggregator.sol";
 import {OrdersWorld} from "../helpers/OrdersWorld.sol";
 
 interface IV3Callback {
@@ -130,9 +129,9 @@ contract AttackMoleOrdersFloor is OrdersWorld {
         uint256 id = _createOrder(1e18, 5e18, 1, 6 hours);
         (uint256 legIn, uint256 floorOut) = book.currentLeg(id);
 
-        // The reference pool opened at 1:1 and has not traded, so a leg's fair value is the leg.
+        // Both feeds read $1.00, so a leg's fair value is the leg.
         uint256 fair = legIn;
-        assertEq(floorOut, (fair * (10_000 - SLIP_BPS)) / 10_000, "floor is the TWAP less the tolerance");
+        assertEq(floorOut, (fair * (10_000 - SLIP_BPS)) / 10_000, "floor is fair value less the tolerance");
 
         uint256 ownerB0 = tokenB.balanceOf(owner);
         kp.setPayOut(floorOut); // the keeper pays the least the contract will accept
@@ -171,9 +170,9 @@ contract AttackMoleOrdersFloor is OrdersWorld {
         // is not required; what matters is that this number never changes again.
         uint256 id = _createOrder(1e18, 5e18, 0.5e18, 0);
 
-        // The market moves: tokenA doubles against tokenB, and the TWAP absorbs it in full.
-        _marketSwap(oraclePool, false, 83_000e18);
-        _advance(2 * TWAP_WINDOW);
+        // The market moves: tokenA doubles against tokenB. That is now a FEED event, and it lands in one
+        // transmission rather than needing a window of pool history behind it.
+        _setFeed(feedA, 2 * ONE_USD);
 
         (, uint256 floorOut) = book.currentLeg(id);
         assertGt(floorOut, 1.9e18, "the floor tracked the market, not the stale limit");
@@ -190,8 +189,8 @@ contract AttackMoleOrdersFloor is OrdersWorld {
     /* ───────────────────────── MECHANISM B — the sandwich on an honest keeper ────────────────────── */
 
     /// @notice No privileged role required. The keeper is honest; the SEQUENCER moves spot immediately
-    ///         before the fill lands. The bound has to be immovable inside that block, and it is —
-    ///         a swap sharing the fill's timestamp contributes exactly zero elapsed time to the TWAP.
+    ///         before the fill lands. The bound has to be immovable inside that block, and it now is by
+    ///         construction rather than by averaging: the floor never reads the pool at all.
     function test_sameBlockSpotManipulationCannotMoveTheFloorOrStealTheLeg() public {
         uint256 id = _createOrder(1e18, 5e18, 1, 6 hours);
         MoleRouter.SwapPlan memory honest = _honestPlan(id); // route through the real pool, floor pinned
@@ -204,7 +203,7 @@ contract AttackMoleOrdersFloor is OrdersWorld {
         _marketSwap(oraclePool, true, 20_000e18);
 
         (, uint256 floorAfter) = book.currentLeg(id);
-        assertEq(floorAfter, floorBefore, "spot moved; the TWAP-anchored floor did not");
+        assertEq(floorAfter, floorBefore, "spot moved; the Chainlink-anchored floor did not");
 
         // The fill now cannot execute at the manipulated price, so the sandwich has nothing to close on.
         vm.prank(keeper);
@@ -252,82 +251,65 @@ contract AttackMoleOrdersFloor is OrdersWorld {
         uint16 overCap = book.MAX_SLIPPAGE_BPS() + 1;
         vm.startPrank(owner);
         vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, oraclePool, TWAP_WINDOW, overCap);
+        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, overCap);
         // 10_000 bps would be an outright opt-out — a zero market floor.
         vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, oraclePool, TWAP_WINDOW, 10_000);
+        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, 10_000);
         vm.stopPrank();
     }
 
-    function test_twapWindowMustBeLongEnoughToBeAPriceAndShortEnoughToBeCurrent() public {
-        uint32 tooShort = book.MIN_TWAP_WINDOW() - 1;
-        uint32 tooLong = book.MAX_TWAP_WINDOW() + 1;
-        vm.startPrank(owner);
-        vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, oraclePool, tooShort, SLIP_BPS);
-        vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, oraclePool, tooLong, SLIP_BPS);
-        vm.stopPrank();
-    }
-
-    function test_referencePoolMustBeALiveHookedPoolOverTheOrdersOwnPair() public {
-        // No hook: a hookless v4 pool keeps no observations, so it has no TWAP to consult.
-        vm.prank(owner);
-        vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, plainPool, TWAP_WINDOW, SLIP_BPS);
-
-        // A hooked key that was never initialised — same hook, different tickSpacing, so a different id.
-        PoolKey memory ghost = oraclePool;
-        ghost.tickSpacing = 120;
-        vm.prank(owner);
-        vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, ghost, TWAP_WINDOW, SLIP_BPS);
-
-        // A live hooked pool over the WRONG pair cannot price this order.
+    /// @notice REPLACES `test_referencePoolMustBeALiveHookedPoolOverTheOrdersOwnPair`, which pinned the
+    ///         validation of a mechanism that no longer exists. The property it was defending — an order
+    ///         cannot be created whose market half can never be evaluated — is unchanged, and this is
+    ///         where it now lives: BOTH tokens must already carry a registered USD feed, and the token
+    ///         that does not is named in the revert.
+    function test_bothTokensMustCarryARegisteredFeed() public {
         MockERC20 tokenC = new MockERC20("C", "C", 18);
-        (Currency c0, Currency c1) = address(tokenC) < address(tokenB)
-            ? (Currency.wrap(address(tokenC)), Currency.wrap(address(tokenB)))
-            : (Currency.wrap(address(tokenB)), Currency.wrap(address(tokenC)));
-        PoolKey memory wrongPair = PoolKey({
-            currency0: c0,
-            currency1: c1,
-            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
-            tickSpacing: 60,
-            hooks: IHooks(address(hook))
-        });
-        manager.initialize(wrongPair, SQRT_PRICE_1_1);
+        tokenC.mint(owner, 100e18);
+
         vm.prank(owner);
-        vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, wrongPair, TWAP_WINDOW, SLIP_BPS);
+        vm.expectRevert(abi.encodeWithSelector(MoleOrders.FeedNotRegistered.selector, address(tokenC)));
+        book.createOrder(address(tokenC), address(tokenB), 1e18, 1e18, 1, 0, SLIP_BPS);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(MoleOrders.FeedNotRegistered.selector, address(tokenC)));
+        book.createOrder(address(tokenA), address(tokenC), 1e18, 1e18, 1, 0, SLIP_BPS);
+
+        // Register it and the identical order is accepted, so the refusal is about the feed and nothing
+        // else about tokenC.
+        MockAggregator feedC = new MockAggregator(FEED_DECIMALS, ONE_USD);
+        _registerFeed(book, address(tokenC), feedC, MAX_AGE_FAST);
+        vm.prank(owner);
+        book.createOrder(address(tokenC), address(tokenB), 1e18, 1e18, 1, 0, SLIP_BPS);
     }
 
-    /// @notice A reference whose price cannot express a leg is refused at creation rather than at every
-    ///         fill forever. Two separate ways that happens, one per branch of the conversion.
-    function test_aReferencePriceThatCannotValueALegIsRefusedAtCreation() public {
-        // (1) So far below parity that the squared price itself floors to zero. Selling currency1 there
-        //     would divide by that zero; selling currency0 would multiply by it.
-        PoolKey memory abyss = oraclePool;
-        abyss.tickSpacing = 10;
-        manager.initialize(abyss, TickMath.getSqrtPriceAtTick(-880_000));
-
-        // (2) A survivable price — one millionth — where a ONE-WEI leg is still worth zero output.
-        PoolKey memory thin = oraclePool;
-        thin.tickSpacing = 20;
-        manager.initialize(thin, TickMath.getSqrtPriceAtTick(-138_160));
-
-        _advance(TWAP_WINDOW + 100); // both pools now have a window of history to consult
+    /// @notice A price pair that cannot express a leg is refused at creation rather than at every fill
+    ///         forever — and refused at FILL too, because the final partial leg can be far smaller than
+    ///         the leg the creation check measured.
+    function test_aPriceThatCannotValueALegIsRefusedAtCreationAndAtFill() public {
+        // tokenA at the smallest positive answer a feed can give, tokenB ten quintillion dollars: a
+        // 1e18-wei leg of A is worth 0.1 wei of B, which floors to nothing.
+        feedA.setAnswer(1);
+        feedB.setAnswer(1e19);
 
         vm.prank(owner);
         vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenB), address(tokenA), 1e18, 1e18, 1, 0, abyss, TWAP_WINDOW, SLIP_BPS);
+        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, SLIP_BPS);
 
+        // The same pair prices a leg that is big enough, so the refusal is about the LEG, not the pair.
         vm.prank(owner);
-        vm.expectRevert(MoleOrders.BadBound.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1, 1, 1, 0, thin, TWAP_WINDOW, SLIP_BPS);
+        uint256 id = book.createOrder(address(tokenA), address(tokenB), 100e18, 100e18, 1, 0, SLIP_BPS);
+        (, uint256 floorOut) = book.currentLeg(id);
+        assertEq(floorOut, 9, "a 100e18 leg is worth 10 wei of B, less the 1% tolerance");
 
-        // The same pool prices a leg that is big enough, so the refusal is about the leg, not the pool.
-        vm.prank(owner);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 1, 0, thin, TWAP_WINDOW, SLIP_BPS);
+        // And a leg that shrinks below priceability after creation is refused at FILL, under its own
+        // name, rather than quietly falling back to the owner's absolute floor.
+        feedB.setAnswer(1e21);
+        vm.expectRevert(MoleOrders.LegNotPriceable.selector);
+        book.currentLeg(id);
+        vm.prank(keeper);
+        vm.expectRevert(MoleOrders.LegNotPriceable.selector);
+        book.fillLeg(id, _keeperPlan(100e18, 1));
     }
 
     /// @notice The bound is stored per order and priced live, so the SAME order's floor moves with the
@@ -337,15 +319,31 @@ contract AttackMoleOrdersFloor is OrdersWorld {
         uint256 id = _createOrder(1e18, 5e18, 1, 0);
         (, uint256 floorAtCreation) = book.currentLeg(id);
 
-        _marketSwap(oraclePool, false, 83_000e18);
-        _advance(2 * TWAP_WINDOW);
+        _setFeed(feedA, 2 * ONE_USD);
         (, uint256 floorLater) = book.currentLeg(id);
-        assertGt(floorLater, (floorAtCreation * 19) / 10, "the floor roughly doubled with the market");
+        assertEq(floorLater, floorAtCreation * 2, "the floor doubled exactly with the feed");
 
-        _marketSwap(oraclePool, true, 83_000e18);
-        _advance(2 * TWAP_WINDOW);
+        _setFeed(feedA, ONE_USD / 2);
         (, uint256 floorBack) = book.currentLeg(id);
-        assertLt(floorBack, floorLater, "and falls again when the market falls");
-        assertLt(floorBack, floorAtCreation, "past its starting point, because the sell overshot");
+        assertEq(floorBack, floorAtCreation / 2, "and halves when the market halves");
+        assertLt(floorBack, floorAtCreation, "past its starting point, because the price overshot");
+    }
+
+    /// @notice THE OTHER HALF OF THE REPRICING CLAIM, and the one the pool anchor could never make: the
+    ///         VENUE can be walked as far as anyone likes, in either direction, held there for days, and
+    ///         the floor does not move by one wei. This is the whole reason the anchor changed.
+    function test_walkingTheVenueDoesNotMoveTheFloorAtAll() public {
+        uint256 id = _createOrder(1e18, 5e18, 1, 0);
+        (, uint256 floorAtCreation) = book.currentLeg(id);
+
+        _marketSwap(oraclePool, true, 120_000e18);
+        _advance(4 days);
+        (, uint256 floorAfterWalkDown) = book.currentLeg(id);
+        assertEq(floorAfterWalkDown, floorAtCreation, "walked down and left silent for four days: unmoved");
+
+        _marketSwap(oraclePool, false, tokenB.balanceOf(address(this)) / 4);
+        _advance(4 days);
+        (, uint256 floorAfterWalkUp) = book.currentLeg(id);
+        assertEq(floorAfterWalkUp, floorAtCreation, "walked up and left silent for four days: unmoved");
     }
 }

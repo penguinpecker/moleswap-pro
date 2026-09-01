@@ -15,9 +15,9 @@ import {OrdersWorld} from "../helpers/OrdersWorld.sol";
 /// Each test tries to break one clause.
 ///
 /// WHAT CHANGED HERE, and why none of it is a weakening. The order's price floor used to be a single
-/// stored constant; it is now the HIGHER of that constant and a live TWAP floor (see MoleOrders'
-/// "THE PRICE BOUND" header), and orders therefore carry a reference pool. Two mechanical consequences:
-///   - `createOrder` takes three more arguments, so `_createOrder` in the shared world supplies them;
+/// stored constant; it is now the HIGHER of that constant and a live floor derived from two Chainlink
+/// feeds (see MoleOrders' "THE PRICE BOUND" header). Two mechanical consequences:
+///   - `createOrder` takes a slippage tolerance, so `_createOrder` in the shared world supplies it;
 ///   - a plan can no longer be built with `minAmountOut = 1`, because 1 wei is no longer a legal floor for
 ///     a real leg. Every fill here now asks the CONTRACT what the current leg and its floor are
 ///     (`currentLeg`) and pins the plan to exactly that — which is also what the keeper service does.
@@ -98,6 +98,8 @@ contract AttackMoleOrders is OrdersWorld {
         vm.prank(keeper);
         vm.expectRevert(MoleOrders.IntervalNotElapsed.selector);
         book.fillLeg(id, p); // too soon
+        // `_advance` keeps both feeds stamped, so six hours of waiting is a DCA interval and nothing
+        // else. Feed staleness is its own suite: see `AttackMoleOrdersChainlinkAnchor`.
         _advance(6 hours);
         p = _honestPlan(id);
         vm.prank(keeper);
@@ -113,9 +115,9 @@ contract AttackMoleOrders is OrdersWorld {
         vm.prank(keeper);
         uint256 got = book.fillLeg(probe, pp);
 
-        // LIMIT order whose stored limit sits ABOVE the TWAP floor, so it is the stored half that binds
-        // and this test measures the limit rather than the market. `got` is what the pool paid a moment
-        // ago; 99.9% of it is above the 1%-below-TWAP market floor and still achievable next block.
+        // LIMIT order whose stored limit sits ABOVE the Chainlink floor, so it is the stored half that
+        // binds and this test measures the limit rather than the market. `got` is what the pool paid a
+        // moment ago; 99.9% of it is above the 1%-below-fair market floor and still achievable next block.
         uint256 limit = (got * 999) / 1000;
         uint256 id = _createOrder(1e18, 1e18, limit, 0);
         (, uint256 floorOut) = book.currentLeg(id);
@@ -183,17 +185,13 @@ contract AttackMoleOrders is OrdersWorld {
     function test_createRejectsBadParams() public {
         vm.startPrank(owner);
         vm.expectRevert(MoleOrders.BadOrder.selector);
-        book.createOrder(
-            address(tokenA), address(tokenA), 1e18, 1e18, 1, 0, oraclePool, TWAP_WINDOW, SLIP_BPS
-        ); // same token
+        book.createOrder(address(tokenA), address(tokenA), 1e18, 1e18, 1, 0, SLIP_BPS); // same token
         vm.expectRevert(MoleOrders.BadOrder.selector);
-        book.createOrder(address(tokenA), address(tokenB), 0, 1e18, 1, 0, oraclePool, TWAP_WINDOW, SLIP_BPS); // zero leg
+        book.createOrder(address(tokenA), address(tokenB), 0, 1e18, 1, 0, SLIP_BPS); // zero leg
         vm.expectRevert(MoleOrders.BadOrder.selector);
-        book.createOrder(
-            address(tokenA), address(tokenB), 2e18, 1e18, 1, 0, oraclePool, TWAP_WINDOW, SLIP_BPS
-        ); // budget < leg
+        book.createOrder(address(tokenA), address(tokenB), 2e18, 1e18, 1, 0, SLIP_BPS); // budget < leg
         vm.expectRevert(MoleOrders.BadOrder.selector);
-        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 0, 0, oraclePool, TWAP_WINDOW, SLIP_BPS); // zero floor
+        book.createOrder(address(tokenA), address(tokenB), 1e18, 1e18, 0, 0, SLIP_BPS); // zero floor
         vm.stopPrank();
     }
 }

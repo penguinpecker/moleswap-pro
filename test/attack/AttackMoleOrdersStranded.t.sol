@@ -10,6 +10,7 @@ import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
 import {MoleRouter} from "../../src/MoleRouter.sol";
 import {MoleOrders} from "../../src/MoleOrders.sol";
+import {MockAggregator} from "../helpers/MockAggregator.sol";
 import {OrdersWorld} from "../helpers/OrdersWorld.sol";
 
 /// @notice A router stand-in that reproduces exactly the behaviours MoleRouter's zero-residual contract
@@ -96,7 +97,7 @@ contract AttackMoleOrdersStranded is OrdersWorld {
     MoleOrders internal stubBook;
     MockERC20 internal tokenC; // an intermediate, named by the route but never the order's own token
     LooseToken internal loose;
-    PoolKey internal loosePool;
+    MockAggregator internal looseFeed;
 
     uint256 internal constant LEG = 10e18;
 
@@ -120,29 +121,20 @@ contract AttackMoleOrdersStranded is OrdersWorld {
         loose.approve(address(stubBook), type(uint256).max);
         vm.stopPrank();
 
-        // A live hooked pool for the LooseToken pair, so an order over it can carry a real price bound.
-        // No liquidity: the stub is the venue here; the pool exists only to be an oracle.
-        (Currency c0, Currency c1) = address(loose) < address(tokenB)
-            ? (Currency.wrap(address(loose)), Currency.wrap(address(tokenB)))
-            : (Currency.wrap(address(tokenB)), Currency.wrap(address(loose)));
-        loosePool = PoolKey({
-            currency0: c0,
-            currency1: c1,
-            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
-            tickSpacing: 60,
-            hooks: IHooks(address(hook))
-        });
-        manager.initialize(loosePool, SQRT_PRICE_1_1);
+        // THE PRICE SOURCE IS A FEED NOW, so the LooseToken pair needs one rather than a hooked pool.
+        // `loose` reports 18 decimals like every other token here and opens at $1.00, so a leg's fair
+        // value is still the leg and every number below reads exactly as it did.
+        looseFeed = new MockAggregator(FEED_DECIMALS, ONE_USD);
+        _liveFeeds.push(looseFeed);
+        _registerDefaultFeeds(stubBook);
+        _registerFeed(stubBook, address(loose), looseFeed, MAX_AGE_FAST);
 
-        // Give the new pool a full window of history so `consult` can answer it.
-        _advance(TWAP_WINDOW + 100);
+        _advanceLive(TWAP_WINDOW + 100);
     }
 
-    function _stubOrder(address tokenIn, PoolKey memory refPool) internal returns (uint256 id) {
+    function _stubOrder(address tokenIn) internal returns (uint256 id) {
         vm.prank(owner);
-        id = stubBook.createOrder(
-            tokenIn, address(tokenB), LEG, LEG * 5, 1, 0, refPool, TWAP_WINDOW, SLIP_BPS
-        );
+        id = stubBook.createOrder(tokenIn, address(tokenB), LEG, LEG * 5, 1, 0, SLIP_BPS);
     }
 
     /// @dev A route that names an intermediate: tokenIn → tokenC → tokenB. The hops are never executed
@@ -192,7 +184,7 @@ contract AttackMoleOrdersStranded is OrdersWorld {
     /* ───────────────────── MECHANISM E — nothing the route touches may be burned ─────────────────── */
 
     function test_strandedIntermediateTokenIsForwardedToTheOwner() public {
-        uint256 id = _stubOrder(address(tokenA), oraclePool);
+        uint256 id = _stubOrder(address(tokenA));
         (uint256 legIn, uint256 floorOut) = stubBook.currentLeg(id);
         stub.configure(0, 0, address(tokenC), 7e18); // a middle hop short-filled; the router swept it back
 
@@ -206,7 +198,7 @@ contract AttackMoleOrdersStranded is OrdersWorld {
     }
 
     function test_overDeliveredOutputTokenIsForwardedToTheOwner() public {
-        uint256 id = _stubOrder(address(tokenA), oraclePool);
+        uint256 id = _stubOrder(address(tokenA));
         (uint256 legIn, uint256 floorOut) = stubBook.currentLeg(id);
         stub.configure(0, 0, address(tokenB), 3e18);
 
@@ -225,7 +217,7 @@ contract AttackMoleOrdersStranded is OrdersWorld {
     function test_aBalanceAlreadySittingInTheBookIsNotHarvestedByTheNextFill() public {
         tokenC.mint(address(stubBook), 5e18); // someone else's leftovers, from before this fix shipped
 
-        uint256 id = _stubOrder(address(tokenA), oraclePool);
+        uint256 id = _stubOrder(address(tokenA));
         (uint256 legIn, uint256 floorOut) = stubBook.currentLeg(id);
         stub.configure(0, 0, address(0), 0); // this fill strands nothing of its own
 
@@ -241,7 +233,7 @@ contract AttackMoleOrdersStranded is OrdersWorld {
     /* ─────────────────────────── the two accounting edges of the residual fix ────────────────────── */
 
     function test_aRouteThatHandsBackMoreThanTheLegChargesTheOwnerNothing() public {
-        uint256 id = _stubOrder(address(tokenA), oraclePool);
+        uint256 id = _stubOrder(address(tokenA));
         (uint256 legIn, uint256 floorOut) = stubBook.currentLeg(id);
         // A route whose intermediate hop produces the INPUT token can legitimately return more than the
         // leg. Charging `legIn - back` unguarded would underflow; the owner is charged nothing instead.
@@ -264,7 +256,7 @@ contract AttackMoleOrdersStranded is OrdersWorld {
         // somebody else. Fail closed.
         loose.mint(address(stubBook), 5); // a pre-existing dust balance the over-pull would eat
 
-        uint256 id = _stubOrder(address(loose), loosePool);
+        uint256 id = _stubOrder(address(loose));
         (uint256 legIn, uint256 floorOut) = stubBook.currentLeg(id);
         stub.configure(0, 1, address(0), 0); // pull one wei more than the leg
 
@@ -283,7 +275,7 @@ contract AttackMoleOrdersStranded is OrdersWorld {
     function test_theSameLooseTokenFillSucceedsWhenTheRouterTakesOnlyItsLeg() public {
         loose.mint(address(stubBook), 5);
 
-        uint256 id = _stubOrder(address(loose), loosePool);
+        uint256 id = _stubOrder(address(loose));
         (uint256 legIn, uint256 floorOut) = stubBook.currentLeg(id);
         stub.configure(0, 0, address(0), 0);
 

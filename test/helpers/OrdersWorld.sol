@@ -16,37 +16,63 @@ import {MoleRouter} from "../../src/MoleRouter.sol";
 import {MoleHook} from "../../src/MoleHook.sol";
 import {MoleOrders} from "../../src/MoleOrders.sol";
 import {HookPermissions} from "../../src/config/HookPermissions.sol";
+import {MockAggregator} from "./MockAggregator.sol";
 import {hookProxyArgs, deployMoleRouter} from "./ProxyDeploy.sol";
 
 /// @notice The world every MoleOrders attack file needs, in the shape the contract now actually ships in:
-///         a real PoolManager, a real MoleHook whose TWAP is the order book's price bound, and a real
-///         MoleRouter to execute through.
+///         a real PoolManager, a real MoleHook, a real MoleRouter to execute through — and TWO CHAINLINK
+///         FEEDS, which are now the only thing that prices an order.
 ///
 /// Two pools over the SAME pair, both opened at 1:1, both deep:
-///   - `oraclePool` carries the hook, so it both prices orders and can be routed through (this is the
-///     production shape: the MoleSwap pool is the reference),
+///   - `oraclePool` carries the hook (this is the production shape: the MoleSwap pool is the venue),
 ///   - `plainPool` carries no hook, so a split route has a second, genuinely different venue to use.
 ///     A split is the only way to reproduce the router's rounded-down path rescale, which is the half of
 ///     F-02 that broke honest fills.
+/// NEITHER POOL PRICES AN ORDER ANY MORE. They are venues. The order's floor comes from `feedA` / `feedB`.
 ///
-/// TIME. The book refuses a TWAP window shorter than five minutes, and `consult` refuses a window its
-/// observations do not cover, so the world opens at a realistic timestamp and then advances past one full
-/// window before any order exists. `_advance` keeps an explicit clock because `vm.warp` inside a loop does
-/// not accumulate — solc caches `block.timestamp` per call frame.
+/// THE FEEDS ARE DELIBERATELY UNLIKE EACH OTHER, because the per-feed age bound is a real property and a
+/// world where both feeds have the same bound cannot show it. `feedA` is a fast, deviation-triggered feed
+/// with a one-hour bound (the shape of ETH/USD on Robinhood Chain, which was 698 s old when measured);
+/// `feedB` is a 24-hour heartbeat feed with a 25-hour bound (the shape of USDG/USD and USDC/USD, both of
+/// which were ~23 h old at the same moment). A single global bound would be a permanent outage for one of
+/// them, which is exactly why the contract does not have one.
+///
+/// TIME AND THE FEED CLOCK. `_advance` and `_advanceLive` RE-STAMP both feeds by default, because a test
+/// about pools should not silently become a test about feed staleness — six hours of `_advance` would
+/// otherwise take `feedA` three heartbeats past its bound and every DCA interval test would fail for the
+/// wrong reason. A test that wants a stale feed says so with `_freezeFeeds()`, and from then on the clock
+/// moves and the feeds do not. `_advance` keeps an explicit clock because `vm.warp` inside a loop does not
+/// accumulate — solc caches `block.timestamp` per call frame.
+///
+/// `_advanceLive` additionally keeps the POOLS traded, which the hook's own TWAP needs for the MoleHook
+/// tests that still run against this world. The heartbeat is a `HEARTBEAT`-wei swap against `LIQ` of
+/// liquidity: a price impact of order 1e-17, which is zero ticks.
 abstract contract OrdersWorld is Test, Deployers {
     using PoolIdLibrary for PoolKey;
 
     uint256 internal constant T0 = 1_750_000_000;
     uint32 internal constant OBS_INTERVAL = 60;
     uint24 internal constant LP_FEE = 3000; // 0.30%, on both pools
-    uint32 internal constant TWAP_WINDOW = 1800; // 30 minutes, the shipped default
+    uint32 internal constant TWAP_WINDOW = 1800; // 30 minutes — the hook's window, not the book's any more
     uint16 internal constant SLIP_BPS = 100; // 1% — what a sane client asks for
+
+    /// @dev 8 decimals, the precision of every Chainlink USD feed on Robinhood Chain.
+    uint8 internal constant FEED_DECIMALS = 8;
+    /// @dev $1.00 at 8 decimals. Both tokens open here, so a leg's fair value is the leg and every
+    ///      pre-existing floor assertion in this suite still reads the same number it always did.
+    int256 internal constant ONE_USD = 1e8;
+    /// @dev tokenA's bound: a fast deviation feed.
+    uint32 internal constant MAX_AGE_FAST = 3600;
+    /// @dev tokenB's bound: a 24-hour heartbeat plus one hour of tolerated lateness.
+    uint32 internal constant MAX_AGE_HEARTBEAT = 90_000;
 
     MoleHook internal hook;
     MoleRouter internal router;
     MoleOrders internal book;
     MockERC20 internal tokenA; // order input
     MockERC20 internal tokenB; // order output
+    MockAggregator internal feedA; // tokenA / USD
+    MockAggregator internal feedB; // tokenB / USD
     PoolKey internal oraclePool;
     PoolKey internal plainPool;
 
@@ -58,9 +84,63 @@ abstract contract OrdersWorld is Test, Deployers {
 
     uint256 internal _clock;
 
+    /// @dev Dust: enough to be a swap, far too little to be a price. See the header.
+    uint256 internal constant HEARTBEAT = 1e6;
+    /// @dev The liquidity every pool in this world opens with.
+    int256 internal constant LIQ = 200_000e18;
+
+    /// @dev Pools whose oracle `_advanceLive` keeps alive. Seeded with `oraclePool`; a test that stands up
+    ///      another pool registers it with `_alsoWarm`.
+    PoolKey[] internal _warmPools;
+    bool internal _hbSide;
+
+    /// @dev Feeds `_advance` re-stamps. Cleared by `_freezeFeeds`.
+    MockAggregator[] internal _liveFeeds;
+
+    /// @dev SILENT POOLS. Time passes and nothing trades. The FEEDS stay current unless frozen.
     function _advance(uint256 s) internal {
         _clock += s;
         vm.warp(_clock);
+        _stampFeeds();
+    }
+
+    /// @dev A LIVE market on the pools as well: every registered pool records a dust trade at least every
+    ///      half-window, so no stretch of pool silence ever reaches `TWAP_WINDOW`.
+    function _advanceLive(uint256 s) internal {
+        uint256 step = TWAP_WINDOW / 2;
+        uint256 done;
+        while (done + step < s) {
+            _advance(step);
+            _heartbeat();
+            done += step;
+        }
+        _advance(s - done);
+        _heartbeat();
+    }
+
+    /// @dev Stop the feeds following the clock. From here on `_advance` ages them, which is what every
+    ///      staleness test needs and what no other test wants.
+    function _freezeFeeds() internal {
+        delete _liveFeeds;
+    }
+
+    function _stampFeeds() internal {
+        for (uint256 i = 0; i < _liveFeeds.length; ++i) _liveFeeds[i].stamp();
+    }
+
+    /// @dev Move a token's USD price and re-stamp its round. This is how the market moves now.
+    function _setFeed(MockAggregator f, int256 usd8) internal {
+        f.setAnswer(usd8);
+    }
+
+    function _alsoWarm(PoolKey memory k) internal {
+        _warmPools.push(k);
+    }
+
+    /// @dev One dust trade on each registered pool, alternating side so nothing drifts even in principle.
+    function _heartbeat() internal {
+        _hbSide = !_hbSide;
+        for (uint256 i = 0; i < _warmPools.length; ++i) _marketSwap(_warmPools[i], _hbSide, HEARTBEAT);
     }
 
     function _hookAddr(uint256 seed) internal pure returns (address) {
@@ -86,10 +166,14 @@ abstract contract OrdersWorld is Test, Deployers {
         );
         hook = MoleHook(ha);
 
-        router = deployMoleRouter(
-            manager, makeAddr("weth"), feeDial, feeDial == address(0) ? address(0) : treasury
-        );
+        router = deployMoleRouter(manager, makeAddr("weth"), feeDial, feeDial == address(0) ? address(0) : treasury);
         book = new MoleOrders(router, admin, keeper);
+
+        feedA = new MockAggregator(FEED_DECIMALS, ONE_USD);
+        feedB = new MockAggregator(FEED_DECIMALS, ONE_USD);
+        _liveFeeds.push(feedA);
+        _liveFeeds.push(feedB);
+        _registerDefaultFeeds(book);
 
         oraclePool = PoolKey({
             currency0: Currency.wrap(address(tokenA)),
@@ -115,17 +199,31 @@ abstract contract OrdersWorld is Test, Deployers {
         tokenB.approve(address(modifyLiquidityRouter), type(uint256).max);
         tokenA.approve(address(swapRouter), type(uint256).max);
         tokenB.approve(address(swapRouter), type(uint256).max);
-        _addLiquidity(oraclePool, 200_000e18);
-        _addLiquidity(plainPool, 200_000e18);
+        _addLiquidity(oraclePool, LIQ);
+        _addLiquidity(plainPool, LIQ);
+        _alsoWarm(oraclePool);
 
         // Owner funds + approves the order book (NOT the router — the book pulls, then routes).
         tokenA.mint(owner, 1_000e18);
         vm.prank(owner);
         tokenA.approve(address(book), type(uint256).max);
 
-        // One full TWAP window of history, so `consult(TWAP_WINDOW)` is answerable from the observation
-        // afterInitialize seeded.
-        _advance(TWAP_WINDOW + 200);
+        // One full TWAP window of TRADED history, so the HOOK can answer for the tests that still ask it.
+        // The book no longer consults it at all.
+        _advanceLive(TWAP_WINDOW + 200);
+    }
+
+    /// @dev tokenA and tokenB, with the two unlike age bounds the header explains.
+    function _registerDefaultFeeds(MoleOrders b) internal {
+        vm.startPrank(b.admin());
+        b.registerFeed(address(tokenA), address(feedA), MAX_AGE_FAST);
+        b.registerFeed(address(tokenB), address(feedB), MAX_AGE_HEARTBEAT);
+        vm.stopPrank();
+    }
+
+    function _registerFeed(MoleOrders b, address token, MockAggregator f, uint32 maxAge) internal {
+        vm.prank(b.admin());
+        b.registerFeed(token, address(f), maxAge);
     }
 
     function _addLiquidity(PoolKey memory k, int256 amount) internal {
@@ -134,7 +232,8 @@ abstract contract OrdersWorld is Test, Deployers {
         );
     }
 
-    /// @dev Move the market by trading against a pool directly (not through the router).
+    /// @dev Move the VENUE by trading against a pool directly (not through the router). This no longer
+    ///      moves any order's floor, which is the whole point of the Chainlink anchor.
     function _marketSwap(PoolKey memory k, bool zeroForOne, uint256 amount) internal {
         swapRouter.swap(
             k,
@@ -228,15 +327,7 @@ abstract contract OrdersWorld is Test, Deployers {
     ) internal returns (uint256 id) {
         vm.prank(owner);
         id = book.createOrder(
-            address(tokenA),
-            address(tokenB),
-            amountPerLeg,
-            totalBudget,
-            minOutPerLeg,
-            interval,
-            oraclePool,
-            TWAP_WINDOW,
-            slipBps
+            address(tokenA), address(tokenB), amountPerLeg, totalBudget, minOutPerLeg, interval, slipBps
         );
     }
 
