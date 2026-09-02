@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
+import { quotingUnavailableOn } from "@/lib/chain/amm";
 import {
   resolveApiChain,
   chainParamFrom,
@@ -52,7 +53,10 @@ export async function GET(req: NextRequest) {
        * consumer building a swap UI from this endpoint must be able to tell the difference, and
        * before this field they could not.
        */
-      swappable: t.swappable !== false,
+      // ...and only where the pricing engine can actually quote this chain. It indexes Robinhood venues
+      // only, so on Arc every token used to publish `swappable: true` while /api/v1/quote refused the
+      // chain outright — a consumer following this field built swaps that could never be priced.
+      swappable: t.swappable !== false && quotingUnavailableOn(scope.chainId) === null,
       // Null-safe on purpose: Arc has no wrapped native at all, so nothing can be it.
       isWrappedNative:
         scope.wrappedNative !== null &&
