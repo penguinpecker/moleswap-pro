@@ -19,7 +19,7 @@ import {
 // The chain the wallet is ACTUALLY on, and everything that has to be resolved from it: which pools to
 // ask for, which RPC to read, which pool a position lives in, and where to offer a switch. See
 // lib/mole/poolsSurface.ts for why every one of those used to be a Robinhood constant.
-import { SUPPORTED_CHAINS, chainMetaFor } from "@/lib/chain/chains";
+import { SUPPORTED_CHAINS, chainMetaFor, contractsFor } from "@/lib/chain/chains";
 import {
   poolsChainView,
   poolsProvider,
@@ -32,6 +32,7 @@ import {
 import { ethers } from "ethers";
 import { createClient } from "@/lib/supabase/client";
 import { ProvenanceCard } from "./ProvenanceCard";
+import { PoolActivityPanel } from "@/components/PoolActivity";
 // Which engine can serve a pool is decided from its hook ADDRESS (== MoleHook or not), read from the
 // key — never from the registry label. Provide / Queue are offered only on MoleHook-served pools.
 import { poolServiceTag, engineActionsAllowed, SERVICE_TAG_LABEL, type PoolServiceTag } from "@/lib/mole/hookBitmap";
@@ -927,6 +928,15 @@ interface EnrichedPosition extends LiquidityPosition {
 }
 
 // ═══ LIQUIDITY DISTRIBUTION GRAPH ═══
+/**
+ * A SCHEMATIC of where a range sits around the current price — NOT a depth chart.
+ *
+ * The bar heights are a decorative taper around the current-price marker; they are not liquidity and
+ * never were. What is real here is the position of the range edges and the price line relative to them,
+ * which is what the add-liquidity flow needs to show. It used to be rendered as a standalone "Liquidity
+ * distribution" card on the pool page, where it read as measured depth; that card is now
+ * `PoolActivityPanel`, which decodes the pool's actual Swap events.
+ */
 const LiquidityGraph = ({ currentTick, tickLower, tickUpper, height = 80, price, token0Symbol, token1Symbol }: {
   currentTick: number; tickLower: number; tickUpper: number; height?: number;
   price?: number; token0Symbol?: string; token1Symbol?: string;
@@ -953,13 +963,14 @@ const LiquidityGraph = ({ currentTick, tickLower, tickUpper, height = 80, price,
       {!isFullRange && <div style={{ position: "absolute", top: 0, bottom: 0, right: "5%", width: 1, borderRight: "1px dashed rgba(44,26,12,.4)" }} />}
       <div className="lg-line" style={{ left: `${5 + currentPos * 90}%` }} />
 
-      {hovered !== null && price && height > 50 && (() => {
+      {/* NO PRICE, NO "LIQ %". Those two numbers were computed from the bar's index — a made-up price
+          axis and the bar's own height — so the tooltip was reporting its own drawing back as data.
+          Whether a point falls inside the selected range is the one thing this shape genuinely knows. */}
+      {hovered !== null && height > 50 && (() => {
         const bd = getBarData(hovered);
         const leftPct = (hovered / (bars - 1)) * 100;
         return (
           <div className="lg-tip" style={{ left: `${Math.min(Math.max(leftPct, 15), 85)}%`, transform: "translateX(-50%) translateY(-4px)" }}>
-            <div className="l1">{bd.barPrice > 1000 ? fmt(bd.barPrice) : bd.barPrice.toFixed(2)} {token1Symbol || ""}</div>
-            <div className="l2">LIQ: {bd.liq.toFixed(0)}%</div>
             <div className="l3">{bd.inRange ? "IN RANGE" : "OUT OF RANGE"}</div>
           </div>
         );
@@ -1825,21 +1836,24 @@ const PoolDetail = ({ pool, onBack, address, isConnected, walletCtx, chainClient
         })}
       </div>
 
-      {/* Liquidity Distribution Graph */}
-      <div className="p-card" style={{ marginTop: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-          <h3>Liquidity distribution</h3>
-          <span className="p-mini" style={{ color: "var(--clay)", fontWeight: 700 }}>
-            1 {pool.token0.symbol} = {priceStr} {pool.token1.symbol}
-          </span>
-        </div>
-        <LiquidityGraph currentTick={currentTick} tickLower={-887272} tickUpper={887272} height={80} price={price} token0Symbol={pool.token0.symbol} token1Symbol={pool.token1.symbol} />
-        <div className="lg-foot">
-          <span>MIN: 0</span>
-          <span className="in">● IN RANGE — FULL</span>
-          <span>MAX: ∞</span>
-        </div>
-      </div>
+      {/* WHAT REPLACED THE "LIQUIDITY DISTRIBUTION" CARD, and why.
+          That card drew 24 bars whose heights were `100 - distance-from-a-hard-coded-0.55-peak`, over a
+          price axis invented as `price * (0.5 + ratio)`, with a tooltip reporting the bar height as
+          "LIQ: n%". None of it came from the chain. It sat directly beneath a cryptographic provenance
+          panel, which is the worst possible place for decoration dressed as data.
+          Everything below is decoded from Swap events the pool itself emitted. */}
+      {/* `pool.pool.address` carries the v4 PoolId for a v4 row and the pool CONTRACT for a v3 row —
+          the field is overloaded upstream, so which one it is comes from serviceTag, never from shape. */}
+      <PoolActivityPanel
+        poolId={pool.serviceTag === "v3" ? undefined : pool.pool.address || undefined}
+        poolAddress={pool.serviceTag === "v3" ? pool.pool.address || undefined : undefined}
+        poolManager={contractsFor(chainId).POOL_MANAGER}
+        decimals0={pool.token0.decimals}
+        decimals1={pool.token1.decimals}
+        symbol0={pool.token0.symbol}
+        symbol1={pool.token1.symbol}
+        explorerUrl={explorerUrl ?? ""}
+      />
 
       {/* Price + manage */}
       <div className="p-grid p-2" style={{ marginTop: 14 }}>
