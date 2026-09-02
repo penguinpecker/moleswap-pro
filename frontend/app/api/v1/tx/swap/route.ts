@@ -7,6 +7,7 @@ import { InsufficientLiquidityError } from "@/lib/aggregator/quote";
 import { moleRouterAbi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { loadPoolRowsServer } from "@/lib/aggregator/serverPools";
 import { getAggFeeBps } from "@/lib/mole/aggFee";
+import { checkAgainstReference } from "@/lib/aggregator/referencePrice";
 import {
   resolveApiChain,
   chainFieldFrom,
@@ -32,6 +33,13 @@ export const dynamic = "force-dynamic";
 const ZERO = ethers.ZeroAddress.toLowerCase();
 const toAgg = (a: string) => (a.toLowerCase() === ZERO || a.toLowerCase() === "native" ? NATIVE_SENTINEL : a);
 const MAX_UINT = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+/**
+ * Where a route stops being a bad price and becomes a mistake. 30% against an independent oracle is far
+ * outside anything slippage or fee can explain on a real pair; the case that motivated it measured
+ * ~99.95%. Deliberately NOT the swap card's 5% warning threshold: this refuses to emit a transaction,
+ * so it must only catch trades nobody means to make.
+ */
+const CATASTROPHIC_IMPACT_BPS = 3000;
 
 export async function OPTIONS() {
   return corsPreflightResponse();
@@ -146,6 +154,40 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    /**
+     * JUDGE THE ROUTE AGAINST AN INDEPENDENT REFERENCE BEFORE HANDING OVER EXECUTABLE CALLDATA.
+     *
+     * /api/v1/quote already does this, and this route did not — so the endpoint whose whole job is to
+     * emit a transaction was the one with no warning attached. Measured 2026-08-25: USDe, which THIS
+     * SAME API publishes as `swappable: false`, still produced signable calldata at a ~99.95% loss, and
+     * `minReceived` was derived from that same catastrophic quote — so the slippage floor could not
+     * save the caller either. It does not revert; it executes.
+     *
+     * A quote the oracle says is catastrophic is refused (422) rather than encoded. `acknowledgeImpact`
+     * is the deliberate override for a caller who has seen the number and means it, because a hard
+     * refusal with no way through is its own failure mode on a thin market. The reference fields are
+     * ALWAYS returned, so even an acknowledged trade carries the number that justified the warning.
+     */
+    const refIn = tokenInScope(scope, tokenIn);
+    const refOut = tokenInScope(scope, tokenOut);
+    const ref = await checkAgainstReference({
+      tokenIn,
+      tokenOut,
+      amountIn: amountInBig,
+      amountOut: q.quote.netAmountOut,
+      decimalsIn: refIn?.decimals ?? 18,
+      decimalsOut: refOut?.decimals ?? 18,
+    });
+    const acknowledged = body.acknowledgeImpact === true;
+    if (ref.priceImpactBps !== null && ref.priceImpactBps >= CATASTROPHIC_IMPACT_BPS && !acknowledged) {
+      return apiError(
+        `This route would lose ${(ref.priceImpactBps / 100).toFixed(2)}% against the reference price ` +
+          `($${(ref.valueInUsd ?? 0).toFixed(2)} in, $${(ref.valueOutUsd ?? 0).toFixed(2)} out). ` +
+          `No transaction was built. Trade a smaller size, or resend with "acknowledgeImpact": true if this is intended.`,
+        422,
+      );
+    }
+
     const swapData = encodeFunctionData({ abi: moleRouterAbi as any, functionName: "swap", args: [q.encoded as any] });
     transactions.push({
       to: router,
@@ -162,6 +204,14 @@ export async function POST(req: NextRequest) {
       minReceived: q.quote.minAmountOut.toString(),
       route: q.quote.routeDescriptions.join(" + "),
       slippageBps: bps,
+      /** Loss against Chainlink, in bps. Null (with a reason) when either leg has no fresh feed —
+       *  never silently 0, which would read as "this route is fine". */
+      priceImpactBps: ref.priceImpactBps,
+      priceImpactReason: ref.reason,
+      referenceValueInUsd: ref.valueInUsd,
+      referenceValueOutUsd: ref.valueOutUsd,
+      /** True when the caller overrode a refusal that the reference price had earned. */
+      impactAcknowledged: acknowledged && ref.priceImpactBps !== null && ref.priceImpactBps >= CATASTROPHIC_IMPACT_BPS,
       transactions,
       chainId: scope.chainId,
       chain: scope.meta.name,
