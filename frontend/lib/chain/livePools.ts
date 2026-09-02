@@ -158,6 +158,17 @@ function sb() {
 /** Keyed by chain: one chain's answer must never be served as another's. */
 const _cache = new Map<number, { at: number; rows: LivePool[] }>();
 
+/**
+ * Thrown when the CHAIN, not the registry, could not be read and there is no earlier answer to serve.
+ * Distinct on purpose: an empty list means "MoleSwap runs no pools here"; this means "we could not look".
+ */
+export class ChainReadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChainReadError";
+  }
+}
+
 export async function loadLivePools(
   provider: ethers.Provider,
   _limit = 24,
@@ -350,7 +361,20 @@ export async function loadLivePools(
     .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
     .map((r) => r.value)
     .filter(Boolean);
-  if (!rows.length) return stale();
+  if (!rows.length) {
+    // EVERY pool read failed and nothing earlier is cached: that is the chain being unreadable, and it
+    // was answered with `count: 0` — /pools rendered "No pools found" for a chain with real deposits (live
+    // on Arc while its RPC upstream was exhausted). With a previous answer in hand a stale list is still a
+    // true list, so it is served; with none, refuse and say why so the caller can keep what it has.
+    const rejected = settled.filter((r) => r.status === "rejected");
+    if (settled.length > 0 && rejected.length === settled.length && !cached) {
+      const why = (rejected[0] as PromiseRejectedResult).reason;
+      throw new ChainReadError(
+        `${scope.sourceChain} could not be read (RPC): ${why?.shortMessage || why?.message || String(why)}`,
+      );
+    }
+    return stale();
+  }
 
   // ETH price from our own deepest native/stable pool, so the page agrees with the swap engine.
   const wethLc = scope.hubNative ? scope.hubNative.toLowerCase() : "\u0000";

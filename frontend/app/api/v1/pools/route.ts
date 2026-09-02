@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
-import { loadLivePools, type LivePoolScope } from "@/lib/chain/livePools";
+import { loadLivePools, ChainReadError, type LivePoolScope } from "@/lib/chain/livePools";
 import {
   resolveApiChain,
   chainParamFrom,
@@ -125,6 +125,9 @@ export async function GET(req: NextRequest) {
       })),
     });
   } catch (err: any) {
+    // A chain that could not be read is a 503, never an empty 200: the page keeps the list it has and
+    // shows the reason, instead of telling a user with deposits here that there are no pools.
+    if (err instanceof ChainReadError) return apiError(err.message, 503);
     return apiError(err.message || "Failed to fetch pools", 500);
   }
 }
