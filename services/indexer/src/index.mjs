@@ -18,12 +18,26 @@
  */
 
 import http from "node:http";
+import { backoffMs } from "./backoff.mjs";
 import { createClient } from "@supabase/supabase-js";
 import { checkOracleLiveness, oracleHealthView, LIVE_POOL_ID as ORACLE_LIVE_POOL_ID, ORACLE_STALE_SECONDS } from "./oracleHealth.mjs";
 import { classifyV4Pool, isTickRoutable, MOLE_HOOK } from "./v4Class.mjs";
 
 /* ---------------------------------------------------------------------------------------------- config */
-const RPC = process.env.RH_RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
+/**
+ * RPC endpoints, in preference order. One key is a single point of failure: on 2026-09-01 the keyed
+ * endpoint began answering "Monthly capacity limit exceeded" (HTTP 429) to EVERY call, and with a single
+ * URL the whole service wedged for days. `RH_RPC_URLS` (comma-separated) is tried in order per attempt;
+ * `RH_RPC_URL` stays supported as the first entry so existing deployments keep working unchanged, and
+ * the public endpoint is appended as a last resort rather than being the only thing left.
+ */
+const RPC_URLS = (process.env.RH_RPC_URLS || process.env.RH_RPC_URL || "")
+  .split(",")
+  .map((u) => u.trim())
+  .filter(Boolean)
+  .concat(["https://rpc.mainnet.chain.robinhood.com"])
+  .filter((u, i, a) => a.indexOf(u) === i);
+const RPC = RPC_URLS[0];
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const WRITE_SECRET = process.env.INDEXER_SECRET;
@@ -34,6 +48,15 @@ const RPC_TIMEOUT_MS = Number(process.env.RPC_TIMEOUT_MS) || 20_000; // abort a 
 const GETLOGS_CHUNK = Number(process.env.GETLOGS_CHUNK) || 5_000; // block span per eth_getLogs (provider-safe)
 const MAX_BLOCKS_PER_CYCLE = Number(process.env.MAX_BLOCKS_PER_CYCLE) || 200_000; // discovery work per cycle
 const CONFIRMATIONS = Number(process.env.CONFIRMATIONS) || 5; // finality lag so the cursor never rides the tip
+const RPC_TRIES = Number(process.env.RPC_TRIES) || 7; // with the backoff below this spans ~30s, not ~1.8s
+const RPC_BACKOFF_CAP_MS = Number(process.env.RPC_BACKOFF_CAP_MS) || 15_000;
+/**
+ * How much of a cycle's range is committed at a time. Discovery used to read the WHOLE range (up to
+ * MAX_BLOCKS_PER_CYCLE, ~280 getLogs calls) before advancing the cursor once, so a rate limit anywhere in
+ * it threw away every block already read and the next cycle re-read the same ground. Committing per
+ * sub-range bounds the loss to this many blocks.
+ */
+const COMMIT_SPAN = Number(process.env.COMMIT_SPAN) || 20_000;
 const UNVERIFIED_REFRESH_BATCH = Number(process.env.UNVERIFIED_REFRESH_BATCH) || 4000;
 const STALE_MULTIPLIER = Number(process.env.STALE_MULTIPLIER) || 5; // /health = 503 after this × REFRESH_MS
 
@@ -135,23 +158,38 @@ let oracleStatus = { checkedAt: null, checkedAtMs: 0, thresholdSec: ORACLE_STALE
 
 /* ------------------------------------------------------------------------------------------- rpc utils */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function rpc(method, params, tries = 4) {
+/**
+ * One JSON-RPC call, across every configured upstream, with exponential backoff.
+ *
+ * The old shape retried 4 times over ~1.8 s against ONE url. A rate limit that lasts longer than two
+ * seconds — a per-second cap, let alone the monthly-quota 429 that wedged this service for six days —
+ * exhausted that instantly, threw, aborted the whole cycle, and the cursor never advanced. The loop then
+ * restarted and did exactly the same thing forever.
+ */
+async function rpc(method, params, tries = RPC_TRIES) {
   let lastErr;
   for (let a = 0; a < tries; a++) {
+    const url = RPC_URLS[a % RPC_URLS.length]; // rotate: a dead key must not starve the healthy upstream
     try {
-      const res = await fetch(RPC, {
+      const res = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
         signal: AbortSignal.timeout(RPC_TIMEOUT_MS), // a stalled socket must not hang the whole loop
       });
-      if (res.status === 429 || res.status >= 500) throw new Error(`http ${res.status}`);
+      if (res.status === 429 || res.status >= 500) {
+        const ra = Number(res.headers.get("retry-after"));
+        const err = new Error(`http ${res.status}`);
+        err.retryAfterSec = Number.isFinite(ra) ? ra : null;
+        err.rateLimited = res.status === 429;
+        throw err;
+      }
       const json = await res.json();
       if (json.error) throw new Error(`${method}: ${json.error.message}`);
       return json.result;
     } catch (e) {
       lastErr = e;
-      if (a < tries - 1) await sleep(300 * (a + 1));
+      if (a < tries - 1) await sleep(backoffMs(a, e?.retryAfterSec ?? null, RPC_BACKOFF_CAP_MS));
     }
   }
   throw lastErr;
@@ -418,6 +456,74 @@ async function pageRows(build, max) {
   return out;
 }
 
+/**
+ * Discover and record every pool created in [lo, hi], and register the tokens behind them.
+ *
+ * FAIL-CLOSED: anything that throws leaves the caller's cursor where it was, so the range is re-read
+ * rather than skipped. Accumulates this cycle's new hub pools into `newHubByToken` for the liquidity pass.
+ */
+async function scanRange(lo, hi, newHubByToken) {
+  let pools_ = 0;
+  let tokens_ = 0;
+
+  const pools = await discover(lo, hi); // throws on persistent failure → no commit for this sub-range
+  if (pools.length) {
+    pools_ += pools.length;
+    const liqRes = await multicall(pools.map((p) => ({ target: p.pool, callData: "0x1a686502" })));
+    const poolRows = pools.map((p, i) => {
+      let liq = 0n;
+      const x = liqRes[i];
+      if (x?.success && x.data && x.data !== "0x") { try { liq = BigInt(x.data); } catch {} }
+      return { id: p.pool, venue: p.venue, token0: p.token0, token1: p.token1, fee: p.fee, tick_spacing: SPACING[p.fee] ?? 60, address: p.pool, active: liq > 0n };
+    });
+    for (let i = 0; i < poolRows.length; i += 200) {
+      const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: poolRows.slice(i, i + 200) });
+      if (error) throw new Error(`upsert_pools: ${error.message}`);
+    }
+  }
+
+  // v4 is scanned separately because a v4 pool has no address to read liquidity() from — its state lives
+  // in the singleton and is read at quote time via StateView, so the registry only records the key.
+  const v4 = await discoverV4(lo, hi);
+  if (v4.length) {
+    pools_ += v4.length;
+    const v4Rows = v4.map((p) => ({
+      id: p.id, venue: p.venue, token0: p.token0, token1: p.token1,
+      fee: p.fee, tick_spacing: p.tick_spacing, hooks: p.hooks, address: p.address,
+      // active gates routing: native-currency and value-taking-hook pools stay indexed but unrouted.
+      active: p.routable,
+    }));
+    for (let i = 0; i < v4Rows.length; i += 200) {
+      const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: v4Rows.slice(i, i + 200) });
+      if (error) throw new Error(`upsert_pools(v4): ${error.message}`);
+    }
+    const simulateCount = v4.filter((p) => p.quoteMode === "simulate").length;
+    console.log(
+      `v4: +${v4.length} pools (${v4Rows.filter((r) => r.active).length} routable, ${simulateCount} simulate-eligible)`,
+    );
+  }
+
+  // TOKEN REGISTRATION IS NOT CONDITIONAL ON v4. It used to sit inside `if (v4.length)`, so a range that
+  // created V3 pools but no v4 pool registered NONE of its tokens and recorded none of its hub pools —
+  // those tokens stayed unknown to search and unmeasured for liquidity until some later range happened to
+  // contain a v4 pool. The two scans are independent; the token set comes from the V3 pools either way.
+  if (pools.length) {
+    const tokenSet = new Set();
+    for (const p of pools) { tokenSet.add(p.token0); tokenSet.add(p.token1); }
+    tokens_ = await registerNewTokens([...tokenSet]);
+    for (const p of pools) {
+      let tok, hub;
+      if (p.token0 === WETH || p.token0 === USDG) { tok = p.token1; hub = p.token0 === USDG ? "usdg" : "weth"; }
+      else if (p.token1 === WETH || p.token1 === USDG) { tok = p.token0; hub = p.token1 === USDG ? "usdg" : "weth"; }
+      else continue;
+      if (!newHubByToken.has(tok)) newHubByToken.set(tok, []);
+      newHubByToken.get(tok).push({ pool: p.pool, hub });
+    }
+  }
+
+  return { pools: pools_, tokens: tokens_ };
+}
+
 /* ------------------------------------------------------------------------------------------- one cycle */
 async function refresh() {
   const { data: cursorData, error: cursorErr } = await supabase.rpc("mp_indexer_cursor", { p_secret: WRITE_SECRET });
@@ -428,61 +534,28 @@ async function refresh() {
   status.cursor = cursor;
   status.latest = latest;
 
-  // 1. DISCOVER new pools in a fully-processed, finality-lagged, bounded range.
+  // 1. DISCOVER new pools, COMMITTING THE CURSOR PER SUB-RANGE.
+  //
+  // This used to read the whole cycle's range (up to MAX_BLOCKS_PER_CYCLE, ~280 eth_getLogs calls) and
+  // advance the cursor once at the end. Any failure anywhere in it threw away every block already read,
+  // and the next cycle re-read exactly the same ground — so under a persistent rate limit the service
+  // made no progress at all, forever, while /health still reported a cursor. Committing each fully
+  // processed sub-range bounds the loss to COMMIT_SPAN blocks.
   const from = cursor > 0 ? cursor + 1 : Math.max(0, safeHead - 5000);
   const to = Math.min(safeHead, from + MAX_BLOCKS_PER_CYCLE - 1);
   let newTokenCount = 0;
   let newPoolCount = 0;
+  let committedTo = cursor;
   const newHubByToken = new Map(); // address -> [{pool, hub}]
-  if (to >= from) {
-    const pools = await discover(from, to); // throws (no cursor advance) if any factory/sub-range fails
-    if (pools.length) {
-      newPoolCount = pools.length;
-      const liqRes = await multicall(pools.map((p) => ({ target: p.pool, callData: "0x1a686502" })));
-      const poolRows = pools.map((p, i) => {
-        let liq = 0n;
-        const x = liqRes[i];
-        if (x?.success && x.data && x.data !== "0x") { try { liq = BigInt(x.data); } catch {} }
-        return { id: p.pool, venue: p.venue, token0: p.token0, token1: p.token1, fee: p.fee, tick_spacing: SPACING[p.fee] ?? 60, address: p.pool, active: liq > 0n };
-      });
-      for (let i = 0; i < poolRows.length; i += 200) {
-        const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: poolRows.slice(i, i + 200) });
-        if (error) throw new Error(`upsert_pools: ${error.message}`);
-      }
-    }
 
-    // 1b. DISCOVER v4 pools over the SAME range. Kept separate from the factory scan because a v4
-    // pool has no address to read liquidity() from — its state lives in the singleton and is read at
-    // quote time via StateView, so the registry only needs to record the key.
-    const v4 = await discoverV4(from, to);
-    if (v4.length) {
-      newPoolCount += v4.length;
-      const v4Rows = v4.map((p) => ({
-        id: p.id, venue: p.venue, token0: p.token0, token1: p.token1,
-        fee: p.fee, tick_spacing: p.tick_spacing, hooks: p.hooks, address: p.address,
-        // active gates routing: native-currency and value-taking-hook pools stay indexed but unrouted.
-        active: p.routable,
-      }));
-      for (let i = 0; i < v4Rows.length; i += 200) {
-        const { error } = await supabase.rpc("mp_upsert_pools", { p_secret: WRITE_SECRET, p_pools: v4Rows.slice(i, i + 200) });
-        if (error) throw new Error(`upsert_pools(v4): ${error.message}`);
-      }
-      const simulateCount = v4.filter((p) => p.quoteMode === "simulate").length;
-      console.log(
-        `v4: +${v4.length} pools (${v4Rows.filter((r) => r.active).length} routable, ${simulateCount} simulate-eligible)`,
-      );
-      const tokenSet = new Set();
-      for (const p of pools) { tokenSet.add(p.token0); tokenSet.add(p.token1); }
-      newTokenCount = await registerNewTokens([...tokenSet]);
-      for (const p of pools) {
-        let tok, hub;
-        if (p.token0 === WETH || p.token0 === USDG) { tok = p.token1; hub = p.token0 === USDG ? "usdg" : "weth"; }
-        else if (p.token1 === WETH || p.token1 === USDG) { tok = p.token0; hub = p.token1 === USDG ? "usdg" : "weth"; }
-        else continue;
-        if (!newHubByToken.has(tok)) newHubByToken.set(tok, []);
-        newHubByToken.get(tok).push({ pool: p.pool, hub });
-      }
-    }
+  for (let lo = from; lo <= to; lo += COMMIT_SPAN) {
+    const hi = Math.min(to, lo + COMMIT_SPAN - 1);
+    const r = await scanRange(lo, hi, newHubByToken); // throws → cursor stays at the last committed range
+    newPoolCount += r.pools;
+    newTokenCount += r.tokens;
+    const { error } = await supabase.rpc("mp_indexer_advance", { p_secret: WRITE_SECRET, p_block: hi });
+    if (error) throw new Error(`advance: ${error.message}`);
+    committedTo = hi;
   }
 
   // 2. REFRESH liquidity: every verified token (paged) + a rotating slice of the unverified long tail,
@@ -510,16 +583,14 @@ async function refresh() {
   let refreshed = 0;
   if (candidates.size) refreshed = await writeLiquidity(await measureDeepest(candidates));
 
-  // 3. advance the cursor ONLY after the whole range was processed without throwing
-  if (to >= from) {
-    const { error } = await supabase.rpc("mp_indexer_advance", { p_secret: WRITE_SECRET, p_block: to });
-    if (error) throw new Error(`advance: ${error.message}`);
-  }
+  // 3. the cursor was already advanced per fully-processed sub-range in step 1. It is deliberately NOT
+  //    coupled to the liquidity pass above: that pass re-measures tokens we already know about, and
+  //    letting its failure re-run discovery is what turned one bad hour into days of no progress.
 
   const { count } = await supabase.from("mp_tokens").select("*", { count: "exact", head: true }).eq("verified", true);
   const now = Date.now();
-  status = { lastRun: new Date(now).toISOString(), lastRunMs: now, cursor: Math.max(cursor, to >= from ? to : cursor), latest, newPools: newPoolCount, newTokens: newTokenCount, refreshed, verified: count ?? status.verified, error: null };
-  console.log(`[${status.lastRun}] blocks ${from}-${to}/${safeHead} · +${newPoolCount} pools · +${newTokenCount} tokens · refreshed ${refreshed} · verified ${status.verified}`);
+  status = { lastRun: new Date(now).toISOString(), lastRunMs: now, cursor: Math.max(cursor, committedTo), latest, newPools: newPoolCount, newTokens: newTokenCount, refreshed, verified: count ?? status.verified, error: null };
+  console.log(`[${status.lastRun}] blocks ${from}-${committedTo}/${safeHead} · +${newPoolCount} pools · +${newTokenCount} tokens · refreshed ${refreshed} · verified ${status.verified}`);
 }
 
 /* ------------------------------------------------------------------------------------- swap volume */
