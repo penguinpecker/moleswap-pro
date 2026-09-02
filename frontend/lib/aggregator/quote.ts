@@ -9,7 +9,7 @@
  * current time explicitly rather than the quoter reaching for either.
  */
 
-import { PoolGraph, bestSplitRoute, describeRoute, type SplitRoute } from "./route";
+import { PoolGraph, bestSplitRoute, describeRoute, type SplitRoute, bestSingleRoute } from "./route";
 import type { PoolState } from "./venues/v3Pool";
 import { planFromSplit, applyAggFee, type SwapPlan } from "./plan";
 
@@ -64,6 +64,29 @@ export interface Quote {
   readonly plan: SwapPlan;
 }
 
+/**
+ * The pair HAS a route, but not enough visible depth to fill this size. Distinct from NoRouteError on
+ * purpose: "there is no path" and "your trade is bigger than the path can carry" are different answers and
+ * a user can act on the second one. Before this existed, an oversize trade reached planFromSplit, which
+ * threw a bare Error, which the client turned into an engine error telling the user to re-quote — advice
+ * that could never help, because re-quoting produces the same over-large amount.
+ */
+export class InsufficientLiquidityError extends Error {
+  constructor(
+    readonly tokenIn: string,
+    readonly tokenOut: string,
+    /** The largest input the visible depth could actually price, in wei. Zero when nothing could be. */
+    readonly maxFillableIn: bigint,
+  ) {
+    super(
+      maxFillableIn > 0n
+        ? `Not enough liquidity for this size. The deepest routes can price about ${maxFillableIn} of ${tokenIn} right now.`
+        : `Not enough liquidity to trade ${tokenIn} for ${tokenOut} at this size.`,
+    );
+    this.name = "InsufficientLiquidityError";
+  }
+}
+
 export class NoRouteError extends Error {
   constructor(tokenIn: string, tokenOut: string) {
     super(`no route from ${tokenIn} to ${tokenOut} in the current pool set`);
@@ -110,7 +133,21 @@ export function getQuote(pools: readonly PoolState[], req: QuoteRequest): Quote 
     maxPaths: req.maxPaths ?? 12,
   });
 
-  if (!split || split.amountOut <= 0n) throw new NoRouteError(req.tokenIn, req.tokenOut);
+  // "No path exists" and "a path exists but cannot carry this much" are different answers, and only the
+  // second one is actionable. The allocator declines to place a slice it cannot price honestly, so an
+  // oversize trade comes back empty and used to be reported as no-route (or, worse, reached planFromSplit
+  // and threw a bare Error the caller could only pass on as an engine bug).
+  if (!split || split.amountOut <= 0n) {
+    const anyPath = bestSingleRoute(graph, routeIn, routeOut, netAmountIn, req.maxHops ?? 3);
+    if (anyPath && anyPath.amountOut > 0n) {
+      throw new InsufficientLiquidityError(req.tokenIn, req.tokenOut, 0n);
+    }
+    throw new NoRouteError(req.tokenIn, req.tokenOut);
+  }
+  // Placed something, but not the whole input: report how much the visible depth could actually take.
+  if (split.incomplete || split.amountIn < netAmountIn) {
+    throw new InsufficientLiquidityError(req.tokenIn, req.tokenOut, split.incomplete ? 0n : split.amountIn);
+  }
 
   // Build the plan with the ORIGINAL (possibly NATIVE) tokenIn/tokenOut on the outer fields; the hops
   // already reference WETH because the route was computed over it.

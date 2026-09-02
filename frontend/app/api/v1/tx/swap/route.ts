@@ -3,6 +3,7 @@ import { ethers } from "ethers";
 import { encodeFunctionData } from "viem";
 import { apiResponse, apiError, withRateLimit, corsPreflightResponse } from "@/lib/api/helpers";
 import { quoteSwap } from "@/lib/aggregator/client";
+import { InsufficientLiquidityError } from "@/lib/aggregator/quote";
 import { moleRouterAbi, NATIVE_SENTINEL } from "@/lib/aggregator/router";
 import { loadPoolRowsServer } from "@/lib/aggregator/serverPools";
 import { getAggFeeBps } from "@/lib/mole/aggFee";
@@ -168,6 +169,9 @@ export async function POST(req: NextRequest) {
       note: "Send the approval (if present) first and wait for it to confirm, then send the swap.",
     });
   } catch (err: any) {
+    // A trade larger than the visible depth is the MARKET's answer, not an engine failure: 422 with the
+    // size that would fit, never a 500 telling the caller to re-quote at the same amount.
+    if (err instanceof InsufficientLiquidityError) return apiError(err.message, 422);
     return apiError(err.message || "Failed to build swap transaction", 500);
   }
 }

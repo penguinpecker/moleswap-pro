@@ -184,10 +184,23 @@ export function bestSplitRoute(
 
   // Rank candidates on the FULL size first, then keep the top few. Ranking on a slice would favour
   // shallow pools that look good small and run dry immediately.
+  // COMPLETE PATHS FIRST, then by output. A path whose full-size probe ran out of the tick data we hold
+  // is not dropped — it may well be fine at half the size, and dropping it would turn a fillable trade
+  // into "no route". It is merely ranked behind every path that can actually carry the whole amount, so
+  // the allocator reaches for real depth before it reaches for a path it cannot see the end of.
+  //
+  // ⚠ MUTATION SURVIVOR, recorded rather than hidden: deleting this tie-break leaves every test green.
+  // An exhausted walk currently BREAKS and returns a partial output, so it already ranks lower by output
+  // and nothing observable changes. The line earns its place against the over-quoting case — a walk that
+  // continues at constant liquidity through un-read bitmap words — where an incomplete path CAN out-rank a
+  // fillable one and take its slot at the `maxPaths` cut. Keep it; do not treat it as covered.
   const rankedAll = all
     .map((hops) => ({ hops, probe: quotePath(hops, amountIn) }))
     .filter((c) => c.probe.amountOut > 0n)
-    .sort((a, b) => (b.probe.amountOut > a.probe.amountOut ? 1 : -1));
+    .sort((a, b) => {
+      if (a.probe.incomplete !== b.probe.incomplete) return a.probe.incomplete ? 1 : -1;
+      return b.probe.amountOut > a.probe.amountOut ? 1 : -1;
+    });
 
   // POOL-DISJOINT SELECTION — the correctness guard for splitting. The greedy allocator below prices each
   // path in ISOLATION against pristine pool liquidity. If two split parts shared a pool, the allocator
@@ -216,6 +229,9 @@ export function bestSplitRoute(
       : undefined;
   }
 
+  // What the allocator could actually place. `remaining` is left unspent when every path is exhausted, and
+  // the caller needs the distinction between "priced the whole amount" and "this is all the depth there is".
+
   const allocated: bigint[] = ranked.map(() => 0n);
   let remaining = amountIn;
 
@@ -230,7 +246,13 @@ export function bestSplitRoute(
 
     for (let j = 0; j < ranked.length; j++) {
       const trial = allocated[j]! + thisSlice;
-      const withSlice = quotePath(ranked[j]!.hops, trial).amountOut;
+      const withTrial = quotePath(ranked[j]!.hops, trial);
+      // An INCOMPLETE trial priced this slice against liquidity we cannot see the end of, so its output is
+      // an over-estimate. Allocating on it produced a plan whose amountOut the chain will not pay, and
+      // planFromSplit then refused to build it at all — the caller got an engine error where the honest
+      // answer is "this path cannot take this much". Leave the slice for a path that can carry it.
+      if (withTrial.incomplete) continue;
+      const withSlice = withTrial.amountOut;
       const without = allocated[j]! === 0n ? 0n : quotePath(ranked[j]!.hops, allocated[j]!).amountOut;
       const marginal = withSlice - without;
       if (marginal > bestMarginal) {

@@ -7,7 +7,7 @@
  * argument. Nothing here re-implements math — it composes verified parts and applies one policy: slippage.
  */
 
-import { getQuote, NATIVE, NoRouteError, type Quote } from "./quote";
+import { getQuote, NATIVE, NoRouteError, InsufficientLiquidityError, type Quote } from "./quote";
 import type { PoolState } from "./venues/v3Pool";
 import { fetchV3StatesMulticall } from "./multicall";
 import { fetchV4MolePool, fetchV4Pool, fetchV4PoolByKey } from "./venues/v4Reader";
@@ -326,6 +326,10 @@ export async function quoteSwap(pools: PoolRow[], req: SwapQuoteRequest): Promis
       const { arg, value } = encodePlan(quote.plan);
       tickQuote = { quote, encoded: arg, value };
     } catch (err) {
+      // "Your trade is bigger than the visible depth" is a market answer, not a quoter failure. It is
+      // re-thrown untouched so the caller can say so in those words; wrapping it as QuoteFailedError
+      // reported an engine bug and told the user to re-quote, which can never help at the same size.
+      if (err instanceof InsufficientLiquidityError) throw err;
       if (!(err instanceof NoRouteError)) {
         console.error(
           "[aggregator] quoteSwap: the quoter threw — this is a QUOTER FAILURE, not 'no liquidity'",
