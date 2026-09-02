@@ -45,7 +45,8 @@ const LEND_CSS = `
   padding: 7px 8px; border-radius: 10px; border: 0; cursor: pointer; color: #fff; white-space: nowrap;
   background: linear-gradient(180deg, #43a06a, var(--moss)); box-shadow: 0 2px 0 #1e5837; }
 .lend-mini.alt { background: linear-gradient(180deg, #d98c3f, #b4671c); box-shadow: 0 2px 0 #7d4310; }
-.lend-mini:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+.lend-mini:disabled { opacity: 1; cursor: not-allowed; box-shadow: none;
+  background: #e7ddcc; color: #9b8f7e; }
 .lend-why { font-size: 11px; line-height: 1.3; color: var(--rust); opacity: .85; }
 .hf.safe { color: var(--moss); } .hf.warn { color: #b4801c; } .hf.danger { color: var(--rust); }
 .hf.none { color: var(--ink-3); }
@@ -207,7 +208,14 @@ function LendMarket() {
             </div>
             <div className="chamber">
               <div className="label">Available to borrow</div>
-              <div className="value mono">{pos ? formatUsd(pos.availableBorrowsBase) : "…"}</div>
+              {/* The protocol's number is borrowing POWER, which the gate does not change — but printed
+                  beside a "Borrowing is paused" banner it read as money the user could take right now,
+                  and the Borrow button then did nothing. Say which it is instead of showing one number
+                  that means two things. */}
+              <div className="value mono" style={!canBorrow && pos ? { opacity: 0.5 } : undefined}>
+                {pos ? formatUsd(pos.availableBorrowsBase) : "…"}
+              </div>
+              {!canBorrow && pos && <div className="lend-why" style={{ marginTop: 2 }}>paused — not borrowable now</div>}
             </div>
             <div className="chamber">
               <div className="label">Health factor</div>
@@ -437,6 +445,18 @@ function ReserveRow({
     : null;
   const withdrawBlocked = connected && supplied === 0n ? `You have no ${r.symbol} supplied` : null;
 
+  /**
+   * Why Borrow and Repay are refused. These used to live ONLY in a `title` tooltip, which needs a
+   * hover and never appears on a touch screen — so a user with collateral, a paused gate and an
+   * enabled-looking button pressed it, nothing happened, and the only visible red text in the row was
+   * "You hold no USDG", which is about SUPPLYING and has nothing to do with borrowing.
+   */
+  const borrowBlocked =
+    !connected ? null
+    : !canBorrow ? "Borrowing is paused market-wide right now"
+    : null;
+  const repayBlocked = connected && borrowed === 0n ? `You have no ${r.symbol} debt to repay` : null;
+
   return (
     <div className="lend-row">
       <div className="lend-asset" style={{ display: "flex", alignItems: "center", gap: 9 }}>
@@ -468,7 +488,7 @@ function ReserveRow({
           onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
           style={{ width: "100%", padding: "7px 9px", fontSize: 12.5 }}
         />
-        {supplyBlocked && <div className="lend-why">{supplyBlocked}</div>}
+        {supplyBlocked && <div className="lend-why">Supply: {supplyBlocked.toLowerCase()}</div>}
         <div className="lend-acts">
           <button
             className="lend-mini"
@@ -488,23 +508,31 @@ function ReserveRow({
           </button>
         </div>
         {r.borrowable && (
-          <div className="lend-acts">
-            <button
-              className="lend-mini"
-              disabled={disabled || !canBorrow}
-              title={!canBorrow ? "The liveness gate is not allowing new debt right now" : undefined}
-              onClick={() => onAct("borrow", parsed)}
-            >
-              Borrow
-            </button>
-            <button
-              className="lend-mini alt"
-              disabled={disabled || borrowed === 0n}
-              onClick={() => onAct("repay", parsed)}
-            >
-              Repay
-            </button>
-          </div>
+          <>
+            {(borrowBlocked || repayBlocked) && (
+              <div className="lend-why">
+                {borrowBlocked ? `Borrow: ${borrowBlocked.toLowerCase()}` : `Repay: ${repayBlocked!.toLowerCase()}`}
+              </div>
+            )}
+            <div className="lend-acts">
+              <button
+                className="lend-mini"
+                disabled={disabled || !!borrowBlocked}
+                title={borrowBlocked ?? undefined}
+                onClick={() => onAct("borrow", parsed)}
+              >
+                Borrow
+              </button>
+              <button
+                className="lend-mini alt"
+                disabled={disabled || !!repayBlocked}
+                title={repayBlocked ?? undefined}
+                onClick={() => onAct("repay", parsed)}
+              >
+                Repay
+              </button>
+            </div>
+          </>
         )}
       </div>
     </div>
