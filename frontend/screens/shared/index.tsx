@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Menu, X } from "lucide-react";
@@ -46,6 +46,28 @@ export const MoleMascot = ({ className }: { className?: string }) => (
 export const NavBar = () => {
   const [isOpen, setIsOpen] = useState(false);
   const currentPath = usePathname();
+  const chromeRef = useRef<HTMLDivElement>(null);
+
+  // The expanded menu closes itself. It used to stay open over the hero and the swap card through a
+  // route change, Escape, and taps anywhere else on the page — only the X closed it.
+  useEffect(() => {
+    setIsOpen(false);
+  }, [currentPath]);
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsOpen(false);
+    };
+    const onDown = (e: MouseEvent) => {
+      if (chromeRef.current && !chromeRef.current.contains(e.target as Node)) setIsOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [isOpen]);
 
   // DEX destinations on the left, the player-facing sections on the right.
   //
@@ -77,7 +99,7 @@ export const NavBar = () => {
     currentPath === path ? { "aria-current": "page" as const } : {};
 
   return (
-    <div className="chrome" id="chrome">
+    <div className="chrome" id="chrome" ref={chromeRef}>
       <div className="chrome-in">
         <Link className="brand" href="/" aria-label="MoleSwap home">
           {/* The mole mark. A real asset rather than the drawn MoleGlyph, which stays exported and is
