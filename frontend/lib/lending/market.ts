@@ -141,6 +141,104 @@ export function lendingUnavailableOn(chainId?: number): string | null {
 
 /* ───────────────────────────────── ABIs ────────────────────────────────── */
 
+/**
+ * Every custom error the Pool (and the gateway, which calls the Pool) can revert with: Aave v3.7's
+ * Errors.sol verbatim, plus the two the liveness-gated debt token adds. `simulateContract` can only NAME
+ * a revert whose signature is in the ABI it was handed; without these, `BorrowingHalted`,
+ * `CollateralCannotCoverNewBorrow`, a cap hit and a frozen reserve all surfaced as a raw selector, and
+ * the sentence `readable()` in actions.ts promises never matched anything.
+ *
+ * Generated from upstream/aave-v3-origin Errors.sol (85 errors) — regenerate rather than hand-edit.
+ */
+export const lendingErrorsAbi = [
+  { type: "error", name: "CallerNotPoolAdmin", inputs: [] },
+  { type: "error", name: "CallerNotPoolOrEmergencyAdmin", inputs: [] },
+  { type: "error", name: "CallerNotRiskOrPoolAdmin", inputs: [] },
+  { type: "error", name: "CallerNotAssetListingOrPoolAdmin", inputs: [] },
+  { type: "error", name: "AddressesProviderNotRegistered", inputs: [] },
+  { type: "error", name: "InvalidAddressesProviderId", inputs: [] },
+  { type: "error", name: "NotContract", inputs: [] },
+  { type: "error", name: "CallerNotPoolConfigurator", inputs: [] },
+  { type: "error", name: "CallerNotAToken", inputs: [] },
+  { type: "error", name: "InvalidAddressesProvider", inputs: [] },
+  { type: "error", name: "InvalidFlashloanExecutorReturn", inputs: [] },
+  { type: "error", name: "ReserveAlreadyAdded", inputs: [] },
+  { type: "error", name: "NoMoreReservesAllowed", inputs: [] },
+  { type: "error", name: "EModeCategoryReserved", inputs: [] },
+  { type: "error", name: "ReserveLiquidityNotZero", inputs: [] },
+  { type: "error", name: "FlashloanPremiumInvalid", inputs: [] },
+  { type: "error", name: "InvalidReserveParams", inputs: [] },
+  { type: "error", name: "InvalidEmodeCategoryParams", inputs: [] },
+  { type: "error", name: "CallerMustBePool", inputs: [] },
+  { type: "error", name: "InvalidMintAmount", inputs: [] },
+  { type: "error", name: "InvalidBurnAmount", inputs: [] },
+  { type: "error", name: "InvalidAmount", inputs: [] },
+  { type: "error", name: "ReserveInactive", inputs: [] },
+  { type: "error", name: "ReserveFrozen", inputs: [] },
+  { type: "error", name: "ReservePaused", inputs: [] },
+  { type: "error", name: "BorrowingNotEnabled", inputs: [] },
+  { type: "error", name: "NotEnoughAvailableUserBalance", inputs: [] },
+  { type: "error", name: "InvalidInterestRateModeSelected", inputs: [] },
+  { type: "error", name: "HealthFactorLowerThanLiquidationThreshold", inputs: [] },
+  { type: "error", name: "CollateralCannotCoverNewBorrow", inputs: [] },
+  { type: "error", name: "NoDebtOfSelectedType", inputs: [] },
+  { type: "error", name: "NoExplicitAmountToRepayOnBehalf", inputs: [] },
+  { type: "error", name: "UnderlyingBalanceZero", inputs: [] },
+  { type: "error", name: "HealthFactorNotBelowThreshold", inputs: [] },
+  { type: "error", name: "CollateralCannotBeLiquidated", inputs: [] },
+  { type: "error", name: "SpecifiedCurrencyNotBorrowedByUser", inputs: [] },
+  { type: "error", name: "InconsistentFlashloanParams", inputs: [] },
+  { type: "error", name: "BorrowCapExceeded", inputs: [] },
+  { type: "error", name: "SupplyCapExceeded", inputs: [] },
+  { type: "error", name: "LtvValidationFailed", inputs: [] },
+  { type: "error", name: "InconsistentEModeCategory", inputs: [] },
+  { type: "error", name: "ReserveAlreadyInitialized", inputs: [] },
+  { type: "error", name: "UserHasAssetWithZeroLtv", inputs: [] },
+  { type: "error", name: "InvalidLtv", inputs: [] },
+  { type: "error", name: "InvalidLiquidationThreshold", inputs: [] },
+  { type: "error", name: "InvalidLiquidationBonus", inputs: [] },
+  { type: "error", name: "InvalidDecimals", inputs: [] },
+  { type: "error", name: "InvalidReserveFactor", inputs: [] },
+  { type: "error", name: "InvalidBorrowCap", inputs: [] },
+  { type: "error", name: "InvalidSupplyCap", inputs: [] },
+  { type: "error", name: "InvalidLiquidationProtocolFee", inputs: [] },
+  { type: "error", name: "InvalidReserveIndex", inputs: [] },
+  { type: "error", name: "AclAdminCannotBeZero", inputs: [] },
+  { type: "error", name: "InconsistentParamsLength", inputs: [] },
+  { type: "error", name: "ZeroAddressNotValid", inputs: [] },
+  { type: "error", name: "InvalidExpiration", inputs: [] },
+  { type: "error", name: "InvalidSignature", inputs: [] },
+  { type: "error", name: "OperationNotSupported", inputs: [] },
+  { type: "error", name: "AssetNotListed", inputs: [] },
+  { type: "error", name: "InvalidOptimalUsageRatio", inputs: [] },
+  { type: "error", name: "UnderlyingCannotBeRescued", inputs: [] },
+  { type: "error", name: "AddressesProviderAlreadyAdded", inputs: [] },
+  { type: "error", name: "PoolAddressesDoNotMatch", inputs: [] },
+  { type: "error", name: "ReserveDebtNotZero", inputs: [] },
+  { type: "error", name: "FlashloanDisabled", inputs: [] },
+  { type: "error", name: "InvalidMaxRate", inputs: [] },
+  { type: "error", name: "WithdrawToAToken", inputs: [] },
+  { type: "error", name: "SupplyToAToken", inputs: [] },
+  { type: "error", name: "Slope2MustBeGteSlope1", inputs: [] },
+  { type: "error", name: "CallerNotRiskOrPoolOrEmergencyAdmin", inputs: [] },
+  { type: "error", name: "LiquidationGraceSentinelCheckFailed", inputs: [] },
+  { type: "error", name: "InvalidGracePeriod", inputs: [] },
+  { type: "error", name: "InvalidFreezeState", inputs: [] },
+  { type: "error", name: "InvalidLtvzeroState", inputs: [] },
+  { type: "error", name: "NotBorrowableInEMode", inputs: [] },
+  { type: "error", name: "CallerNotUmbrella", inputs: [] },
+  { type: "error", name: "ReserveNotInDeficit", inputs: [] },
+  { type: "error", name: "MustNotLeaveDust", inputs: [] },
+  { type: "error", name: "UserCannotHaveDebt", inputs: [] },
+  { type: "error", name: "SelfLiquidation", inputs: [] },
+  { type: "error", name: "CallerNotPositionManager", inputs: [] },
+  { type: "error", name: "InvalidCollateralInEmode", inputs: [{ name: "reserve", type: "address" }, { name: "categoryId", type: "uint256" }] },
+  { type: "error", name: "InvalidDebtInEmode", inputs: [{ name: "reserve", type: "address" }, { name: "categoryId", type: "uint256" }] },
+  { type: "error", name: "MustBeEmodeCollateral", inputs: [{ name: "reserve", type: "address" }, { name: "categoryId", type: "uint256" }] },
+  { type: "error", name: "BorrowingHalted", inputs: [] },
+  { type: "error", name: "LivenessGateUnreadable", inputs: [] },
+] as const;
+
 export const poolAbi = [
   {
     type: "function",
@@ -211,6 +309,7 @@ export const poolAbi = [
     ],
     outputs: [{ type: "uint256" }],
   },
+  ...lendingErrorsAbi,
 ] as const;
 
 export const gatewayAbi = [
@@ -236,6 +335,7 @@ export const gatewayAbi = [
     ],
     outputs: [],
   },
+  ...lendingErrorsAbi,
 ] as const;
 
 export const oracleAbi = [
@@ -424,7 +524,12 @@ export async function readUserPosition(user: Address, chainId?: number): Promise
     ...LENDING_ASSETS.flatMap((a) => [
       c.readContract({ address: a.aToken, abi: erc20Abi, functionName: "balanceOf", args: [user] }),
       c.readContract({ address: a.variableDebtToken, abi: erc20Abi, functionName: "balanceOf", args: [user] }),
-      c.readContract({ address: a.address, abi: erc20Abi, functionName: "balanceOf", args: [user] }),
+      // What the wallet can actually SUPPLY. The native reserve is funded through the gateway from ETH,
+      // so its answer is the ETH balance — reading WETH here told a wallet holding ETH "You hold no ETH"
+      // and disabled Supply on the market's main collateral.
+      a.isWrappedNative
+        ? c.getBalance({ address: user })
+        : c.readContract({ address: a.address, abi: erc20Abi, functionName: "balanceOf", args: [user] }),
     ]),
   ]);
 
