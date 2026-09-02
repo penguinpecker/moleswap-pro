@@ -41,12 +41,11 @@
  */
 import {
   createPublicClient,
-  createWalletClient,
-  custom,
   http,
   type Address,
 } from "viem";
 import { molePositionsAbi, erc20Abi } from "./abi";
+import { connectedWallet } from "@/lib/wallet/connectedWallet";
 import {
   NoHonestAnchorError,
   assertAnchorUsable,
@@ -133,11 +132,6 @@ export async function getVaultBalances(owner: string, chainId?: number): Promise
   return { token0, token1, native };
 }
 
-function browserEth(): any {
-  if (typeof window === "undefined") return null;
-  return (window as any).ethereum ?? null;
-}
-
 /**
  * Refuse — do not "fix" — a wallet that is on a different chain than the one this call targets.
  *
@@ -150,11 +144,8 @@ function browserEth(): any {
  *
  * Returns an error sentence, or null when the wallet really is where we think it is.
  */
-async function walletChainMismatch(eth: any, cfg: VaultChainConfig): Promise<string | null> {
-  let actual: number;
-  try {
-    actual = parseInt(await eth.request({ method: "eth_chainId" }), 16);
-  } catch {
+function walletChainMismatch(actual: number | undefined, cfg: VaultChainConfig): string | null {
+  if (actual === undefined) {
     // The wallet would not say. Refusing beats guessing: the alternative is signing a transaction
     // built for one chain against whatever the wallet happens to be on.
     return "Could not read your wallet's network. Nothing was submitted — reconnect and try again.";
@@ -370,14 +361,12 @@ export async function almDepositNative(
     const native = cfg.depositTokens.find((d) => d.native);
     if (!native) return { success: false, error: `${cfg.meta.name} has no native deposit path.` };
 
-    const eth = browserEth();
-    if (!eth) return { success: false, error: "No wallet found" };
-    const wrongChain = await walletChainMismatch(eth, cfg);
+    const cw = await connectedWallet(cfg.chain as any);
+    if (!cw) return { success: false, error: "No wallet found" };
+    const wrongChain = walletChainMismatch(cw.chainId, cfg);
     if (wrongChain) return { success: false, error: wrongChain };
-    const wallet = createWalletClient({ chain: cfg.chain as any, transport: custom(eth) });
+    const { wallet, account } = cw;
     const pub = almPublicClient(cfg);
-    const [account] = await wallet.getAddresses();
-    if (!account) return { success: false, error: "Wallet not connected" };
     if (amountIn <= 0n) return { success: false, error: "Enter an amount" };
 
     // THE REFUSAL COMES BEFORE THE IRREVERSIBLE STEP. Wrapping is a one-way trip for a user who only
@@ -412,14 +401,12 @@ export async function almDepositNative(
 export async function almDeposit(token: Address, amountIn: bigint, chainId?: number): Promise<DepositResult> {
   try {
     const cfg = resolve(chainId);
-    const eth = browserEth();
-    if (!eth) return { success: false, error: "No wallet found" };
-    const wrongChain = await walletChainMismatch(eth, cfg);
+    const cw = await connectedWallet(cfg.chain as any);
+    if (!cw) return { success: false, error: "No wallet found" };
+    const wrongChain = walletChainMismatch(cw.chainId, cfg);
     if (wrongChain) return { success: false, error: wrongChain };
-    const wallet = createWalletClient({ chain: cfg.chain as any, transport: custom(eth) });
+    const { wallet, account } = cw;
     const pub = almPublicClient(cfg);
-    const [account] = await wallet.getAddresses();
-    if (!account) return { success: false, error: "Wallet not connected" };
     if (amountIn <= 0n) return { success: false, error: "Enter an amount" };
 
     // 1) the bounds, FIRST. buildZap reads the TWAP, judges spot against the vault's own band and
@@ -482,14 +469,12 @@ export async function almDeposit(token: Address, amountIn: bigint, chainId?: num
 export async function almWithdraw(id: string | bigint, chainId?: number): Promise<DepositResult> {
   try {
     const cfg = resolve(chainId);
-    const eth = browserEth();
-    if (!eth) return { success: false, error: "No wallet found" };
-    const wrongChain = await walletChainMismatch(eth, cfg);
+    const cw = await connectedWallet(cfg.chain as any);
+    if (!cw) return { success: false, error: "No wallet found" };
+    const wrongChain = walletChainMismatch(cw.chainId, cfg);
     if (wrongChain) return { success: false, error: wrongChain };
-    const wallet = createWalletClient({ chain: cfg.chain as any, transport: custom(eth) });
+    const { wallet, account } = cw;
     const pub = almPublicClient(cfg);
-    const [account] = await wallet.getAddresses();
-    if (!account) return { success: false, error: "Wallet not connected" };
 
     const sim = await pub.simulateContract({
       address: cfg.positions,
@@ -602,14 +587,12 @@ export async function almWithdrawWithFloor(
 ): Promise<DepositResult> {
   try {
     const cfg = resolve(chainId);
-    const eth = browserEth();
-    if (!eth) return { success: false, error: "No wallet found" };
-    const wrongChain = await walletChainMismatch(eth, cfg);
+    const cw = await connectedWallet(cfg.chain as any);
+    if (!cw) return { success: false, error: "No wallet found" };
+    const wrongChain = walletChainMismatch(cw.chainId, cfg);
     if (wrongChain) return { success: false, error: wrongChain };
-    const wallet = createWalletClient({ chain: cfg.chain as any, transport: custom(eth) });
+    const { wallet, account } = cw;
     const pub = almPublicClient(cfg);
-    const [account] = await wallet.getAddresses();
-    if (!account) return { success: false, error: "Wallet not connected" };
 
     const pid = BigInt(id);
     const p = await readPositionForExit(pub, cfg, pid);

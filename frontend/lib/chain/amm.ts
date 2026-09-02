@@ -28,13 +28,12 @@
  */
 import { ethers } from "ethers";
 import {
-  createWalletClient,
   createPublicClient,
-  custom,
   encodeFunctionData,
   http,
   type Hex,
 } from "viem";
+import { connectedWallet } from "@/lib/wallet/connectedWallet";
 import {
   CONTRACTS,
   TOKENS,
@@ -621,29 +620,18 @@ export async function estimateSwapDetails(params: {
   }
 }
 
-/* ─── wallet client plumbing (viem over the injected provider) ──────────── */
-function browserEth(): any {
-  if (typeof window === "undefined") return null;
-  return (window as any).ethereum ?? null;
-}
-
+/* ─── wallet client plumbing (the connected wallet, via lib/wallet/connectedWallet) ───────── */
 /**
- * The chain the wallet is on right now, or undefined if it will not say.
+ * The signer is the wallet the user CONNECTED (wagmi's connector), falling back to the injected
+ * provider only when wagmi holds no connection. Building it from `window.ethereum` directly signed with
+ * whichever extension owned that global — a different wallet from the one on the review card whenever
+ * the user came in through WalletConnect, Coinbase, or a second injected wallet.
  *
- * This REPLACES `ensureChain`, which used to force `wallet_switchEthereumChain` (and even
- * `wallet_addEthereumChain`) back to Robinhood before every approve, swap and deposit. Reading is all
- * this file is entitled to do: the user picked their network, and a swap engine that quietly overrules
+ * The chain is READ, never moved. This REPLACES `ensureChain`, which used to force
+ * `wallet_switchEthereumChain` (and even `wallet_addEthereumChain`) back to Robinhood before every
+ * approve, swap and deposit. The user picked their network, and a swap engine that quietly overrules
  * that choice is the reason the chain switcher "changed nothing".
  */
-async function walletChainId(eth: any): Promise<number | undefined> {
-  try {
-    const cid = await eth.request({ method: "eth_chainId" });
-    const n = typeof cid === "string" ? parseInt(cid, 16) : Number(cid);
-    return Number.isFinite(n) ? n : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * Refuse, in words, when the wallet is not where this call needs it — never switch.
@@ -652,8 +640,8 @@ async function walletChainId(eth: any): Promise<number | undefined> {
  * names the chain to move to, so the caller can put a "Switch to X" button beside it; performing the
  * switch is the UI's job, taken on an explicit click, not this module's to do behind the user's back.
  */
-async function chainRefusal(eth: any, wanted?: number): Promise<string | null> {
-  const verdict = swapChainStatus(await walletChainId(eth), wanted);
+function chainRefusalFor(walletChainId: number | undefined, wanted?: number): string | null {
+  const verdict = swapChainStatus(walletChainId, wanted);
   if (verdict.ok) return null;
   return verdict.offer
     ? `${verdict.reason} Switch your wallet to ${verdict.offer.name} and try again.`
@@ -674,16 +662,15 @@ export async function approveToken(
   chainId?: number,
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
   try {
-    const eth = browserEth();
-    if (!eth) return { success: false, error: "No wallet found" };
+    const viemChain = viemChainFor(chainId);
+    const cw = await connectedWallet(viemChain);
+    if (!cw) return { success: false, error: "No wallet found" };
     // An approval aimed at the wrong chain's router is the fund-loss shape this whole file exists to
     // avoid, so a wallet on the wrong network is refused rather than moved.
-    const refusal = await chainRefusal(eth, chainId);
+    const refusal = chainRefusalFor(cw.chainId, chainId);
     if (refusal) return { success: false, error: refusal };
-    const viemChain = viemChainFor(chainId);
     const target = (spender ?? routerFor(chainId)) as `0x${string}`;
-    const wallet = createWalletClient({ chain: viemChain, transport: custom(eth) });
-    const [account] = await wallet.getAddresses();
+    const { wallet, account } = cw;
     const value = amount ? BigInt(amount) : (1n << 256n) - 1n;
     const hash = await wallet.writeContract({
       address: token as `0x${string}`,
@@ -879,19 +866,17 @@ export async function executeSwap(params: {
   const onStep = params.onStep || (() => {});
   const chainId = params.chainId ?? params.prepared?.chainId ?? DEFAULT_CHAIN_ID;
   try {
-    const eth = browserEth();
-    if (!eth) return { success: false, error: "No wallet found" };
+    const viemChain = viemChainFor(chainId);
+    const cw = await connectedWallet(viemChain);
+    if (!cw) return { success: false, error: "No wallet found" };
     // The wallet is READ, never moved. This used to be `ensureChain`, which switched the user back to
     // Robinhood here — so pressing Swap on Arc silently executed on Robinhood's router instead.
-    const refusal = await chainRefusal(eth, chainId);
+    const refusal = chainRefusalFor(cw.chainId, chainId);
     if (refusal) return { success: false, error: refusal };
 
-    const viemChain = viemChainFor(chainId);
     const router = routerFor(chainId);
-    const wallet = createWalletClient({ chain: viemChain, transport: custom(eth) });
+    const { wallet, account } = cw;
     const pub = publicClient(chainId);
-    const [account] = await wallet.getAddresses();
-    if (!account) return { success: false, error: "Wallet not connected" };
 
     const amountIn = BigInt(params.amountIn || "0");
     if (amountIn <= 0n) return { success: false, error: "Enter an amount" };
@@ -1091,18 +1076,16 @@ export async function addLiquidityOneSided(params: {
 }): Promise<{ success: boolean; txHash?: string; error?: string; tickLower?: number; tickUpper?: number }> {
   const onStep = params.onStep || (() => {});
   try {
-    const eth = browserEth();
-    if (!eth) return { success: false, error: "No wallet found" };
+    const cw = await connectedWallet(robinhoodChain);
+    if (!cw) return { success: false, error: "No wallet found" };
     // LIVE_POOL_KEY / LIVE_POOL_ID below are Robinhood's pool, so this path IS Robinhood-only — and
     // that is now said out loud instead of enforced by dragging the wallet across chains. The vault's
     // Arc deposit path lives in lib/mole/vault.ts, which resolves its own chain.
-    const refusal = await chainRefusal(eth, RH_CHAIN.id);
+    const refusal = chainRefusalFor(cw.chainId, RH_CHAIN.id);
     if (refusal) return { success: false, error: refusal };
 
-    const wallet = createWalletClient({ chain: robinhoodChain, transport: custom(eth) });
+    const { wallet, account } = cw;
     const pub = publicClient(RH_CHAIN.id);
-    const [account] = await wallet.getAddresses();
-    if (!account) return { success: false, error: "Wallet not connected" };
 
     const amount = BigInt(params.amount || "0");
     if (amount <= 0n) return { success: false, error: "Enter an amount" };

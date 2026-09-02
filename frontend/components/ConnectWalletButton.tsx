@@ -4,8 +4,20 @@ import { LogOut, Copy, Check, ChevronDown, Wallet } from "lucide-react";
 import { useWallet } from "@/lib/chain/provider";
 
 export function ConnectWalletButton() {
-  const { address, isConnected, isConnecting, onRH, switchToRH, connectWith, wallets, disconnect } =
-    useWallet();
+  const {
+    address,
+    isConnected,
+    isConnecting,
+    onSupportedChain,
+    activeChain,
+    supportedChains,
+    switchTo,
+    connectWith,
+    wallets,
+    disconnect,
+  } = useWallet();
+  // Where "wrong network" sends the user: the first supported chain, which is Robinhood.
+  const home = supportedChains[0];
   const [copied, setCopied] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
@@ -109,11 +121,14 @@ export function ConnectWalletButton() {
   }
 
   // --- CONNECTED, WRONG NETWORK ---
-  if (!onRH) {
+  // "Wrong" means a chain MoleSwap has no deployment on. Arc is a supported chain: a user there used to
+  // be told to switch to Robinhood — beside a pill that said Arc ✓ — and lost the address, copy and
+  // disconnect controls for as long as they stayed where they had chosen to be.
+  if (!onSupportedChain) {
     return (
-      <button onClick={switchToRH} className="ctl primary">
+      <button onClick={() => switchTo(home.id)} className="ctl primary">
         <Wallet size={15} />
-        <span>Switch to Robinhood</span>
+        <span>Switch to {home.shortName}</span>
       </button>
     );
   }
@@ -136,7 +151,7 @@ export function ConnectWalletButton() {
           <div className="wal-drop animate-pop-in" style={{ display: "block" }}>
             <div className="wd-net">
               <span className="dot on" />
-              Robinhood Chain
+              {activeChain?.name ?? home.name}
             </div>
             <div className="wd-full">{address}</div>
 

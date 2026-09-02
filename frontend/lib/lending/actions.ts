@@ -4,7 +4,7 @@
  * Every action follows the same shape as `lib/mole/vault.ts`, deliberately, so there is one
  * pattern in this codebase rather than two:
  *
- *   1. get the injected provider, or refuse
+ *   1. get the wallet the user CONNECTED (wagmi's connector; the injected provider only as a fallback), or refuse
  *   2. ASK THE WALLET WHAT CHAIN IT IS ON and refuse on a mismatch — never force a switch
  *   3. SIMULATE, so a revert is surfaced as words before anything is signed
  *   4. send
@@ -17,8 +17,9 @@
  * `HealthFactorNotBelowThreshold` and `SelfLiquidation` all mean something specific, and a
  * simulation turns them into a sentence instead of a failed transaction the user paid for.
  */
-import { createWalletClient, createPublicClient, custom, http, type Address } from "viem";
+import { createPublicClient, http, type Address } from "viem";
 import { RH_CHAIN } from "@/lib/chain/chains";
+import { connectedWallet } from "@/lib/wallet/connectedWallet";
 import {
   LENDING,
   poolAbi,
@@ -34,11 +35,6 @@ export interface ActionResult {
   error?: string;
 }
 
-function browserEth(): any {
-  if (typeof window === "undefined") return null;
-  return (window as any).ethereum ?? null;
-}
-
 function pub() {
   const rpc =
     (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RH_RPC_URL) || RH_CHAIN.rpcUrl;
@@ -46,11 +42,8 @@ function pub() {
 }
 
 /** Refuse rather than switch: the user chose their network, and a silent switch is a surprise. */
-async function wrongChain(eth: any): Promise<string | null> {
-  let actual: number;
-  try {
-    actual = parseInt(await eth.request({ method: "eth_chainId" }), 16);
-  } catch {
+function wrongChain(actual: number | undefined): string | null {
+  if (actual === undefined) {
     return "Could not read your wallet's network. Nothing was submitted — reconnect and try again.";
   }
   if (actual === RH_CHAIN.id) return null;
@@ -77,14 +70,11 @@ type Ctx = { wallet: any; account: Address };
 
 async function connect(): Promise<Ctx | ActionResult> {
   if (!lendingAvailableOn(RH_CHAIN.id)) return { success: false, error: "Lending is not available." };
-  const eth = browserEth();
-  if (!eth) return { success: false, error: "No wallet found." };
-  const bad = await wrongChain(eth);
+  const cw = await connectedWallet(RH_CHAIN as any);
+  if (!cw) return { success: false, error: "No wallet found." };
+  const bad = wrongChain(cw.chainId);
   if (bad) return { success: false, error: bad };
-  const wallet = createWalletClient({ chain: RH_CHAIN as any, transport: custom(eth) });
-  const [account] = await wallet.getAddresses();
-  if (!account) return { success: false, error: "Wallet not connected." };
-  return { wallet, account };
+  return { wallet: cw.wallet, account: cw.account };
 }
 
 const isErr = (x: Ctx | ActionResult): x is ActionResult => "success" in x;

@@ -247,7 +247,13 @@ describe("the vault client cannot go back to being single-chain", () => {
   it("it reads its addresses through vaultChain, and does read the wallet's real network", () => {
     const src = read("lib/mole/vault.ts");
     expect(src).toMatch(/from "\.\/vaultChain"/);
-    expect(src).toMatch(/eth_chainId/);
+    // The network read moved into the shared connected-wallet helper (the signer is the wallet the user
+    // CONNECTED, not `window.ethereum`); the vault still checks the wallet's reported chain before every
+    // write, and the helper is where the chain is actually asked for.
+    expect(src).toMatch(/from "@\/lib\/wallet\/connectedWallet"/);
+    expect(src).toMatch(/walletChainMismatch\(cw\.chainId, cfg\)/);
+    expect(src).not.toMatch(/window as any\)\.ethereum/);
+    expect(read("lib/wallet/connectedWallet.ts")).toMatch(/eth_chainId/);
   });
 
   it("the vault screen resolves the chain instead of gating on onRH", () => {

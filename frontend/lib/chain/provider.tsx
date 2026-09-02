@@ -94,8 +94,13 @@ export function useChainClient() {
 
 /* ─── The hook everything uses ─────────────────────────────────────────── */
 export function useWallet() {
-  const { address: acct, isConnected, isConnecting, isReconnecting } = useAccount();
-  const chainId = useChainId();
+  const { address: acct, isConnected, isConnecting, isReconnecting, chainId: walletChainId } = useAccount();
+  const configChainId = useChainId();
+  // The chain the WALLET is on while connected. `useChainId()` only ever answers with a configured chain,
+  // so with it alone a wallet parked on Ethereum read as "Robinhood": the pill, the balances and the
+  // quote all rendered Robinhood's, and the "Switch to Robinhood" state below was unreachable code.
+  // Disconnected, the config chain (the switcher's preference) is the only sensible answer.
+  const chainId = isConnected ? (walletChainId ?? configChainId) : configChainId;
   const { connectAsync, connectors } = useConnect();
   const { disconnect } = useDisconnect();
   const { switchChainAsync } = useSwitchChain();
