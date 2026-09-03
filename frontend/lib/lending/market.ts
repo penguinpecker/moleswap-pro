@@ -35,6 +35,22 @@ export const LENDING = {
   livenessGate: "0x5514b32a41ac6d42e0f3d0a33828f1686168e40e" as Address,
 } as const;
 
+/**
+ * Which assets the lend page LEADS with.
+ *
+ * The market's product is: post a tokenised equity as collateral, borrow dollars. USDG is on this list
+ * not as a headline asset but because it is the ONLY thing that can be borrowed — a lending page with
+ * nothing borrowable is a page that cannot lend. USDe is deliberately off it: it is borrowable, listed
+ * at 75/80 with a reserve factor of ZERO and $1M caps, against roughly no liquidatable depth on this
+ * chain, so a depeg would leave unbacked debt with no first-loss buffer. Leaving it un-listed on the
+ * frontend does not delist it on chain; it stops the UI inviting deposits into the market's worst risk.
+ *
+ * WETH is off the list too — it is collateral-only and borrowing in it is disabled — but see
+ * `visibleAssets`, which always re-adds anything the connected wallet actually holds. A reserve
+ * disappearing from the page must never make somebody's funds unreachable.
+ */
+export const FOCUSED_SYMBOLS = ["NVDA", "SPY", "TSLA", "AAPL", "MSFT", "USDG"] as const;
+
 export interface LendingAsset {
   readonly symbol: string;
   readonly address: Address;
@@ -608,4 +624,25 @@ export function healthBand(hf: bigint | null): "none" | "safe" | "warn" | "dange
   if (n >= 1.5) return "safe";
   if (n >= 1.1) return "warn";
   return "danger";
+}
+
+/**
+ * The reserves the page should show, in order.
+ *
+ * The focused set, PLUS any reserve where this wallet has a supplied balance, a debt, or tokens in hand.
+ * That second half is the safety property: hiding a reserve is a presentation choice, but hiding one
+ * somebody has funds in would take away their Withdraw and Repay buttons and strand them. A user with
+ * ETH supplied keeps seeing ETH, whatever the page leads with.
+ */
+export function visibleAssets(pos: UserPosition | null): readonly LendingAsset[] {
+  const focused = new Set<string>(FOCUSED_SYMBOLS);
+  return LENDING_ASSETS.filter((a) => {
+    if (focused.has(a.symbol)) return true;
+    if (!pos) return false;
+    return (
+      (pos.supplied[a.symbol] ?? 0n) > 0n ||
+      (pos.borrowed[a.symbol] ?? 0n) > 0n ||
+      (pos.walletBalance[a.symbol] ?? 0n) > 0n
+    );
+  });
 }

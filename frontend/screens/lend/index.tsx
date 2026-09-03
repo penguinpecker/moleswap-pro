@@ -8,6 +8,7 @@ import { RH_CHAIN } from "@/lib/chain/chains";
 import {
   LENDING,
   LENDING_ASSETS,
+  visibleAssets,
   readReserves,
   readUserPosition,
   borrowPermitted,
@@ -116,6 +117,17 @@ function LendMarket() {
   }, [load]);
 
   const band = healthBand(pos?.healthFactor ?? null);
+
+  // Which reserves to render: the equity-collateral product this market leads with, plus every reserve
+  // the connected wallet holds, has supplied, or owes — so nothing anyone owns can vanish from the page.
+  const shownSymbols = useMemo(
+    () => new Set(visibleAssets(pos).map((a) => a.symbol)),
+    [pos],
+  );
+  const shownReserves = useMemo(
+    () => reserves.filter((r) => shownSymbols.has(r.symbol)),
+    [reserves, shownSymbols],
+  );
 
   /**
    * Every action routes through here so the chain guard, the busy lock and the reload live in ONE
@@ -274,8 +286,10 @@ function LendMarket() {
               </div>
             )}
 
+            {/* The focused set, plus anything this wallet actually has a stake in — see visibleAssets.
+                A reserve leaving the page must never take somebody's Withdraw button with it. */}
             {!loading &&
-              reserves.map((r) => (
+              shownReserves.map((r) => (
                 <ReserveRow
                   key={r.address}
                   r={r}
