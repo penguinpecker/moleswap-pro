@@ -9,6 +9,7 @@ import {
   LENDING,
   LENDING_ASSETS,
   visibleAssets,
+  STABLE_SYMBOLS,
   readReserves,
   readUserPosition,
   borrowPermitted,
@@ -129,6 +130,21 @@ function LendMarket() {
     [reserves, shownSymbols],
   );
 
+  // The hero sentence, built from the same list the table renders, so the two cannot disagree.
+  const { introAssets, introBorrowable } = useMemo(() => {
+    const shown = shownReserves.length ? shownReserves : LENDING_ASSETS.filter((a) => shownSymbols.has(a.symbol));
+    const equities = shown.filter((a) => !("borrowable" in a ? a.borrowable : false) && !STABLE_SYMBOLS.has(a.symbol));
+    const nonEquity = shown.filter((a) => !equities.includes(a as never)).map((a) => a.symbol);
+    // Equities FIRST: they are the product. Reading "Supply USDG … and borrow USDG against it" was
+    // accurate and told the reader nothing about what this market is for.
+    const assets = [equities.length ? "a tokenised equity" : null, ...nonEquity].filter(Boolean).join(", ");
+    const borrowable = shown.filter((a) => ("borrowable" in a ? a.borrowable : false)).map((a) => a.symbol);
+    return {
+      introAssets: assets.replace(/, ([^,]*)$/, " or $1"),
+      introBorrowable: borrowable.length ? borrowable.join(" or ") : "stablecoins",
+    };
+  }, [shownReserves, shownSymbols]);
+
   /**
    * Every action routes through here so the chain guard, the busy lock and the reload live in ONE
    * place. A per-button copy of this logic is how a surface ends up with one path that forgot the
@@ -179,8 +195,11 @@ function LendMarket() {
       <header className="hero">
         <h1>Lend &amp; borrow.</h1>
         <p className="sub">
-          Supply ETH, USDG or a tokenised equity as collateral and borrow stablecoins against it.
-          Aave v3.7, with a first-party oracle and a read-time borrow veto.
+          {/* DERIVED, not written. The previous sentence named ETH — hardcoded prose describing a list
+              that had since changed, which is the same defect the footnote below had and the third time
+              this page has drifted from what it shows. A sentence built from the asset list cannot. */}
+          Supply {introAssets} as collateral and borrow {introBorrowable} against it. Aave v3.7, with a
+          first-party oracle and a read-time borrow veto.
         </p>
         <MoleMascot />
       </header>

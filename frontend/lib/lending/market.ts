@@ -49,6 +49,9 @@ export const LENDING = {
  * `visibleAssets`, which always re-adds anything the connected wallet actually holds. A reserve
  * disappearing from the page must never make somebody's funds unreachable.
  */
+/** Dollar-denominated reserves, for copy that needs to distinguish them from the equities. */
+export const STABLE_SYMBOLS = new Set(["USDG", "USDe"]);
+
 export const FOCUSED_SYMBOLS = ["NVDA", "SPY", "TSLA", "AAPL", "MSFT", "USDG"] as const;
 
 export interface LendingAsset {

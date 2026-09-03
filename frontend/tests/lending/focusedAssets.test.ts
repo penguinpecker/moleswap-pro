@@ -104,3 +104,24 @@ describe("the risk footnote describes the table above it", () => {
     expect(src).not.toMatch(/riskBands\(reserves\)/);
   });
 });
+
+/**
+ * The hero sentence is derived too. It previously read "Supply ETH, USDG or a tokenised equity…" —
+ * hardcoded prose naming an asset the table had stopped listing. That is the THIRD time this page has
+ * drifted from what it shows (the risk copy on 2026-08-26, the footnote, then this), so the sentence is
+ * now built from the same list the table renders.
+ */
+describe("the hero sentence is built from the asset list", () => {
+  const src = readFileSync(path.resolve(__dirname, "../../screens/lend/index.tsx"), "utf8");
+
+  it("names no asset in hardcoded prose", () => {
+    expect(src).not.toMatch(/Supply ETH/);
+    expect(src).toMatch(/Supply \{introAssets\} as collateral/);
+    expect(src).toMatch(/borrow \{introBorrowable\} against it/);
+  });
+
+  it("derives both halves from the reserves actually shown", () => {
+    expect(src).toMatch(/introAssets/);
+    expect(src).toMatch(/shownReserves/);
+  });
+});
