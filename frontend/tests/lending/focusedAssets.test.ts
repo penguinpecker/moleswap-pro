@@ -88,3 +88,19 @@ describe("nothing anyone owns is ever hidden", () => {
     }
   });
 });
+
+/**
+ * The explanatory footnote under the table is DERIVED from the rows shown. It previously read the full
+ * on-chain reserve list, so after the page narrowed to six assets it still explained the risk of ETH and
+ * USDe beneath a table containing neither.
+ */
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+describe("the risk footnote describes the table above it", () => {
+  it("is built from the reserves actually rendered", () => {
+    const src = readFileSync(path.resolve(__dirname, "../../screens/lend/index.tsx"), "utf8");
+    expect(src).toMatch(/riskBands\(shownReserves\)/);
+    expect(src).not.toMatch(/riskBands\(reserves\)/);
+  });
+});

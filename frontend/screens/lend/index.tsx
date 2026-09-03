@@ -311,7 +311,11 @@ function LendMarket() {
           <p className="lend-note" style={{ marginTop: 18 }}>
             Only the stablecoins can be borrowed; everything marked{" "}
             <em>collateral only</em> can be supplied and borrowed against, never borrowed.{" "}
-            {riskBands(reserves).map((b) => (
+            {/* Derived from what is ON THE PAGE, not from every reserve on chain. Reading the full list
+                here left the footnote explaining the risk of ETH and USDe under a table that shows
+                neither — the same class of stale prose the 08-26 fix removed by deriving from live data
+                rather than restating it. */}
+            {riskBands(shownReserves).map((b) => (
               <span key={b.key}>
                 {b.symbols} — ${b.ltv} of borrowing per $100 supplied, liquidated at {b.threshold}%.{" "}
               </span>
